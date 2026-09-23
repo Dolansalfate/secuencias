@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configurar (debug)",
+      "type": "shell",
+      "command": "cmake --preset debug",
+      "problemMatcher": []
+    },
+    {
+      "label": "Compilar (debug)",
+      "type": "shell",
+      "command": "cmake --build --preset debug",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Compilar (release)",
+      "type": "shell",
+      "command": "cmake --preset release && cmake --build --preset release",
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Tests",
+      "type": "shell",
+      "command": "cmake --build --preset tests && ctest --preset debug",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Ejecutar (debug, JACK vía PipeWire)",
+      "type": "shell",
+      "command": "pw-jack ./build/debug/Secuencias_artefacts/Debug/Secuencias",
+      "dependsOn": "Compilar (debug)",
+      "problemMatcher": []
+    },
+    {
+      "label": "Instalar en el sistema (release)",
+      "type": "shell",
+      "command": "./install.sh",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(ctest:*)",
+      "Bash(ninja:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf ~/Music/Secuencias*)",
+      "Bash(rm -rf ~/Música/Secuencias*)"
+    ]
+  }
+}

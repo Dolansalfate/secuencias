@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Depurar Secuencias",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/Secuencias_artefacts/Debug/Secuencias",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "Compilar (debug)",
+      "setupCommands": [
+        { "description": "Pretty printing", "text": "-enable-pretty-printing", "ignoreFailures": true },
+        { "description": "No detenerse en señales de audio", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+      ]
+    },
+    {
+      "name": "Depurar Secuencias (JACK vía PipeWire)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/Secuencias_artefacts/Debug/Secuencias",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "Compilar (debug)",
+      "environment": [
+        { "name": "LD_LIBRARY_PATH", "value": "/usr/lib/x86_64-linux-gnu/pipewire-0.3/jack" }
+      ],
+      "setupCommands": [
+        { "description": "Pretty printing", "text": "-enable-pretty-printing", "ignoreFailures": true }
+      ]
+    },
+    {
+      "name": "Depurar tests",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/SecuenciasTests_artefacts/Debug/SecuenciasTests",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "preLaunchTask": "Tests",
+      "setupCommands": [
+        { "description": "Pretty printing", "text": "-enable-pretty-printing", "ignoreFailures": true }
+      ]
+    }
+  ]
+}

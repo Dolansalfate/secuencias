@@ -1,0 +1,11 @@
+# Estilo parecido al de JUCE: llaves en línea propia, espacio antes de paréntesis
+BasedOnStyle: WebKit
+ColumnLimit: 120
+IndentWidth: 4
+BreakBeforeBraces: Allman
+SpaceBeforeParens: Always
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+PointerAlignment: Left
+NamespaceIndentation: All
+SortIncludes: false

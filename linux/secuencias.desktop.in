@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Secuencias
+GenericName=Lanzador de secuencias
+Comment=Secuencias en vivo con separación de pistas por IA
+Exec=@EXEC@
+Icon=secuencias
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=secuencias;stems;multitrack;demucs;click;
+StartupWMClass=Secuencias
