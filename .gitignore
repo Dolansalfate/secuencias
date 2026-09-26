@@ -5,3 +5,4 @@ compile_commands.json
 *.swp
 .DS_Store
 .claude/settings.local.json
+dist/

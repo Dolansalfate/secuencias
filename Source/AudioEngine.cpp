@@ -1,12 +1,60 @@
 #include "AudioEngine.h"
 #include <cmath>
+#include <limits>
+#include <algorithm>
 
 static constexpr int maxChunk = 2048;
+
+//==============================================================================
+WaveformCache WaveformCache::build (const juce::AudioBuffer<float>& b)
+{
+    WaveformCache c;
+    const int n = b.getNumSamples();
+    const int bins = (n + binSize - 1) / binSize;
+    c.minL.resize ((size_t) bins); c.maxL.resize ((size_t) bins);
+    c.minR.resize ((size_t) bins); c.maxR.resize ((size_t) bins);
+    const float* l = b.getReadPointer (0);
+    const float* r = b.getNumChannels() > 1 ? b.getReadPointer (1) : l;
+    for (int i = 0; i < bins; ++i)
+    {
+        const int start = i * binSize, end = juce::jmin (n, start + binSize);
+        auto rl = juce::FloatVectorOperations::findMinAndMax (l + start, end - start);
+        auto rr = juce::FloatVectorOperations::findMinAndMax (r + start, end - start);
+        c.minL[(size_t) i] = rl.getStart(); c.maxL[(size_t) i] = rl.getEnd();
+        c.minR[(size_t) i] = rr.getStart(); c.maxR[(size_t) i] = rr.getEnd();
+        c.peak = juce::jmax (c.peak, juce::jmax (std::abs (rl.getStart()), std::abs (rl.getEnd())),
+                                      juce::jmax (std::abs (rr.getStart()), std::abs (rr.getEnd())));
+    }
+    return c;
+}
+
+bool WaveformCache::rangeMinMax (juce::int64 from, juce::int64 to, float& mnL, float& mxL, float& mnR, float& mxR) const
+{
+    const auto bins = (juce::int64) numBins();
+    auto b0 = juce::jmax ((juce::int64) 0, from / binSize);
+    auto b1 = juce::jmin (bins - 1, (juce::jmax (from, to - 1)) / binSize);
+    if (bins == 0 || b0 >= bins || b1 < 0 || to <= from)
+        return false;
+    mnL = 1.0f; mxL = -1.0f; mnR = 1.0f; mxR = -1.0f;
+    for (auto b = b0; b <= b1; ++b)
+    {
+        mnL = juce::jmin (mnL, minL[(size_t) b]); mxL = juce::jmax (mxL, maxL[(size_t) b]);
+        mnR = juce::jmin (mnR, minR[(size_t) b]); mxR = juce::jmax (mxR, maxR[(size_t) b]);
+    }
+    return true;
+}
+
+//==============================================================================
 
 AudioEngine::AudioEngine()
 {
     positions.resize (maxChunk);
     envelope.resize (maxChunk);
+    positions2.resize (maxChunk);
+    xfadeOut.resize (maxChunk);
+    xfadeIn.resize (maxChunk);
+    levelGain.resize (maxChunk);
+    levelSegment.resize (maxChunk);
 }
 
 std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double sr,
@@ -39,7 +87,7 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
         track->gain = stem.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (stem.gainDb);
         track->smoothedGain = track->gain.load();
         track->muted = stem.muted;
-        track->outputPair = stem.outputPair;
+        track->outputPair = juce::jmax (0, stem.outputPair);
 
         if (std::abs (reader->sampleRate - sr) < 1.0)
         {
@@ -64,25 +112,54 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
 
     // Todas las pistas con el mismo largo, así el audio nunca lee fuera del buffer
     for (auto& t : song->tracks)
+    {
         t->buffer.setSize (2, (int) song->length, true, true, false);
+        t->waveform = WaveformCache::build (t->buffer);
+    }
 
     return song;
+}
+
+void AudioEngine::setBeatGrid (std::shared_ptr<const BeatGrid> grid)
+{
+    std::shared_ptr<const BeatGrid> old;
+    {
+        const juce::SpinLock::ScopedLockType sl (songLock);
+        old = std::move (beatGrid);
+        beatGrid = std::move (grid);
+    }
+    // "old" se libera fuera del lock
+}
+
+void AudioEngine::setGainCurve (std::shared_ptr<const GainCurve> curve)
+{
+    std::shared_ptr<const GainCurve> old;
+    {
+        const juce::SpinLock::ScopedLockType sl (songLock);
+        old = std::move (gainCurve);
+        gainCurve = std::move (curve);
+    }
 }
 
 void AudioEngine::setSong (std::shared_ptr<LoadedSong> newSong)
 {
     std::shared_ptr<LoadedSong> old;
+    std::shared_ptr<const BeatGrid> oldGrid;
+    std::shared_ptr<const GainCurve> oldCurve;
     {
         const juce::SpinLock::ScopedLockType sl (songLock);
         old = std::move (song);
+        oldGrid = std::move (beatGrid);
+        oldCurve = std::move (gainCurve);
+        levelSmooth = 1.0f;
         song = std::move (newSong);
         songLength = song != nullptr ? song->length : 0;
         position = 0;
         pendingSeek = -1;
         playing = false;
-        loopStart = 0;
-        loopEnd = 0;
+        loopRange = 0;
         fade = 0.0f;
+        currentFade = 0.0f;
     }
     // "old" se libera aquí, fuera del lock y fuera del hilo de audio
 }
@@ -123,14 +200,15 @@ double AudioEngine::getLengthSeconds() const
 void AudioEngine::setLoop (double startSeconds, double endSeconds)
 {
     const double sr = sampleRate.load();
-    loopStart = (juce::int64) (startSeconds * sr);
-    loopEnd = (juce::int64) (endSeconds * sr);
+    const auto maxPos = (double) std::numeric_limits<juce::uint32>::max();
+    const auto s = (juce::uint64) juce::jlimit (0.0, maxPos, startSeconds * sr);
+    const auto e = (juce::uint64) juce::jlimit (0.0, maxPos, endSeconds * sr);
+    loopRange = (s << 32) | e;
 }
 
 void AudioEngine::clearLoop()
 {
-    loopStart = 0;
-    loopEnd = 0;
+    loopRange = 0;
 }
 
 void AudioEngine::setClick (bool enabled, double bpm, double offsetSeconds, float gainDb, int outputPair)
@@ -138,7 +216,7 @@ void AudioEngine::setClick (bool enabled, double bpm, double offsetSeconds, floa
     clickBpm = juce::jlimit (20.0, 400.0, bpm);
     clickOffset = juce::jmax (0.0, offsetSeconds);
     clickGain = juce::Decibels::decibelsToGain (gainDb);
-    clickPair = outputPair;
+    clickPair = juce::jmax (0, outputPair);
     clickOn = enabled;
 }
 
@@ -153,9 +231,38 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         needsReload = true;
 }
 
+void AudioEngine::audioDeviceError (const juce::String& errorMessage)
+{
+    // Lo llama JUCE fuera del callback de audio (por ejemplo cuando JACK se cierra)
+    {
+        const juce::ScopedLock sl (errorLock);
+        deviceError = errorMessage;
+    }
+    deviceErrorPending = true;
+}
+
+float AudioEngine::takeOutputPeak (int channel)
+{
+    return juce::isPositiveAndBelow (channel, maxMeteredOutputs) ? outputPeak[channel].exchange (0.0f) : 0.0f;
+}
+
+float AudioEngine::getOutputRms (int channel) const
+{
+    return juce::isPositiveAndBelow (channel, maxMeteredOutputs) ? outputRms[channel].load() : 0.0f;
+}
+
+bool AudioEngine::takeDeviceError (juce::String& message)
+{
+    if (! deviceErrorPending.exchange (false))
+        return false;
+    const juce::ScopedLock sl (errorLock);
+    message = deviceError;
+    return true;
+}
+
 void AudioEngine::outputPairChannels (int pair, int numOuts, int& left, int& right)
 {
-    left = pair * 2;
+    left = pair < 0 ? 0 : pair * 2;
     right = left + 1;
     if (right >= numOuts)
     {
@@ -185,19 +292,69 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const*, int,
         renderChunk (*song, outputs, numOuts, done, n);
         done += n;
     }
+
+    applyMasterAndMeter (outputs, numOuts, numSamples);
+}
+
+void AudioEngine::applyMasterAndMeter (float* const* outputs, int numOuts, int numSamples)
+{
+    const float target = masterGain.load() * songGain.load();
+    const float step = (target - smoothedMaster) / (float) juce::jmax (1, numSamples);
+    for (int ch = 0; ch < numOuts; ++ch)
+    {
+        float* out = outputs[ch];
+        if (out == nullptr)
+            continue;
+        float g = smoothedMaster, peak = 0.0f, sum = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            g += step;
+            out[i] *= g;
+            const float a = std::abs (out[i]);
+            peak = juce::jmax (peak, a);
+            sum += a * a;
+        }
+        if (ch < maxMeteredOutputs)
+        {
+            if (peak > outputPeak[ch].load())
+                outputPeak[ch] = peak;
+            outputRms[ch] = std::sqrt (sum / (float) juce::jmax (1, numSamples));
+        }
+    }
+    smoothedMaster = target;
 }
 
 void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts, int offset, int n)
 {
     const bool wantPlay = playing.load();
     auto pending = pendingSeek.load();
-    const auto ls = loopStart.load(), le = loopEnd.load();
-    const float fadeStep = 1.0f / 256.0f;
+    const auto range = loopRange.load();
+    const auto ls = (juce::int64) (range >> 32), le = (juce::int64) (range & 0xffffffffu);
+    const bool looping = le > ls;
+    // Crossfade al cerrar el loop: el final de la región se funde con lo que precede a su inicio
+    const auto xfLen = looping ? juce::jmin ((juce::int64) fadeSamples, (le - ls) / 2) : (juce::int64) 0;
+    const float fadeStep = 1.0f / (float) fadeSamples;
     auto pos = position.load();
+    const GainCurve* curve = (gainCurve != nullptr && ! gainCurve->positions.empty()) ? gainCurve.get() : nullptr;
+    const float levelCoeff = 1.0f / (0.05f * (float) sampleRate.load());   // rampa de ~50 ms
 
     // 1) Posición y envolvente de cada muestra (fundidos al arrancar, parar y saltar)
     for (int i = 0; i < n; ++i)
     {
+        // Ganancia de nivelado del tramo en el que cae esta muestra (escalón suavizado)
+        float levelTarget = 1.0f;
+        int segment = 0;
+        if (curve != nullptr)
+        {
+            auto it = std::upper_bound (curve->positions.begin(), curve->positions.end(), pos);
+            const auto idx = it == curve->positions.begin() ? 0 : (size_t) (it - curve->positions.begin()) - 1;
+            levelTarget = curve->gains[idx];
+            segment = (int) idx;
+        }
+        levelSmooth += (levelTarget - levelSmooth) * levelCoeff;
+        levelGain[(size_t) i] = levelSmooth;
+        levelSegment[(size_t) i] = segment;
+
         const bool audible = wantPlay && pending < 0;
         fade = audible ? juce::jmin (1.0f, fade + fadeStep) : juce::jmax (0.0f, fade - fadeStep);
 
@@ -208,12 +365,36 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             pending = -1;
         }
 
+        positions2[(size_t) i] = -1;
+        xfadeOut[(size_t) i] = 1.0f;
+        xfadeIn[(size_t) i] = 0.0f;
+
         if (fade > 0.0f && pos < s.length)
         {
             positions[(size_t) i] = pos;
-            envelope[(size_t) i] = fade;
+            float env = fade;
+
+            if (looping)
+            {
+                if (xfLen > 0 && pos >= le - xfLen)
+                {
+                    // t va de casi 0 a 1 en las últimas xfLen muestras; al llegar a 1 ya suena
+                    // la muestra anterior al inicio del loop, así que el salto a ls es continuo.
+                    const float t = (float) (pos - (le - xfLen) + 1) / (float) xfLen;
+                    xfadeOut[(size_t) i] = std::cos (t * juce::MathConstants<float>::halfPi);
+                    xfadeIn[(size_t) i] = std::sin (t * juce::MathConstants<float>::halfPi);
+                    const auto pre = pos - (le - ls);
+                    positions2[(size_t) i] = pre >= 0 ? pre : -1;   // sin pre-roll si el loop empieza en 0
+                }
+            }
+            else if (s.length - pos <= (juce::int64) fadeSamples)
+            {
+                env *= (float) (s.length - pos) / (float) fadeSamples;   // fundido al final de la canción
+            }
+
+            envelope[(size_t) i] = env;
             ++pos;
-            if (le > ls && pos >= le)
+            if (looping && pos >= le)
                 pos = ls;
         }
         else
@@ -226,6 +407,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
     if (pos >= s.length && wantPlay)
         playing = false;   // fin de la canción
     position = pos;
+    currentFade = fade;
 
     // 2) Mezcla de pistas
     bool anySolo = false;
@@ -248,16 +430,51 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
         const float* inR = t->buffer.getReadPointer (1);
         float g = t->smoothedGain;
         const float gStep = (target - g) / (float) n;
-        float peak = 0.0f;
+        float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;
+
+        if (g <= 0.0f && target <= 0.0f)
+        {
+            t->smoothedGain = 0.0f;   // pista en silencio: no hay nada que mezclar
+            t->rmsL = 0.0f;
+            t->rmsR = 0.0f;
+            continue;
+        }
+
+        // Nivelado por pista: la curva de este stem (si la hay), suavizada con su propio estado
+        const std::vector<float>* trackCurve = nullptr;
+        if (curve != nullptr && t->stemIndex >= 0 && t->stemIndex < (int) curve->trackGains.size()
+            && ! curve->trackGains[(size_t) t->stemIndex].empty())
+            trackCurve = &curve->trackGains[(size_t) t->stemIndex];
+        float tl = t->levelSmooth;
 
         for (int i = 0; i < n; ++i)
         {
             g += gStep;
+            if (trackCurve != nullptr)
+            {
+                const auto seg = (size_t) juce::jmin (levelSegment[(size_t) i], (int) trackCurve->size() - 1);
+                tl += ((*trackCurve)[seg] - tl) * levelCoeff;
+            }
+            else
+                tl += (1.0f - tl) * levelCoeff;
             const auto p = positions[(size_t) i];
             if (p < 0)
                 continue;
-            const float e = envelope[(size_t) i] * g;
-            const float sl = inL[p] * e, sr = inR[p] * e;
+            const float e = envelope[(size_t) i] * g * levelGain[(size_t) i] * tl;
+            float sl = inL[p], sr = inR[p];
+            const auto p2 = positions2[(size_t) i];
+            if (p2 >= 0)
+            {
+                sl = sl * xfadeOut[(size_t) i] + inL[p2] * xfadeIn[(size_t) i];
+                sr = sr * xfadeOut[(size_t) i] + inR[p2] * xfadeIn[(size_t) i];
+            }
+            else
+            {
+                sl *= xfadeOut[(size_t) i];
+                sr *= xfadeOut[(size_t) i];
+            }
+            sl *= e;
+            sr *= e;
             if (outL == outR)
                 outL[offset + i] += 0.5f * (sl + sr);
             else
@@ -265,12 +482,18 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 outL[offset + i] += sl;
                 outR[offset + i] += sr;
             }
-            peak = juce::jmax (peak, std::abs (sl), std::abs (sr));
+            peakL = juce::jmax (peakL, std::abs (sl));
+            peakR = juce::jmax (peakR, std::abs (sr));
+            sumL += sl * sl;
+            sumR += sr * sr;
         }
 
         t->smoothedGain = target;
-        if (peak > t->meter.load())
-            t->meter = peak;
+        t->levelSmooth = tl;
+        if (peakL > t->peakL.load()) t->peakL = peakL;
+        if (peakR > t->peakR.load()) t->peakR = peakR;
+        t->rmsL = std::sqrt (sumL / (float) n);
+        t->rmsR = std::sqrt (sumR / (float) n);
     }
 
     // 3) Click (metrónomo) generado
@@ -287,6 +510,8 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
         float* outL = outputs[l];
         float* outR = outputs[r];
 
+        const BeatGrid* grid = (beatGrid != nullptr && ! beatGrid->positions.empty()) ? beatGrid.get() : nullptr;
+
         if (outL != nullptr && outR != nullptr)
         {
             for (int i = 0; i < n; ++i)
@@ -294,15 +519,30 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 const auto p = positions[(size_t) i];
                 if (p < 0)
                     continue;
-                const double rel = (double) p - off;
-                if (rel < 0.0)
-                    continue;
-                const double beat = std::floor (rel / spb);
-                const double phase = rel - beat * spb;
+                double phase;
+                bool accent;
+                if (grid != nullptr)
+                {
+                    // Último tiempo detectado en o antes de p (búsqueda binaria, sin memoria dinámica)
+                    auto it = std::upper_bound (grid->positions.begin(), grid->positions.end(), p);
+                    if (it == grid->positions.begin())
+                        continue;
+                    const auto idx = (size_t) (it - grid->positions.begin()) - 1;
+                    phase = (double) (p - grid->positions[idx]);
+                    accent = grid->beatInBar[idx] == 1;
+                }
+                else
+                {
+                    const double rel = (double) p - off;
+                    if (rel < 0.0)
+                        continue;
+                    const double beat = std::floor (rel / spb);
+                    phase = rel - beat * spb;
+                    accent = ((juce::int64) beat % 4) == 0;
+                }
                 if (phase >= clickLen)
                     continue;
 
-                const bool accent = ((juce::int64) beat % 4) == 0;
                 const double freq = accent ? 1600.0 : 1000.0;
                 const float v = (float) (std::sin (juce::MathConstants<double>::twoPi * freq * phase / sr)
                                          * std::exp (-phase / (0.008 * sr)))

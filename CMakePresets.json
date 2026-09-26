@@ -28,11 +28,22 @@
         "CMAKE_BUILD_TYPE": "Release",
         "SECUENCIAS_BUILD_TESTS": "OFF"
       }
+    },
+    {
+      "name": "release-mac",
+      "displayName": "Release macOS (universal: chips Apple e Intel)",
+      "inherits": "release",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
+    { "name": "release-mac", "configurePreset": "release-mac" },
     { "name": "tests", "configurePreset": "debug", "targets": [ "SecuenciasTests" ] }
   ],
   "testPresets": [

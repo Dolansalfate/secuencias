@@ -17,8 +17,9 @@ else
     BIN="$REL"
 fi
 
-mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps ~/.local/share/secuencias
 install -m 755 "$BIN" ~/.local/bin/secuencias
+install -m 755 scripts/instalar-ia.sh ~/.local/share/secuencias/instalar-ia.sh   # Ajustes IA > Instalar motores de IA
 install -m 644 linux/secuencias.svg ~/.local/share/icons/hicolor/scalable/apps/secuencias.svg
 
 EXEC="$HOME/.local/bin/secuencias"
