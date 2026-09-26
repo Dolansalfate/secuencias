@@ -73,7 +73,7 @@ void StageView::paint (juce::Graphics& g)
     }
 
     // --- Centro: acorde actual (enorme) y siguiente ---
-    auto centre = area.withTrimmedTop ((int) (H * 0.15f)).withTrimmedBottom ((int) (H * 0.32f));
+    auto centre = area.withTrimmedTop ((int) (H * 0.15f)).withTrimmedBottom ((int) (H * 0.43f));
     if (! state.hasAnalysis)
     {
         g.setColour (dim);
@@ -85,7 +85,7 @@ void StageView::paint (juce::Graphics& g)
         const bool hasNext = state.nextChord.isNotEmpty();
         auto nowArea = hasNext ? centre.removeFromLeft ((int) (W * 0.58f)) : centre;
         g.setColour (state.playing ? juce::Colours::white : juce::Colours::white.withAlpha (0.55f));
-        g.setFont (ui::font (unit * 4.2f, true));
+        g.setFont (ui::font (unit * 3.6f, true));
         g.drawText (state.chord.isEmpty() ? "-" : state.chord, nowArea, juce::Justification::centred, true);
         if (hasNext)
         {
@@ -95,8 +95,30 @@ void StageView::paint (juce::Graphics& g)
             g.setFont (ui::font (unit * 0.6f));
             g.drawText (tr ("SIGUIENTE"), label, juce::Justification::centred);
             g.setColour (ui::accent);
-            g.setFont (ui::font (unit * 2.4f, true));
+            g.setFont (ui::font (unit * 2.2f, true));
             g.drawText (state.nextChord, nextArea, juce::Justification::centred, true);
+        }
+    }
+
+    // --- Nota de texto: letrero amarillo mientras dura; antes de empezar, aviso tenue de la próxima ---
+    if (state.note.isNotEmpty() || state.nextNote.isNotEmpty())
+    {
+        const auto yellow = juce::Colour (0xffffd54f);
+        auto band = area.withTop ((int) (H * 0.57f)).withBottom ((int) (H * 0.67f)).reduced ((int) (unit * 0.5f), 0);
+        if (state.note.isNotEmpty())
+        {
+            g.setColour (yellow);
+            g.fillRoundedRectangle (band.toFloat(), unit * 0.25f);
+            g.setColour (juce::Colours::black);
+            g.setFont (ui::font (unit * 0.9f, true));
+            g.drawFittedText (state.note, band.reduced ((int) (unit * 0.4f), 2), juce::Justification::centred, 2, 0.7f);
+        }
+        else
+        {
+            g.setColour (yellow.withAlpha (0.65f));
+            g.setFont (ui::font (unit * 0.6f));
+            g.drawFittedText (tr ("Próxima nota") + (state.nextNoteIn >= 0.0 ? juce::String::formatted (" (en %.0f s)", state.nextNoteIn) : juce::String())
+                                  + ": " + state.nextNote, band, juce::Justification::centred, 2, 0.7f);
         }
     }
 

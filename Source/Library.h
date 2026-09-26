@@ -39,6 +39,14 @@ struct Clip
     double end() const    { return position + length(); }
 };
 
+// Nota de texto anclada a un instante de la canción: se muestra en la guía de escenario
+struct SongNote
+{
+    double seconds = 0.0;     // línea de tiempo de la canción
+    double duration = 6.0;    // segundos visible (0 = hasta la siguiente nota o el final)
+    juce::String text;
+};
+
 struct StemInfo
 {
     juce::String name;       // nombre visible
@@ -129,10 +137,12 @@ struct SongInfo
     Analysis analysis;
     std::vector<TempoRegion> tempoRegions;   // ordenadas; vacío = un solo tramo con el tempo del análisis o del click
     std::vector<Clip> clips;                 // arreglo del audio; vacío = el audio original entero
+    std::vector<SongNote> notes;             // notas de texto, ordenadas por tiempo
     std::vector<SongMarker> markers;  // siempre ordenados por tiempo
     std::vector<StemInfo> stems;
 
     void sortMarkers();
+    void sortNotes();
     void fitStemArrays();         // deja los vectores por stem del tamaño de `stems` (0 dB, sin medir)
     void sortTempoRegions();      // ordena y deja la primera en 0
     void mergeEqualTempoRegions();   // une secciones vecinas con el mismo tempo original y de reproducción

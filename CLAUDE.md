@@ -66,6 +66,13 @@ modelo que usa Moises).
   alimenta el Timer (`updateStage`, con `currentChords` y `barAndBeat`: del análisis o de la
   rejilla fija). Doble clic o F11 en esa ventana = pantalla completa (kiosk); el resto de
   teclas (pedal) se reenvían a la ventana principal. Su posición se guarda (`stageWindow`).
+- **Notas de texto** ("+ Nota" o tecla N en el cabezal; clic derecho en la fila de notas de la
+  regla para añadir, editar, mover o eliminar): texto libre anclado a un instante de la
+  canción (ajustado al tiempo detectado más cercano) con una duración en segundos (0 = hasta
+  la siguiente nota). En la regla son banderitas amarillas con el texto; en la guía de
+  escenario, un letrero amarillo grande mientras dura y, hasta 12 s antes, "Próxima nota (en
+  N s): ...". Se guardan en `song.json` (`notes`), se mueven o recortan con la grilla
+  (`shiftGrid`) y Ctrl+Z las deshace.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -377,6 +384,8 @@ Secuencias/
   dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. Todo lo demás
   (tiempos, acordes, marcadores, secciones de tempo, nivelado) está en la línea de tiempo de
   la canción, no en la del audio original.
+- Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
+  (`SongNote`, ordenadas por `sortNotes`; las de texto vacío no se guardan).
 - Escritura y tonalidad: `spelling` (0 = según la tonalidad, 1 = sostenidos, 2 = bemoles) y
   `keyOverride` (tonalidad elegida a mano, canónica como madmom: "Eb major"; vacío = la
   detectada).
@@ -579,7 +588,8 @@ Pasos de `run()`:
 - `TimelineView` no toca el motor: el Timer le pasa posición, estado y loop (`setPosition`,
   `setPlaying`, `setLoop`) y ella avisa con `onSeek`, `onMarkerClicked`, `onMarkerMoved`,
   `onTempoBandClicked`, `onBeatClicked` (clic derecho sobre un tiempo detectado en la fila
-  de compases), `onChordClicked` (clic derecho en la fila de acordes), `onLaneMenu` (clic
+  de compases), `onChordClicked` (clic derecho en la fila de acordes), `onNoteClicked` (clic
+  derecho en la fila de notas), `onLaneMenu` (clic
   derecho sobre un carril), `onClipDragged` (Shift + arrastre sobre un carril), `onMute`,
   `onSolo`. `setClips` recibe los tramos en tiempo de reproducción; la capa `Overlay` dibuja
   sus bordes, los huecos y el tramo que se está arrastrando. La regla (`Ruler`, 82 px) tiene filas de marcadores,
@@ -725,6 +735,8 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.7**: notas de texto (`SongNote`, `notes` en `song.json`, fila de notas de 96 px en la
+  regla, `editNote` con editor multilínea, `activeNote` y letrero en la guía de escenario).
 - **v0.3.6**: tono por sección (`TempoRegion::transpose`, `TempoSegment::transpose`,
   `effectiveTranspose`, `setTransposeSemitones` por bloque en el stretcher, menú de la banda).
 - **v0.3.5**: guía de escenario (`StageView`, `StageWindow`, botón "Pantalla", F12,

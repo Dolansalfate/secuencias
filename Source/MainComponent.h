@@ -107,6 +107,11 @@ private:
     void sectionAt (double seconds, double& start, double& end, juce::String& name) const;
     void jumpToMarker (int index);
     void addMarkerHere();
+    // Notas de texto (guía de escenario)
+    void addNoteHere();
+    void editNote (int index, double songSeconds);      // index -1 = nueva en songSeconds
+    void noteMenu (int index, double playbackSeconds);
+    void activeNote (double playbackSeconds, juce::String& now, juce::String& next, double& nextIn) const;
     void markerMenu (int index);
     void tempoBandMenu (int index, double playbackSeconds);   // menú de una sección de tempo (fila de la regla)
     void chordMenu (int index, double playbackSeconds);       // menú de un acorde de la regla (-1 = hueco)
@@ -250,7 +255,7 @@ private:
     juce::ToggleButton loopBtn;
     juce::Slider positionSlider;
 
-    juce::TextButton addMarkerBtn;
+    juce::TextButton addMarkerBtn, addNoteBtn;
     juce::ComboBox cutModeBox;                 // modo de corte y de encaje al mover tramos
     juce::OwnedArray<MarkerButton> markerButtons;
 

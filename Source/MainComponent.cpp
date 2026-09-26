@@ -147,6 +147,9 @@ MainComponent::MainComponent()
 
     addMarkerBtn.setButtonText ("+ Marcador");
     addMarkerBtn.onClick = [this] { addMarkerHere(); };
+    addNoteBtn.setButtonText ("+ Nota");
+    addNoteBtn.onClick = [this] { addNoteHere(); };
+    addAndMakeVisible (addNoteBtn);
     cutModeBox.addItem ("Corte libre", 1);
     cutModeBox.addItem ("Corte a la rejilla", 2);
     cutModeBox.addItem ("Corte a la transiente", 3);
@@ -304,6 +307,7 @@ MainComponent::MainComponent()
     timeline.onSeek = [this] (double t) { engine.seekSeconds (t); updateLoopRegion(); };
     timeline.onTempoBandClicked = [this] (int index, double t) { tempoBandMenu (index, t); };
     timeline.onBeatClicked = [this] (int index) { beatMenu (index); };
+    timeline.onNoteClicked = [this] (int index, double t) { noteMenu (index, t); };
     timeline.onChordClicked = [this] (int index, double t) { chordMenu (index, t); };
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
@@ -505,6 +509,8 @@ void MainComponent::resized()
     auto markerRow = r.removeFromTop (markerH);
     addMarkerBtn.setBounds (markerRow.removeFromLeft (110));
     markerRow.removeFromLeft (8);
+    addNoteBtn.setBounds (markerRow.removeFromLeft (80));
+    markerRow.removeFromLeft (8);
     cutModeBox.setVisible (! liveMode);
     if (! liveMode)
     {
@@ -602,6 +608,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     {
         const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
         if (c == 'm')      addMarkerHere();
+        else if (c == 'n') addNoteHere();
         else if (c == 'l') { loopBtn.setToggleState (! loopBtn.getToggleState(), juce::dontSendNotification); updateLoopRegion(); }
         else               handled = false;
     }
@@ -1040,12 +1047,17 @@ void MainComponent::syncTimelineMarkers()
         timeline.setLevelingEnabled (info->levelingEnabled);
         timeline.setTempoBands (mappedTempoBands());
         timeline.setClips (mappedClips());
+        std::vector<TimelineView::NoteView> notes;
+        for (auto& n : info->notes)
+            notes.push_back ({ timeMap.toPlayback (n.seconds), n.text });
+        timeline.setNotes (notes);
     }
     else
     {
         timeline.setMarkers ({}, 120.0, 0.0);
         timeline.setTempoBands ({});
         timeline.setClips ({});
+        timeline.setNotes ({});
     }
 }
 
@@ -1408,6 +1420,162 @@ void MainComponent::addMarkerHere()
     library.saveSong (*info);
     rebuildMarkers();
     remeasureIfLeveling();
+}
+
+void MainComponent::activeNote (double pos, juce::String& now, juce::String& next, double& nextIn) const
+{
+    now = next = {};
+    nextIn = -1.0;
+    if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
+        return;
+    const auto& notes = library.songs[(size_t) currentIndex].notes;
+    const double orig = timeMap.toOriginal (pos);
+    for (size_t i = 0; i < notes.size(); ++i)
+    {
+        const auto& n = notes[i];
+        if (n.seconds <= orig + 1.0e-6)
+        {
+            const double end = n.duration > 0.0 ? n.seconds + n.duration
+                                                : (i + 1 < notes.size() ? notes[i + 1].seconds : 1.0e9);
+            now = orig < end ? n.text : juce::String();
+        }
+        else
+        {
+            const double in = timeMap.toPlayback (n.seconds) - pos;
+            if (in <= 12.0)   // aviso con hasta 12 s de anticipación
+            {
+                next = n.text;
+                nextIn = juce::jmax (0.0, in);
+            }
+            break;
+        }
+    }
+}
+
+void MainComponent::addNoteHere()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr)
+        return;
+    double t = timeMap.toOriginal (engine.getPositionSeconds());
+    if (const int nb = info->analysis.nearestBeat (t, 0.25); nb >= 0)
+        t = info->analysis.beats[(size_t) nb].seconds;   // al tiempo más cercano
+    editNote (-1, t);
+}
+
+void MainComponent::editNote (int index, double songSeconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr)
+        return;
+    const bool editing = juce::isPositiveAndBelow (index, (int) info->notes.size());
+    const auto initialText = editing ? info->notes[(size_t) index].text : juce::String();
+    const double initialDuration = editing ? info->notes[(size_t) index].duration : 6.0;
+    const double at = editing ? info->notes[(size_t) index].seconds : songSeconds;
+
+    int bar = 0, beat = 0, beatsInBar = 4;
+    double progress = 0.0;
+    barAndBeat (timeMap.toPlayback (at), bar, beat, beatsInBar, progress);
+    juce::String where = formatTime (timeMap.toPlayback (at));
+    if (bar > 0)
+        where += tr (" (compás ") + juce::String (bar) + ", " + tr ("tiempo ") + juce::String (beat) + ")";
+
+    auto* w = new juce::AlertWindow (editing ? tr ("Editar nota en ") + where : tr ("Nota en ") + where,
+                                     tr ("Se mostrará en la guía de escenario cuando llegue ese momento."), juce::MessageBoxIconType::NoIcon, this);
+    auto editor = std::make_shared<juce::TextEditor>();
+    editor->setMultiLine (true, true);
+    editor->setReturnKeyStartsNewLine (true);
+    editor->setText (initialText);
+    editor->setSize (420, 90);
+    w->addCustomComponent (editor.get());
+    w->addTextEditor ("dur", juce::String (initialDuration, 1), tr ("Segundos visible (0 = hasta la siguiente nota)"));
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::ctrlModifier, 0));
+    if (editing)
+        w->addButton ("Eliminar", 2);
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::MessageManager::callAsync ([editor] { editor->grabKeyboardFocus(); });
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, editor, index, at] (int result)
+    {
+        auto* inf = currentInfo();
+        if (inf == nullptr || result == 0)
+            return;
+        const bool exists = juce::isPositiveAndBelow (index, (int) inf->notes.size());
+        pushUndo();
+        if (result == 2)
+        {
+            if (exists)
+                inf->notes.erase (inf->notes.begin() + index);
+        }
+        else
+        {
+            const auto text = editor->getText().trim();
+            const double duration = juce::jlimit (0.0, 3600.0, w->getTextEditorContents ("dur").replace (",", ".").getDoubleValue());
+            if (text.isEmpty())
+            {
+                if (exists)
+                    inf->notes.erase (inf->notes.begin() + index);
+            }
+            else if (exists)
+            {
+                inf->notes[(size_t) index].text = text;
+                inf->notes[(size_t) index].duration = duration;
+            }
+            else
+                inf->notes.push_back ({ at, duration, text });
+        }
+        inf->sortNotes();
+        library.saveSong (*inf);
+        syncTimelineMarkers();
+        updateStage (engine.getPositionSeconds());
+    }), true);
+}
+
+void MainComponent::noteMenu (int index, double playbackSeconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr)
+        return;
+    juce::PopupMenu m;
+    if (juce::isPositiveAndBelow (index, (int) info->notes.size()))
+    {
+        m.addSectionHeader (info->notes[(size_t) index].text.upToFirstOccurrenceOf ("\n", false, false));
+        m.addItem (1, tr ("Editar nota..."));
+        m.addItem (2, tr ("Mover a la posición actual"));
+        m.addItem (3, tr ("Eliminar nota"));
+    }
+    else
+        m.addItem (4, tr ("Añadir nota en ") + formatTime (playbackSeconds) + "...");
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this, index, playbackSeconds] (int result)
+    {
+        auto* inf = currentInfo();
+        if (inf == nullptr || result == 0)
+            return;
+        if (result == 4)
+        {
+            double t = timeMap.toOriginal (playbackSeconds);
+            if (const int nb = inf->analysis.nearestBeat (t, 0.25); nb >= 0)
+                t = inf->analysis.beats[(size_t) nb].seconds;
+            editNote (-1, t);
+            return;
+        }
+        if (! juce::isPositiveAndBelow (index, (int) inf->notes.size()))
+            return;
+        if (result == 1)
+        {
+            editNote (index, inf->notes[(size_t) index].seconds);
+            return;
+        }
+        pushUndo();
+        if (result == 2)
+            inf->notes[(size_t) index].seconds = timeMap.toOriginal (engine.getPositionSeconds());
+        else if (result == 3)
+            inf->notes.erase (inf->notes.begin() + index);
+        inf->sortNotes();
+        library.saveSong (*inf);
+        syncTimelineMarkers();
+    });
 }
 
 void MainComponent::markerMenu (int index)
@@ -3270,6 +3438,7 @@ void MainComponent::updateStage (double pos)
         st.position = pos;
         st.length = engine.getLengthSeconds();
         st.playing = engine.isPlaying();
+        activeNote (pos, st.note, st.nextNote, st.nextNoteIn);
         const int next = currentIndex + 1;
         if (juce::isPositiveAndBelow (next, (int) library.songs.size()))
             st.nextSong = library.songs[(size_t) next].name;

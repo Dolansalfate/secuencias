@@ -197,6 +197,11 @@ namespace arrangement
             if (removed (info.markers[(size_t) i].seconds)) info.markers.erase (info.markers.begin() + i);
             else info.markers[(size_t) i].seconds = mapT (info.markers[(size_t) i].seconds);
         }
+        for (int i = (int) info.notes.size(); --i >= 0;)
+        {
+            if (removed (info.notes[(size_t) i].seconds)) info.notes.erase (info.notes.begin() + i);
+            else info.notes[(size_t) i].seconds = mapT (info.notes[(size_t) i].seconds);
+        }
         for (int i = (int) info.tempoRegions.size(); --i >= 1;)
         {
             if (removed (info.tempoRegions[(size_t) i].start)) info.tempoRegions.erase (info.tempoRegions.begin() + i);

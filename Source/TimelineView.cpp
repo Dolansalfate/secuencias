@@ -9,7 +9,7 @@
 class TimelineView::Ruler : public juce::Component
 {
 public:
-    static constexpr int rowMarkers = 0, rowTempo = 16, rowBars = 32, rowTime = 47, rowChords = 62;
+    static constexpr int rowMarkers = 0, rowTempo = 16, rowNotes = 32, rowBars = 46, rowTime = 61, rowChords = 76;
 
     explicit Ruler (TimelineView& o) : owner (o)
     {
@@ -26,7 +26,15 @@ public:
         return owner.tempoBands.empty() ? -1 : 0;
     }
 
-    static bool inTempoRow (int y) { return y >= rowTempo && y < rowBars; }
+    static bool inTempoRow (int y) { return y >= rowTempo && y < rowNotes; }
+
+    int noteAt (int x) const
+    {
+        for (int i = (int) owner.notes.size(); --i >= 0;)
+            if (std::abs (x - (headerWidth + owner.timeToX (owner.notes[(size_t) i].seconds))) <= 8)
+                return i;
+        return -1;
+    }
 
     void mouseMove (const juce::MouseEvent& e) override
     {
@@ -56,6 +64,12 @@ public:
             const int band = tempoBandAt (e.x);
             if (band >= 0 && owner.onTempoBandClicked)
                 owner.onTempoBandClicked (band, juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (e.x - headerWidth)));
+            return;
+        }
+        if (e.mods.isPopupMenu() && e.y >= rowNotes && e.y < rowBars)
+        {
+            if (owner.onNoteClicked)
+                owner.onNoteClicked (noteAt (e.x), juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (e.x - headerWidth)));
             return;
         }
         if (e.mods.isPopupMenu() && e.y >= rowChords && ! owner.analysis.isEmpty())
@@ -155,6 +169,24 @@ public:
                     text += juce::String::formatted ("  %+d st", band.transpose);
                 g.drawText (text, (int) a + 5, rowTempo, (int) (b - a) - 8, rowBars - rowTempo, juce::Justification::centredLeft, true);
             }
+        }
+
+        // Notas de texto: banderita amarilla y texto hasta la siguiente nota
+        for (size_t i = 0; i < owner.notes.size(); ++i)
+        {
+            const auto& note = owner.notes[i];
+            const double nextT = i + 1 < owner.notes.size() ? owner.notes[i + 1].seconds : t1 + 1.0;
+            if (note.seconds > t1 || nextT < t0) continue;
+            const float nx = x (note.seconds);
+            const auto yellow = juce::Colour (0xffffd54f);
+            g.setColour (yellow);
+            juce::Path flag;
+            flag.addTriangle (nx, (float) rowNotes + 2.0f, nx + 6.0f, (float) rowNotes + 7.0f, nx, (float) rowNotes + 12.0f);
+            g.fillPath (flag);
+            g.fillRect (nx, (float) rowNotes, 1.0f, (float) (rowBars - rowNotes));
+            g.setFont (ui::font (10.0f, true));
+            g.drawText (note.text.upToFirstOccurrenceOf ("\n", false, false), (int) nx + 8, rowNotes, (int) juce::jmax (0.0f, juce::jmin (x (nextT), (float) getWidth()) - nx - 10.0f),
+                        rowBars - rowNotes, juce::Justification::centredLeft, true);
         }
 
         if (! an.beats.empty())
@@ -620,6 +652,12 @@ void TimelineView::setTempoBands (const std::vector<TempoBand>& bands)
 void TimelineView::refreshWaveforms()
 {
     invalidateLanes();
+}
+
+void TimelineView::setNotes (const std::vector<NoteView>& n)
+{
+    notes = n;
+    ruler->repaint();
 }
 
 void TimelineView::setClips (const std::vector<ClipView>& c)

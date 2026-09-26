@@ -10,6 +10,8 @@
 struct StageState
 {
     juce::String song, section, nextSection, chord, nextChord, key, nextSong;
+    juce::String note, nextNote;   // nota de texto activa y la próxima (si empieza pronto)
+    double nextNoteIn = -1.0;      // segundos hasta la próxima nota, o -1
     int bar = 0, beat = 0, beatsInBar = 4;
     double bpm = 0.0, position = 0.0, length = 0.0;
     double beatProgress = 0.0;   // 0..1 dentro del tiempo actual

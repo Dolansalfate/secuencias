@@ -9,6 +9,11 @@ void SongInfo::sortMarkers()
                [] (const SongMarker& a, const SongMarker& b) { return a.seconds < b.seconds; });
 }
 
+void SongInfo::sortNotes()
+{
+    std::stable_sort (notes.begin(), notes.end(), [] (const SongNote& a, const SongNote& b) { return a.seconds < b.seconds; });
+}
+
 void SongInfo::fitStemArrays()
 {
     const size_t n = stems.size();
@@ -346,6 +351,18 @@ SongInfo Library::readSong (const juce::File& folder) const
             }
         s.sortTempoRegions();   // ordena y garantiza una sección que empieza en 0
 
+        if (auto* arr = json.getProperty ("notes", juce::var()).getArray())
+            for (auto& n : *arr)
+            {
+                SongNote note;
+                note.seconds  = juce::jmax (0.0, (double) n.getProperty ("seconds", 0.0));
+                note.duration = juce::jlimit (0.0, 3600.0, (double) n.getProperty ("duration", 6.0));
+                note.text     = n.getProperty ("text", "").toString();
+                if (note.text.isNotEmpty())
+                    s.notes.push_back (note);
+            }
+        s.sortNotes();
+
         const auto clips = json.getProperty ("clips", juce::var());
         if (auto* arr = clips.getArray())
             for (auto& c : *arr)
@@ -460,6 +477,20 @@ bool Library::saveSong (const SongInfo& s) const
         markers.add (juce::var (mo));
     }
     obj->setProperty ("markers", markers);
+
+    if (! s.notes.empty())
+    {
+        juce::Array<juce::var> notes;
+        for (auto& n : s.notes)
+        {
+            auto* no = new juce::DynamicObject();
+            no->setProperty ("seconds", n.seconds);
+            no->setProperty ("duration", n.duration);
+            no->setProperty ("text", n.text);
+            notes.add (juce::var (no));
+        }
+        obj->setProperty ("notes", notes);
+    }
 
     if (! s.clips.empty())
     {

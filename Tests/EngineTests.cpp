@@ -421,6 +421,15 @@ int main()
                && std::abs (back->tempoRegions[1].playBpm - 150.0) < 1.0e-9
                && back->tempoRegions[1].transpose == -3 && back->tempoRegions[0].transpose == TempoRegion::followSong);
         CHECK (back != nullptr && back->spelling == 2 && back->keyOverride == "Eb major");
+        // Notas de texto: ida y vuelta, ordenadas; las vacías no se guardan
+        si.notes = { { 5.0, 0.0, "Coro" }, { 1.0, 6.0, tr ("Entra el bajo") }, { 2.0, 3.0, "" } };
+        CHECK (lib.saveSong (si));
+        Library l7 (tmp);
+        l7.load();
+        back = nullptr;
+        for (auto& sng : l7.songs) if (sng.folder == si.folder) back = &sng;
+        CHECK (back != nullptr && back->notes.size() == 2 && std::abs (back->notes[0].seconds - 1.0) < 1.0e-9 && back->notes[0].text == tr ("Entra el bajo")
+               && std::abs (back->notes[1].duration) < 1.0e-9 && back->notes[1].text == "Coro");
         // Nivelado por pista: vectores por stem, ajustados al número de stems al leer
         si.stems.clear();
         si.stems.push_back ({ "Z", "z.wav", 0.0f, false, 0 });
@@ -704,8 +713,10 @@ int main()
         si.analysis.chords = { { 0.0, 2.0, "C" }, { 2.0, 5.0, "F" }, { 5.0, 10.0, "G" } };
         si.markers = { mk ("A", 1.0), mk ("B", 3.5), mk ("C", 8.0) };
         si.tempoRegions = { { 0.0, 120.0, 0.0 }, { 3.0, 130.0, 0.0 }, { 6.0, 140.0, 0.0 } };
+        si.notes = { { 2.0, 6.0, "antes" }, { 4.0, 6.0, "dentro" }, { 7.0, 6.0, "despues" } };
         si.clickOffset = 4.0;
         arrangement::shiftGrid (si, 3.0, -2.0);   // desaparece [3, 5): lo de después se adelanta 2 s
+        CHECK (si.notes.size() == 2 && si.notes[0].text == "antes" && std::abs (si.notes[1].seconds - 5.0) < 1.0e-9 && si.notes[1].text == "despues");
         CHECK (si.analysis.beats.size() == 16 && std::abs (si.analysis.beats[6].seconds - 3.0) < 1.0e-9 && std::abs (si.analysis.beats[15].seconds - 7.5) < 1.0e-9);
         CHECK (si.analysis.chords.size() == 3 && std::abs (si.analysis.chords[1].end - 3.0) < 1.0e-9 && std::abs (si.analysis.chords[2].start - 3.0) < 1.0e-9 && std::abs (si.analysis.chords[2].end - 8.0) < 1.0e-9);
         CHECK (si.markers.size() == 2 && si.markers[1].name == "C" && std::abs (si.markers[1].seconds - 6.0) < 1.0e-9);

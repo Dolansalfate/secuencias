@@ -25,6 +25,13 @@ public:
         int transpose = 0;                     // semitonos efectivos de la sección
     };
     void setTempoBands (const std::vector<TempoBand>&);
+    // Notas de texto (en tiempo de reproducción), banderitas en su fila de la regla
+    struct NoteView
+    {
+        double seconds = 0.0;
+        juce::String text;
+    };
+    void setNotes (const std::vector<NoteView>&);
     // Tramos del arreglo (audio) en tiempo de reproducción: bordes sobre los carriles y huecos sombreados
     struct ClipView
     {
@@ -44,6 +51,7 @@ public:
     std::function<void (int index, double seconds)> onMarkerMoved;
     std::function<void (int index, double seconds)> onTempoBandClicked;   // clic en la fila de tempo
     std::function<void (int beatIndex)> onBeatClicked;                     // clic derecho en un tiempo de la fila de compases
+    std::function<void (int noteIndex, double seconds)> onNoteClicked;     // clic derecho en la fila de notas (-1 = hueco)
     std::function<void (int chordIndex, double seconds)> onChordClicked;   // clic derecho en la fila de acordes (-1 = sin acorde ahí)
     std::function<void (double seconds, int lane)> onLaneMenu;                        // clic derecho sobre un carril (menú del audio)
     std::function<void (double seconds, double deltaSeconds, int lane)> onClipDragged; // Shift + arrastre sobre un carril: mover el tramo
@@ -56,7 +64,7 @@ public:
     void resized() override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
-    static constexpr int headerWidth = 130, rulerHeight = 82, scrollHeight = 12;
+    static constexpr int headerWidth = 130, rulerHeight = 96, scrollHeight = 12;
     static constexpr int gutter = 10;              // reserva para la barra vertical de los carriles
     static constexpr int minLaneHeight = 44, maxLaneHeight = 120;
 
@@ -82,6 +90,7 @@ private:
     double sampleRate = 44100.0;
     std::vector<SongMarker> markers;
     std::vector<TempoBand> tempoBands;
+    std::vector<NoteView> notes;
     std::vector<ClipView> clips;
     bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo
     double clipDragFrom = 0.0, clipDragDelta = 0.0;
