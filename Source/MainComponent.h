@@ -11,6 +11,7 @@
 #include "TimelineView.h"
 #include "MixerPanel.h"
 #include "FilePicker.h"
+#include "StageView.h"
 
 class MarkerButton;
 
@@ -48,6 +49,11 @@ public:
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void openImportPickerForCapture()                         { chooseStems(); }
+    void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
+    juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
+    double positionForCapture() const                         { return engine.getPositionSeconds(); }
+    void seekForCapture (double seconds)                      { engine.seekSeconds (seconds); }
+    void updateStage (double playbackSeconds);                // alimenta la guía de escenario desde el Timer
     void duplicateForCapture (double seconds);                // duplica el tramo que contiene ese instante (herramienta de captura)
     void setSeparationOptionsForCapture (int stems, int quality)   // sin guardar en los ajustes
     {
@@ -114,6 +120,8 @@ private:
     void applyAnalysis (const Analysis&);
     void updateBeatGrid();
     void showChordAndKey (double positionSeconds);
+    void currentChords (double playbackSeconds, juce::String& now, juce::String& next) const;   // acorde actual y siguiente, escritos según la canción
+    void barAndBeat (double playbackSeconds, int& bar, int& beat, int& beatsInBar, double& progress) const;   // compás y tiempo en curso
     void keyMenu();                    // enarmonía (sostenidos o bemoles) y tonalidad a mano
     void beatMenu (int beatIndex);     // métrica: primer tiempo de compás, compases de N tiempos, quitar o insertar un tiempo
     bool useFlats() const;             // escritura de notas de la canción actual
@@ -263,6 +271,8 @@ private:
     juce::Label helpLabel;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<FilePicker> picker;
+    std::unique_ptr<StageWindow> stageWindow;
+    juce::TextButton stageBtn;
     juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
     ClipClipboard clipboard;
 

@@ -26,6 +26,11 @@ public:
             captureLevel = commandLine.contains ("--nivelar");
             captureSeparate = commandLine.contains ("--separar");
             captureSelector = commandLine.contains ("--selector");
+            if (commandLine.contains ("--posicion="))
+                capturePosition = commandLine.fromFirstOccurrenceOf ("--posicion=", false, false).getDoubleValue();
+            if (commandLine.contains ("--escenario="))
+                captureStageFile = juce::File (commandLine.fromFirstOccurrenceOf ("--escenario=", false, false)
+                                                   .upToFirstOccurrenceOf (" ", false, false).unquoted());
             if (commandLine.contains ("--calidad="))
                 captureQuality = commandLine.fromFirstOccurrenceOf ("--calidad=", false, false).getIntValue();
             if (commandLine.contains ("--pistas="))
@@ -67,6 +72,8 @@ public:
             if (captureQuality > 0 || captureStems > 0) mc->setSeparationOptionsForCapture (captureStems, captureQuality);
             if (captureSeparate) mc->separateCurrentSong();
             if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
+            if (capturePosition > 0.0) mc->seekForCapture (capturePosition);
+            if (captureStageFile != juce::File()) mc->showStage (true);
             if (captureTempo > 0.0 || captureTranspose != 0) mc->setTempoForCapture (captureTempo, captureTranspose);
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs);
@@ -78,7 +85,18 @@ public:
         {
             captureTimer.stopTimer();
             if (mainWindow != nullptr)
+            {
                 mainWindow->saveSnapshot (captureFile, captureLive);
+                if (captureStageFile != juce::File())
+                    if (auto* mc2 = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    {
+                        mc2->updateStage (mc2->positionForCapture());
+                        const auto image = mc2->stageSnapshot();
+                        captureStageFile.deleteFile();
+                        if (auto stream = captureStageFile.createOutputStream())
+                            juce::PNGImageFormat().writeImageToStream (image, *stream);
+                    }
+            }
             quit();
         }
         else if (! ready)
@@ -137,9 +155,9 @@ private:
 
     std::unique_ptr<MainWindow> mainWindow;
     CaptureTimer captureTimer { *this };
-    juce::File captureFile;
+    juce::File captureFile, captureStageFile;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
-    double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0;
+    double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;
 };

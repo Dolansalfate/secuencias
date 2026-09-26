@@ -59,6 +59,13 @@ modelo que usa Moises).
   canción como `masterGainDb`) y medidor con escala en dB. Las salidas que se pueden elegir
   son los pares de canales del dispositivo activo: con "default" de PulseAudio solo 1-2; con
   una interfaz multicanal elegida en "Audio" (ALSA directo) o con JACK/PipeWire, los demás.
+- **Guía de escenario** (botón "Pantalla" o F12, `StageView` / `StageWindow`): ventana aparte
+  para una segunda pantalla: acorde actual enorme y siguiente al centro, compás y tiempo con
+  puntos que marcan el pulso (el 1 en color de acento) y barra de avance, tempo de la sección,
+  tonalidad, título, sección actual y siguiente, tiempo, y "Detenido · siguiente canción". La
+  alimenta el Timer (`updateStage`, con `currentChords` y `barAndBeat`: del análisis o de la
+  rejilla fija). Doble clic o F11 en esa ventana = pantalla completa (kiosk); el resto de
+  teclas (pedal) se reenvían a la ventana principal. Su posición se guarda (`stageWindow`).
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -234,6 +241,7 @@ Source/
   TimelineView.h/.cpp  Vista de arreglo: regla, carriles con forma de onda, cabezal, zoom
   MixerPanel.h/.cpp    ChannelStrip, MasterStrip y MixerPanel
   FilePicker.h/.cpp    Selector de archivos dentro de la ventana (Linux y Windows)
+  StageView.h/.cpp     Guía de escenario: StageState, StageView (dibujo) y StageWindow (segunda pantalla)
   Meters.h/.cpp        LevelMeter (pico, RMS, retención, clip, escala)
   UiUtils.h            Colores, fuentes, paleta de pistas, disableFocus, formatTime
   AudioEngine.h/.cpp   Motor de reproducción (AudioIODeviceCallback)
@@ -580,7 +588,7 @@ Pasos de `run()`:
   repinta solo su franja. Los carriles van en un `Viewport` vertical (mínimo 44 px cada uno).
   `MixerPanel` recibe `fillOutputBox` de MainComponent y sincroniza M/S con los atómicos en
   cada tick, igual que los carriles (`refreshTrackStates`).
-- `--captura=archivo.png [--cancion=N] [--vivo] [--analizar] [--nivelar] [--separar] [--selector] [--tempo=BPM] [--tono=N] [--corte=seg --desplazar=ms --modocorte=N]`
+- `--captura=archivo.png [--cancion=N] [--vivo] [--analizar] [--nivelar] [--separar] [--selector] [--posicion=seg] [--escenario=guia.png] [--tempo=BPM] [--tono=N] [--corte=seg --desplazar=ms --modocorte=N]`
   (Main.cpp): herramienta de desarrollo que permite una segunda instancia, espera a que cargue
   la canción (y a que termine el análisis, el nivelado o el render pedidos) y guarda
   `createComponentSnapshot`.
@@ -710,6 +718,8 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.5**: guía de escenario (`StageView`, `StageWindow`, botón "Pantalla", F12,
+  `--captura --escenario --posicion`).
 - **v0.3.4**: el click como canal del mezclador (`ClickStrip`, `AudioEngine::takeClickPeak`,
   `onClickChanged`), sincronizado con la fila del click.
 - **v0.3.3**: copiar, pegar (insertando o encima) y duplicar tramos con su grilla

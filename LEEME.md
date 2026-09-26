@@ -16,6 +16,11 @@ El mismo código sigue compilando en macOS.
   el resto a 1-2 para el PA).
 - **Modo en vivo** (botón "En vivo" o F11): esconde la vista de arreglo y agranda el título,
   la sección y el tiempo para leerlos desde lejos.
+- **Guía de escenario** (botón "Pantalla" o F12): una ventana aparte para poner en una segunda
+  pantalla, de cara a los músicos: el acorde actual y el siguiente grandes al centro, el compás
+  y el tiempo en que va (con puntos que marcan el pulso), el tempo, la tonalidad, la sección
+  actual y la siguiente, y el tiempo. Doble clic sobre ella (o F11) la pone a pantalla
+  completa; las teclas del pedal siguen funcionando aunque esa ventana tenga el foco.
 - **Marcadores** (intro, verso, coro…) para saltar en vivo, y **loop de sección**.
 - **Click generado** con BPM, inicio, volumen y salida propia; en el mezclador aparece como un
   canal más ("CLICK", con fader, medidor, encendido y salida), así puedes mandarlo a los

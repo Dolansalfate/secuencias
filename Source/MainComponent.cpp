@@ -290,6 +290,11 @@ MainComponent::MainComponent()
     liveBtn.setClickingTogglesState (true);
     liveBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.4f));
     liveBtn.onClick = [this] { setLiveMode (liveBtn.getToggleState()); };
+    stageBtn.setButtonText ("Pantalla");
+    stageBtn.setClickingTogglesState (true);
+    stageBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.4f));
+    stageBtn.onClick = [this] { showStage (stageBtn.getToggleState()); };
+    addAndMakeVisible (stageBtn);
     zoomFitBtn.setButtonText ("Ajustar");
     zoomFitBtn.onClick = [this] { timeline.zoomToFit(); };
     addAndMakeVisible (liveBtn);
@@ -483,6 +488,8 @@ void MainComponent::resized()
     loopBtn.setBounds (transport.removeFromLeft (170));
     liveBtn.setBounds (transport.removeFromRight (100));
     transport.removeFromRight (6);
+    stageBtn.setBounds (transport.removeFromRight (90));
+    transport.removeFromRight (6);
     zoomFitBtn.setBounds (transport.removeFromRight (80));
 
     r.removeFromTop (8);
@@ -589,6 +596,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         setLiveMode (! liveMode);
     else if (key.getModifiers().isCtrlDown() && (code == 'Z' || code == 'z'))
         undoLastEdit();
+    else if (code == juce::KeyPress::F12Key)
+        showStage (stageWindow == nullptr || ! stageWindow->isVisible());
     else
     {
         const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
@@ -2301,6 +2310,7 @@ void MainComponent::timerCallback()
         sectionAt (pos, s, e, name);
         sectionLabel.setText (name, juce::dontSendNotification);
         showChordAndKey (pos);
+        updateStage (pos);
         if (auto* info = currentInfo())
             if (! info->analysis.beats.empty())
             {
@@ -3137,6 +3147,137 @@ void MainComponent::applyAnalysis (const Analysis& a)
     sepLabel.setText (summary, juce::dontSendNotification);
 }
 
+void MainComponent::currentChords (double pos, juce::String& now, juce::String& next) const
+{
+    now = next = {};
+    if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
+        return;
+    const auto& a = library.songs[(size_t) currentIndex].analysis;
+    const bool flats = useFlats();
+    const int i = a.chordAt (timeMap.toOriginal (pos));
+    if (i >= 0 && a.chords[(size_t) i].name != "N")
+        now = music::spellChord (a.chords[(size_t) i].name, flats);
+    else if (i >= 0 || ! a.chords.empty())
+        now = "-";
+    // Siguiente acorde distinto, para anticiparse
+    for (int j = juce::jmax (0, i + 1); j < (int) a.chords.size(); ++j)
+        if (a.chords[(size_t) j].name != "N" && (i < 0 || a.chords[(size_t) j].name != a.chords[(size_t) i].name))
+        {
+            next = music::spellChord (a.chords[(size_t) j].name, flats);
+            break;
+        }
+}
+
+void MainComponent::barAndBeat (double pos, int& bar, int& beat, int& beatsInBar, double& progress) const
+{
+    bar = beat = 0;
+    beatsInBar = 4;
+    progress = 0.0;
+    if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
+        return;
+    const auto& info = library.songs[(size_t) currentIndex];
+    const auto& beats = info.analysis.beats;
+    const double orig = timeMap.toOriginal (pos);
+    if (beats.size() >= 2)
+    {
+        int i = -1;
+        for (int k = 0; k < (int) beats.size(); ++k)
+            if (beats[(size_t) k].seconds <= orig + 1.0e-6) i = k; else break;
+        if (i < 0)
+            return;   // antes del primer tiempo detectado
+        beat = beats[(size_t) i].beatInBar;
+        int down = i;
+        while (down > 0 && beats[(size_t) down].beatInBar != 1) --down;
+        for (int k = 0; k <= i; ++k)
+            if (beats[(size_t) k].beatInBar == 1) ++bar;
+        bar = juce::jmax (1, bar);
+        int nextDown = (int) beats.size();
+        for (int k = down + 1; k < (int) beats.size(); ++k)
+            if (beats[(size_t) k].beatInBar == 1) { nextDown = k; break; }
+        beatsInBar = juce::jlimit (1, 12, nextDown - down);
+        if (i + 1 < (int) beats.size())
+            progress = juce::jlimit (0.0, 1.0, (orig - beats[(size_t) i].seconds) / juce::jmax (1.0e-6, beats[(size_t) i + 1].seconds - beats[(size_t) i].seconds));
+        return;
+    }
+    // Rejilla fija del click (4/4)
+    if (info.bpm <= 0.0)
+        return;
+    const double beatLen = 60.0 / info.bpm, rel = orig - info.clickOffset;
+    if (rel < 0.0)
+        return;
+    const auto k = (juce::int64) std::floor (rel / beatLen);
+    beat = (int) (k % 4) + 1;
+    bar = (int) (k / 4) + 1;
+    beatsInBar = 4;
+    progress = juce::jlimit (0.0, 1.0, (rel - (double) k * beatLen) / beatLen);
+}
+
+void MainComponent::updateStage (double pos)
+{
+    if (stageWindow == nullptr || ! stageWindow->isVisible())
+        return;
+    StageState st;
+    auto* info = currentInfo();
+    st.hasSong = info != nullptr && currentSong != nullptr;
+    if (st.hasSong)
+    {
+        st.song = info->name;
+        st.hasAnalysis = ! info->analysis.chords.empty() || ! info->analysis.beats.empty();
+        double s, e;
+        sectionAt (pos, s, e, st.section);
+        for (auto& m : info->markers)
+            if (timeMap.toPlayback (m.seconds) > pos + 0.001) { st.nextSection = m.name; break; }
+        currentChords (pos, st.chord, st.nextChord);
+        barAndBeat (pos, st.bar, st.beat, st.beatsInBar, st.beatProgress);
+        double orig = 0.0, play = 0.0;
+        tempoAt (timeMap.toOriginal (pos), orig, play);
+        st.bpm = play;
+        st.key = music::spellKey (effectiveKey(), useFlats());
+        st.position = pos;
+        st.length = engine.getLengthSeconds();
+        st.playing = engine.isPlaying();
+        const int next = currentIndex + 1;
+        if (juce::isPositiveAndBelow (next, (int) library.songs.size()))
+            st.nextSong = library.songs[(size_t) next].name;
+    }
+    stageWindow->view().setState (st);
+}
+
+void MainComponent::showStage (bool show)
+{
+    if (stageWindow == nullptr)
+    {
+        stageWindow = std::make_unique<StageWindow> ([this]
+        {
+            stageBtn.setToggleState (false, juce::dontSendNotification);
+            props.getUserSettings()->setValue ("stageWindow", stageWindow->getWindowStateAsString());
+        });
+        stageWindow->view().onKey = [this] (const juce::KeyPress& key) { return keyPressed (key); };
+        const auto saved = props.getUserSettings()->getValue ("stageWindow");
+        if (saved.isNotEmpty())
+            stageWindow->restoreWindowStateFromString (saved);
+    }
+    stageBtn.setToggleState (show, juce::dontSendNotification);
+    if (! show)
+    {
+        if (stageWindow->isVisible())
+            props.getUserSettings()->setValue ("stageWindow", stageWindow->getWindowStateAsString());
+        stageWindow->setVisible (false);
+        return;
+    }
+    stageWindow->setVisible (true);
+    stageWindow->toFront (false);
+    updateStage (engine.getPositionSeconds());
+}
+
+juce::Image MainComponent::stageSnapshot()
+{
+    if (stageWindow == nullptr)
+        return {};
+    auto& v = stageWindow->view();
+    return v.createComponentSnapshot (v.getLocalBounds());
+}
+
 juce::String MainComponent::effectiveKey() const
 {
     if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
@@ -3334,18 +3475,10 @@ void MainComponent::showChordAndKey (double pos)
         keyLabel.setText ({}, juce::dontSendNotification);
         return;
     }
-    const auto& a = info->analysis;
     const bool flats = useFlats();
-    const int i = a.chordAt (timeMap.toOriginal (pos));
-    juce::String text = i >= 0 && a.chords[(size_t) i].name != "N" ? music::spellChord (a.chords[(size_t) i].name, flats) : juce::String ("-");
-    // Siguiente acorde distinto, para anticiparse
-    for (int j = juce::jmax (0, i + 1); j < (int) a.chords.size(); ++j)
-        if (a.chords[(size_t) j].name != "N" && (i < 0 || a.chords[(size_t) j].name != a.chords[(size_t) i].name))
-        {
-            text += "   >  " + music::spellChord (a.chords[(size_t) j].name, flats);
-            break;
-        }
-    chordLabel.setText (text, juce::dontSendNotification);
+    juce::String now, next;
+    currentChords (pos, now, next);
+    chordLabel.setText (now.isEmpty() ? juce::String ("-") : now + (next.isNotEmpty() ? "   >  " + next : juce::String()), juce::dontSendNotification);
     juce::String key = music::spellKey (effectiveKey(), flats);
     double orig = 0.0, play = 0.0;
     tempoAt (timeMap.toOriginal (pos), orig, play);
