@@ -84,7 +84,7 @@ if (-not (Test-Path (Join-Path $analisisEnv "Scripts\python.exe"))) {
 }
 $pip2 = Join-Path $analisisEnv "Scripts\pip.exe"
 $analisisPy = Join-Path $analisisEnv "Scripts\python.exe"
-if (-not (Ejecutar $pip2 @("install", "--upgrade", "pip", "wheel", "numpy<2", "cython<3"))) { Fallo "No se pudo instalar numpy" }
+if (-not (Ejecutar $pip2 @("install", "--upgrade", "pip", "setuptools", "wheel", "numpy<2", "cython<3"))) { Fallo "No se pudo instalar numpy" }
 & $analisisPy -c "import madmom" 2>$null
 if ($LASTEXITCODE -ne 0) {
     # madmom no tiene versión precompilada en PyPI para Windows: el instalador de Secuencias trae ruedas

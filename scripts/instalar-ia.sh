@@ -86,7 +86,7 @@ echo
 echo "== 2/2  madmom (tempo, compases y acordes) en ~/analisis-env =="
 [ -x ~/analisis-env/bin/python ] || "$PY" -m venv ~/analisis-env || fallo "No se pudo crear ~/analisis-env"
 PIP2=~/analisis-env/bin/pip
-"$PIP2" install --upgrade pip wheel "numpy<2" "cython<3" || fallo "No se pudo instalar numpy"
+"$PIP2" install --upgrade pip setuptools wheel "numpy<2" "cython<3" || fallo "No se pudo instalar numpy"   # setuptools: Python 3.12 ya no lo trae y madmom se compila sin aislamiento
 if ! ~/analisis-env/bin/python -c "import madmom" >/dev/null 2>&1; then
     "$PIP2" install --no-build-isolation "git+https://github.com/CPJKU/madmom" || fallo "No se pudo compilar madmom (¿faltan las herramientas de compilación?)"
 fi

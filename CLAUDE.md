@@ -423,8 +423,8 @@ Pasos de `run()`:
 
 ### 5.4b Analyzer (madmom)
 - Python aparte: `~/analisis-env/bin/python` (ajuste `analysisPythonPath`), porque madmom exige
-  numpy 1.x y el venv de Demucs usa numpy 2. Instalación validada: `pip install "numpy<2"
-  "cython<3"` y luego `pip install --no-build-isolation git+https://github.com/CPJKU/madmom`
+  numpy 1.x y el venv de Demucs usa numpy 2. Instalación validada: `pip install setuptools "numpy<2"
+  "cython<3"` (setuptools porque Python 3.12 ya no lo incluye) y luego `pip install --no-build-isolation git+https://github.com/CPJKU/madmom`
   (la versión de PyPI no compila con Python 3.10).
 - `run()`: `writeMix` suma las pistas en RAM (unidad, normalizado a 0,9) a `mezcla.wav` y, sin
   las pistas de batería (`isDrumsTrack` por nombre o archivo), a `armonico.wav`; escribe el

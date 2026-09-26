@@ -164,7 +164,7 @@ otra versión de numpy:
 
 ```bash
 python3 -m venv ~/analisis-env
-~/analisis-env/bin/pip install --upgrade pip wheel "numpy<2" "cython<3"
+~/analisis-env/bin/pip install --upgrade pip setuptools wheel "numpy<2" "cython<3"
 ~/analisis-env/bin/pip install --no-build-isolation git+https://github.com/CPJKU/madmom
 ```
 
