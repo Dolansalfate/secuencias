@@ -7,7 +7,7 @@ inline juce::String tr (const char* utf8) { return juce::String::fromUTF8 (utf8)
 
 constexpr double unmeasuredDb = -100.0;   // sonoridad o pico sin medir
 
-struct Marker
+struct SongMarker   // "Marker" a secas choca con AIFF.h de macOS (CoreServices)
 {
     juce::String name;
     double seconds = 0.0;
@@ -127,7 +127,7 @@ struct SongInfo
     Analysis analysis;
     std::vector<TempoRegion> tempoRegions;   // ordenadas; vacío = un solo tramo con el tempo del análisis o del click
     std::vector<Clip> clips;                 // arreglo del audio; vacío = el audio original entero
-    std::vector<Marker> markers;  // siempre ordenados por tiempo
+    std::vector<SongMarker> markers;  // siempre ordenados por tiempo
     std::vector<StemInfo> stems;
 
     void sortMarkers();

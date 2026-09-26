@@ -16,7 +16,7 @@ public:
 
     void setSong (std::shared_ptr<LoadedSong>, double sampleRate);   // nullptr = sin canción
     void setLoadingText (const juce::String&);                          // texto cuando no hay canción
-    void setMarkers (const std::vector<Marker>&, double bpm, double clickOffset);
+    void setMarkers (const std::vector<SongMarker>&, double bpm, double clickOffset);
     // Secciones de tempo en tiempo de reproducción, para la fila de tempo de la regla
     struct TempoBand
     {
@@ -79,7 +79,7 @@ private:
 
     std::shared_ptr<LoadedSong> song;
     double sampleRate = 44100.0;
-    std::vector<Marker> markers;
+    std::vector<SongMarker> markers;
     std::vector<TempoBand> tempoBands;
     std::vector<ClipView> clips;
     bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo

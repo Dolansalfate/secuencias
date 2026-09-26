@@ -113,7 +113,7 @@ private:
 
     // Tempo y tono (fase 3): el motor reproduce una versión renderizada de la canción original
     void rebuildTimeMap();                         // mapa de la versión que está sonando
-    std::vector<Marker> mappedMarkers() const;     // marcadores en tiempo de reproducción
+    std::vector<SongMarker> mappedMarkers() const;     // marcadores en tiempo de reproducción
     Analysis mappedAnalysis() const;               // tiempos y acordes en tiempo de reproducción
     std::vector<TimelineView::TempoBand> mappedTempoBands() const;   // secciones de tempo en tiempo de reproducción
     double originalBpm() const;

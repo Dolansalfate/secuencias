@@ -6,7 +6,7 @@
 void SongInfo::sortMarkers()
 {
     std::sort (markers.begin(), markers.end(),
-               [] (const Marker& a, const Marker& b) { return a.seconds < b.seconds; });
+               [] (const SongMarker& a, const SongMarker& b) { return a.seconds < b.seconds; });
 }
 
 void SongInfo::fitStemArrays()
@@ -302,7 +302,7 @@ SongInfo Library::readSong (const juce::File& folder) const
         if (auto* arr = markers.getArray())
             for (auto& m : *arr)
             {
-                Marker mk;
+                SongMarker mk;
                 mk.name       = m.getProperty ("name", "").toString();
                 mk.seconds    = juce::jmax (0.0, (double) m.getProperty ("seconds", 0.0));
                 mk.gainDb     = juce::jlimit (-40.0, 40.0, (double) m.getProperty ("gainDb", 0.0));

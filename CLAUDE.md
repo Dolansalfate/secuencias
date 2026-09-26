@@ -591,6 +591,11 @@ Pasos de `run()`:
   `gio` sí funcionan con ese entorno. Para reproducir el comportamiento real del usuario, lanza
   la app desde una terminal normal o desde el menú.
 - Parámetros que cambian en vivo: siempre con rampa o fundido (ver `smoothedGain` y `fade`).
+- **Nombres globales que chocan con los SDK de macOS**: los headers de JUCE en Mac arrastran
+  Carbon/CoreServices, que define `struct Marker` (AIFF.h), `Rect`, `Point`, `Comment`,
+  `Fixed`, `Style`, `Cell`... Los tipos del modelo van con nombre propio (`SongMarker`,
+  `SongInfo`, `TempoRegion`, `Clip`) o dentro de un namespace. La compilación en Mac solo se ve
+  en GitHub Actions, así que revisa el nombre antes de subir.
 - El estilo del código es parecido al de JUCE (llaves en línea propia, espacio antes de `(`,
   4 espacios). Hay un `.clang-format`, pero no reformatees archivos completos sin motivo.
 - No agregues dependencias de sistema nuevas sin actualizar el README, `install.sh` y esta guía.

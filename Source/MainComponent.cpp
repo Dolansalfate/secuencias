@@ -1031,9 +1031,9 @@ void MainComponent::rebuildTimeMap()
                   : TimeMap();
 }
 
-std::vector<Marker> MainComponent::mappedMarkers() const
+std::vector<SongMarker> MainComponent::mappedMarkers() const
 {
-    std::vector<Marker> out;
+    std::vector<SongMarker> out;
     if (juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
         for (auto m : library.songs[(size_t) currentIndex].markers)
         {
@@ -1366,7 +1366,7 @@ void MainComponent::addMarkerHere()
     auto* info = currentInfo();
     if (info == nullptr || currentSong == nullptr)
         return;
-    Marker mk;
+    SongMarker mk;
     mk.name = tr ("Sección ") + juce::String ((int) info->markers.size() + 1);
     mk.seconds = timeMap.toOriginal (engine.getPositionSeconds());
     info->markers.push_back (mk);
@@ -1620,7 +1620,7 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
                     exists = exists || std::abs (mk.seconds - at) < 0.5;
                 if (exists)
                     continue;
-                Marker mk;
+                SongMarker mk;
                 mk.name = juce::String::formatted ("%.0f BPM", inf->tempoRegions[i].origBpm);
                 mk.seconds = at;
                 inf->markers.push_back (mk);

@@ -103,9 +103,9 @@ namespace
     }
 }
 
-static Marker mk (const char* name, double seconds)
+static SongMarker mk (const char* name, double seconds)
 {
-    Marker m;
+    SongMarker m;
     m.name = name;
     m.seconds = seconds;
     return m;

@@ -595,7 +595,7 @@ void TimelineView::setLoadingText (const juce::String& text)
     emptyLabel.setText (text, juce::dontSendNotification);
 }
 
-void TimelineView::setMarkers (const std::vector<Marker>& m, double newBpm, double newOffset)
+void TimelineView::setMarkers (const std::vector<SongMarker>& m, double newBpm, double newOffset)
 {
     markers = m;
     bpm = newBpm;
