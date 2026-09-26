@@ -38,18 +38,36 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
       }
+    },
+    {
+      "name": "release-win",
+      "displayName": "Release Windows (Visual Studio 2022, x64, con tests)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "SECUENCIAS_BUILD_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "release-mac", "configurePreset": "release-mac" },
+    { "name": "release-win", "configurePreset": "release-win", "configuration": "Release" },
     { "name": "tests", "configurePreset": "debug", "targets": [ "SecuenciasTests" ] }
   ],
   "testPresets": [
     {
       "name": "debug",
       "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release-win",
+      "configurePreset": "release-win",
+      "configuration": "Release",
       "output": { "outputOnFailure": true }
     }
   ]

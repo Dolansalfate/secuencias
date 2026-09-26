@@ -1,5 +1,5 @@
-# Compila Secuencias en macOS (DMG universal) y Ubuntu (.deb), corre los tests, y en cada
-# etiqueta v* publica una Release con los instaladores adjuntos.
+# Compila Secuencias en macOS (DMG universal), Ubuntu (.deb) y Windows (instalador .exe), corre
+# los tests, y en cada etiqueta v* publica una Release con los tres instaladores adjuntos.
 name: Compilar
 
 on:
@@ -50,10 +50,52 @@ jobs:
           name: Secuencias-ubuntu
           path: dist/*.deb
 
+  windows:
+    name: Windows (tests e instalador)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar y tests (Visual Studio 2022, x64)
+        run: |
+          cmake --preset release-win
+          cmake --build --preset release-win
+          ctest --preset release-win
+      # madmom no tiene ruedas para Windows en PyPI: se compilan aquí para Python 3.10 a 3.12 y
+      # viajan dentro del instalador (carpeta wheels), así el usuario no necesita Visual Studio
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: madmom para Python 3.12
+        run: |
+          python -m pip install wheel "numpy<2" "cython<3"
+          python -m pip wheel --no-build-isolation --no-deps -w dist/wheels git+https://github.com/CPJKU/madmom
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: madmom para Python 3.11
+        run: |
+          python -m pip install wheel "numpy<2" "cython<3"
+          python -m pip wheel --no-build-isolation --no-deps -w dist/wheels git+https://github.com/CPJKU/madmom
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: madmom para Python 3.10
+        run: |
+          python -m pip install wheel "numpy<2" "cython<3"
+          python -m pip wheel --no-build-isolation --no-deps -w dist/wheels git+https://github.com/CPJKU/madmom
+      - name: Instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(Secuencias VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$v" windows\instalador.iss
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Secuencias-windows
+          path: dist/*.exe
+
   release:
     name: Publicar Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [mac, ubuntu]
+    needs: [mac, ubuntu, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

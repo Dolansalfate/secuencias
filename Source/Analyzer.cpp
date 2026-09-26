@@ -67,7 +67,7 @@ const char* Analyzer::pythonScript()
 //==============================================================================
 bool Analyzer::isAvailable (const juce::String& pythonPath)
 {
-    return pythonPath.startsWithChar ('/') && juce::File (pythonPath).existsAsFile();
+    return juce::File::isAbsolutePath (pythonPath) && juce::File (pythonPath).existsAsFile();
 }
 
 bool Analyzer::isDrumsTrack (const juce::String& name, const juce::String& fileName)

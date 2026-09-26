@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Secuencias VERSION 0.3.0 LANGUAGES C CXX)
+project(Secuencias VERSION 0.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,10 @@ option(SECUENCIAS_BUILD_TESTS "Compilar los tests sin interfaz (SecuenciasTests)
 
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
+endif()
+if(MSVC)
+    add_compile_options(/utf-8)   # los fuentes son UTF-8 (tr ("canción")); sin esto MSVC los lee en la página de códigos local
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
 # JUCE: usa una copia local si existe (-DJUCE_DIR=/ruta/a/JUCE), si no la descarga

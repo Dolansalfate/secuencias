@@ -14,17 +14,26 @@ namespace
 
     juce::File audioSeparatorExe (const juce::String& pythonPath)
     {
-        return juce::File (pythonPath).getSiblingFile ("audio-separator");
+       #if JUCE_WINDOWS
+        return juce::File (pythonPath).getSiblingFile ("audio-separator.exe");   // junto a python.exe, en Scripts del venv
+       #else
+        return juce::File (pythonPath).getSiblingFile ("audio-separator");       // junto a python, en bin del venv
+       #endif
     }
 
     // audio-separator exige ffmpeg en el PATH aunque reciba WAV
     bool ffmpegInPath()
     {
+       #if JUCE_WINDOWS
+        const juce::String separator = ";", exe = "ffmpeg.exe";
+       #else
+        const juce::String separator = ":", exe = "ffmpeg";
+       #endif
         juce::StringArray dirs;
-        dirs.addTokens (juce::String (std::getenv ("PATH") != nullptr ? std::getenv ("PATH") : ""), ":", "");
+        dirs.addTokens (juce::String (std::getenv ("PATH") != nullptr ? std::getenv ("PATH") : ""), separator, "\"");
         dirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".local/bin").getFullPathName());
         for (auto& d : dirs)
-            if (d.isNotEmpty() && juce::File (d).getChildFile ("ffmpeg").existsAsFile())
+            if (d.isNotEmpty() && juce::File::isAbsolutePath (d) && juce::File (d).getChildFile (exe).existsAsFile())
                 return true;
         return false;
     }
@@ -109,7 +118,7 @@ juce::String Separator::describe (const SeparationOptions& o)
 
 bool Separator::isRoformerAvailable (const juce::String& pythonPath)
 {
-    return pythonPath.startsWithChar ('/') && audioSeparatorExe (pythonPath).existsAsFile() && ffmpegInPath();
+    return juce::File::isAbsolutePath (pythonPath) && audioSeparatorExe (pythonPath).existsAsFile() && ffmpegInPath();
 }
 
 //==============================================================================

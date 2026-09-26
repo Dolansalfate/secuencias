@@ -118,7 +118,17 @@ primera vez). Para desinstalar: `./uninstall.sh` (tus canciones no se borran).
 
 **Instaladores listos** (sin compilar): en la página de Releases del repositorio de GitHub hay,
 para cada versión, un `.deb` para Ubuntu (`sudo apt install ./secuencias_<versión>_amd64.deb`,
-queda en el menú) y un `.dmg` para macOS. Los arma GitHub Actions en cada versión.
+queda en el menú), un `.dmg` para macOS y un `Secuencias-<versión>-windows-setup.exe` para
+Windows. Los arma GitHub Actions en cada versión.
+
+**En Windows**: ejecuta el `-windows-setup.exe`. Como no está firmado, SmartScreen muestra
+"Windows protegió tu PC": pulsa "Más información" y "Ejecutar de todas formas". Se instala en
+tu usuario sin pedir administrador y queda en el menú Inicio. El audio usa WASAPI (elige la
+interfaz y sus salidas en el botón "Audio"). Para separar y analizar canciones necesitas Python
+3.10 a 3.12 de python.org (marca "Add python.exe to PATH" al instalarlo) y luego, en la app,
+"Ajustes IA" > "Instalar motores de IA" (o el acceso "Instalar motores de IA" del menú Inicio):
+abre PowerShell, instala Demucs con PyTorch (con CUDA si detecta tarjeta NVIDIA) y madmom
+precompilado que viene dentro del instalador.
 
 **En macOS**: abre el DMG y arrastra Secuencias a Aplicaciones. La app no está firmada con una
 cuenta de desarrollador, así que la primera vez macOS avisa: en macOS 13 y 14, clic derecho

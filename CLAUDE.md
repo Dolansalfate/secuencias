@@ -176,17 +176,28 @@ compila, la tarea "Tests" corre los tests, y F5 depura (hay configuraciones con 
   con el `.app`, un enlace a Aplicaciones y "Primera vez.txt" (cómo saltar Gatekeeper). El ícono
   sale de `mac/icono.png` (`ICON_BIG`; JUCE genera el `.icns`). Desde Linux no se puede compilar
   para Mac.
+- Windows: preset `release-win` (Visual Studio 2022, x64, multi-config: `cmake --build --preset
+  release-win` y `ctest --preset release-win`), y `windows/instalador.iss` (Inno Setup 6) que
+  arma `dist/Secuencias-<versión>-windows-setup.exe`: instala por usuario en
+  `%LOCALAPPDATA%\Programs\Secuencias` sin administrador, con `instalar-ia.ps1` y la carpeta
+  `wheels\` (madmom precompilado para Python 3.10 a 3.12, porque PyPI no trae ruedas de madmom
+  para Windows y compilarlo exige Visual Studio). Sin firma: SmartScreen avisa la primera vez.
+  Audio con WASAPI y DirectSound (sin ASIO: exigiría el SDK de Steinberg). m4a se decodifica
+  con Media Foundation. MSVC compila con `/utf-8` (los fuentes tienen tildes en `tr()`).
 - GitHub Actions (`.github/workflows/build.yml`): en cada push a `main` compila el DMG en
-  `macos-14` y los tests más el `.deb` en `ubuntu-22.04`, y los deja como artefactos; con una
-  etiqueta `v*` publica una Release con ambos instaladores adjuntos. El repositorio es
-  `git@github.com:Dolansalfate/secuencias.git` (privado).
-- Motores de IA: `scripts/instalar-ia.sh` crea `~/demucs-env` y `~/analisis-env` en macOS o
-  Ubuntu (elige PyTorch según sistema y tarjeta: cu126, cpu, o 2.2.2 en Mac Intel, el último con
+  `macos-14`, los tests más el `.deb` en `ubuntu-22.04`, y en `windows-2022` los tests, las
+  ruedas de madmom y el instalador; los deja como artefactos y con una etiqueta `v*` publica
+  una Release con los tres instaladores. Las compilaciones de Mac y Windows solo se ven ahí.
+  El repositorio es `git@github.com:Dolansalfate/secuencias.git` (privado); el token de acceso
+  limitado al repositorio está en `~/.config/secuencias/gh-token` (`GH_TOKEN` para `gh`).
+- Motores de IA: `scripts/instalar-ia.sh` (macOS y Ubuntu) e `instalar-ia.ps1` (Windows,
+  venvs en `%USERPROFILE%` con `Scripts\python.exe`; `venvPython()` en MainComponent da la ruta
+  por defecto según plataforma) crean `~/demucs-env` y `~/analisis-env` (elige PyTorch según sistema y tarjeta: cu126, cpu, o 2.2.2 en Mac Intel, el último con
   versión para esa arquitectura; exige Python 3.9 a 3.12). Viaja en el bundle de macOS
   (`Contents/Resources`), en `/opt/secuencias` (.deb) y en `~/.local/share/secuencias`
   (`install.sh`); "Ajustes IA" > "Instalar motores de IA" lo abre en una terminal
-  (`launchInstaller`: osascript con Terminal en macOS; `x-terminal-emulator`, gnome-terminal,
-  konsole o xterm en Linux).
+  (`launchInstaller`: osascript con Terminal en macOS; `powershell -NoExit -File` en Windows;
+  `x-terminal-emulator`, gnome-terminal, konsole o xterm en Linux).
 
 **Antes de dar por terminado un cambio**:
 1. `cmake --build --preset debug` sin errores ni warnings nuevos en `Source/` o `Tests/`.
@@ -224,7 +235,8 @@ Source/
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
 linux/                 .desktop (plantilla con @EXEC@), ícono SVG y empaquetar-deb.sh
 mac/                   icono.png (ícono del bundle) y empaquetar.sh (DMG universal, firma ad hoc)
-scripts/instalar-ia.sh Instalador de los motores de IA (venvs de Demucs y madmom) para macOS y Ubuntu
+windows/               icono.ico e instalador.iss (Inno Setup)
+scripts/               instalar-ia.sh (macOS y Ubuntu) e instalar-ia.ps1 (Windows): venvs de Demucs y madmom
 .github/workflows/     build.yml: DMG y .deb en cada push, Release en cada etiqueta v*
 install.sh / uninstall.sh   Instalación por usuario (~/.local/bin, ~/.local/share/applications)
 .vscode/               Tareas, depuración, ajustes
@@ -591,6 +603,10 @@ Pasos de `run()`:
   `gio` sí funcionan con ese entorno. Para reproducir el comportamiento real del usuario, lanza
   la app desde una terminal normal o desde el menú.
 - Parámetros que cambian en vivo: siempre con rampa o fundido (ver `smoothedGain` y `fade`).
+- **Rutas y ejecutables por plataforma**: nunca compruebes rutas absolutas con `startsWith ("/")`
+  (en Windows empiezan con `C:\`): usa `juce::File::isAbsolutePath`. Los venvs tienen
+  `bin/python` en Unix y `Scripts\python.exe` en Windows (`venvPython`, `audioSeparatorExe`);
+  el `PATH` se separa con `;` en Windows y `ffmpeg` es `ffmpeg.exe` (`ffmpegInPath`).
 - **Nombres globales que chocan con los SDK de macOS**: los headers de JUCE en Mac arrastran
   Carbon/CoreServices, que define `struct Marker` (AIFF.h), `Rect`, `Point`, `Comment`,
   `Fixed`, `Style`, `Cell`... Los tipos del modelo van con nombre propio (`SongMarker`,
@@ -669,6 +685,10 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.1 (Windows)**: preset `release-win`, `/utf-8` en MSVC, rutas por plataforma
+  (`venvPython`, `isAbsolutePath`, `ffmpeg.exe`, `audio-separator.exe`), m4a en Windows,
+  `instalar-ia.ps1`, instalador Inno Setup con ruedas de madmom compiladas en Actions, job
+  `windows` con tests, Release con tres instaladores.
 - **v0.3 (instaladores)**: `.deb` (`linux/empaquetar-deb.sh`), DMG universal para macOS
   (`mac/empaquetar.sh`, preset `release-mac`, `ICON_BIG`, firma ad hoc), GitHub Actions con
   Release por etiqueta, `scripts/instalar-ia.sh` y el botón "Instalar motores de IA" en

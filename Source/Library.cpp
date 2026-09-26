@@ -212,9 +212,9 @@ Library::Library (const juce::File& rootFolder) : root (rootFolder)
     root.createDirectory();
 }
 
-// JUCE decodifica AAC/m4a solo con CoreAudio (macOS); en Linux no hay decodificador.
+// JUCE decodifica AAC/m4a con CoreAudio (macOS) y Media Foundation (Windows); en Linux no hay decodificador.
 static const char* const audioExtensions =
-   #if JUCE_MAC
+   #if JUCE_MAC || JUCE_WINDOWS
     "wav;aif;aiff;flac;mp3;ogg;m4a";
    #else
     "wav;aif;aiff;flac;mp3;ogg";

@@ -11,6 +11,17 @@ namespace
 {
     constexpr int saveDelayMs = 500;   // retardo para guardar song.json tras un cambio de mezcla o click
 
+    // Python de un venv en la carpeta del usuario: <venv>/bin/python, o <venv>\Scripts\python.exe en Windows
+    juce::String venvPython (const char* venvName)
+    {
+        const auto venv = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (venvName);
+       #if JUCE_WINDOWS
+        return venv.getChildFile ("Scripts/python.exe").getFullPathName();
+       #else
+        return venv.getChildFile ("bin/python").getFullPathName();
+       #endif
+    }
+
    #if JUCE_LINUX
     // En Linux se usa el selector propio de JUCE en vez del nativo (zenity/kdialog): zenity no
     // permite elegir archivos y carpetas a la vez y, con GNOME en Wayland, su ventana se abre
@@ -2281,8 +2292,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
 //==============================================================================
 juce::String MainComponent::pythonPath() const
 {
-    const auto def = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                         .getChildFile ("demucs-env/bin/python").getFullPathName();
+    const auto def = venvPython ("demucs-env");
     auto p = props.getUserSettings()->getValue ("pythonPath", def).trim();
     if (p.startsWith ("~"))
         p = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getFullPathName() + p.substring (1);
@@ -2414,7 +2424,7 @@ void MainComponent::startSeparation (const juce::File& file)
     }
 
     const auto py = pythonPath();
-    if (! py.startsWithChar ('/') || ! juce::File (py).existsAsFile())
+    if (! juce::File::isAbsolutePath (py) || ! juce::File (py).existsAsFile())
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Falta Demucs"),
             tr ("No encuentro Python con Demucs en:\n") + py
@@ -2503,12 +2513,17 @@ juce::File MainComponent::installerScript() const
 {
     const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
     const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+   #if JUCE_WINDOWS
+    const juce::String name = "instalar-ia.ps1";
+   #else
+    const juce::String name = "instalar-ia.sh";
+   #endif
     const juce::File candidates[] = {
-        exe.getParentDirectory().getParentDirectory().getChildFile ("Resources/instalar-ia.sh"),        // macOS: Secuencias.app/Contents/Resources
-        juce::File ("/opt/secuencias/instalar-ia.sh"),                                                   // paquete .deb
-        home.getChildFile (".local/share/secuencias/instalar-ia.sh"),                                    // install.sh
-        exe.getParentDirectory().getParentDirectory().getParentDirectory().getParentDirectory().getChildFile ("scripts/instalar-ia.sh"),   // build/<preset>/Secuencias_artefacts/<config>/
-        exe.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile ("scripts/instalar-ia.sh")
+        exe.getSiblingFile (name),                                                                        // instalador de Windows y paquete .deb (/opt/secuencias)
+        exe.getParentDirectory().getParentDirectory().getChildFile ("Resources/" + name),                 // macOS: Secuencias.app/Contents/Resources
+        home.getChildFile (".local/share/secuencias/" + name),                                            // install.sh
+        exe.getParentDirectory().getParentDirectory().getParentDirectory().getParentDirectory().getChildFile ("scripts/" + name),   // build/<preset>/Secuencias_artefacts/<config>/
+        exe.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile ("scripts/" + name)
     };
     for (auto& f : candidates)
         if (f.existsAsFile())
@@ -2531,6 +2546,8 @@ void MainComponent::launchInstaller()
     const auto cmd = "bash " + script.getFullPathName().quoted();
     launched = proc.start (juce::StringArray { "osascript", "-e", "tell application \"Terminal\" to activate",
                                                "-e", "tell application \"Terminal\" to do script " + cmd.quoted() });
+   #elif JUCE_WINDOWS
+    launched = proc.start ("powershell -NoExit -ExecutionPolicy Bypass -File " + script.getFullPathName().quoted());
    #else
     for (auto& term : { juce::StringArray { "x-terminal-emulator", "-e", "bash", script.getFullPathName() },
                         juce::StringArray { "gnome-terminal", "--", "bash", script.getFullPathName() },
@@ -2544,7 +2561,12 @@ void MainComponent::launchInstaller()
    #endif
     if (! launched)
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Ajustes IA"),
-                                                tr ("No pude abrir una terminal. Ejecuta a mano:\n\nbash ") + script.getFullPathName().quoted());
+                                                tr ("No pude abrir una terminal. Ejecuta a mano:\n\n")
+                                               #if JUCE_WINDOWS
+                                                + "powershell -ExecutionPolicy Bypass -File " + script.getFullPathName().quoted());
+                                               #else
+                                                + "bash " + script.getFullPathName().quoted());
+                                               #endif
     else
         sepLabel.setText (tr ("Instalador de IA abierto en una terminal"), juce::dontSendNotification);
 }
@@ -2849,8 +2871,7 @@ void MainComponent::levelSetlist()
 //==============================================================================
 juce::String MainComponent::analysisPythonPath() const
 {
-    const auto def = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                         .getChildFile ("analisis-env/bin/python").getFullPathName();
+    const auto def = venvPython ("analisis-env");
     auto p = props.getUserSettings()->getValue ("analysisPythonPath", def).trim();
     if (p.startsWith ("~"))
         p = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getFullPathName() + p.substring (1);
