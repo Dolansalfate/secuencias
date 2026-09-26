@@ -1888,6 +1888,12 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     m.addItem (6, tr ("Eliminar este tramo (deja silencio)"), idx >= 0 && clips.size() > 1);
     m.addItem (7, tr ("Eliminar este tramo y cerrar el hueco (la grilla se adelanta)"), idx >= 0 && clips.size() > 1);
     m.addSeparator();
+    m.addItem (11, tr ("Copiar tramo"), idx >= 0);
+    m.addItem (12, tr ("Duplicar tramo (pegar a continuación)"), idx >= 0);
+    juce::String pegarEn = formatTime (timeMap.toPlayback (t));
+    m.addItem (13, tr ("Pegar insertando en ") + pegarEn + (clipboard.valid ? juce::String::formatted (" (%.1f s)", clipboard.clip.length()) : juce::String()), clipboard.valid);
+    m.addItem (14, tr ("Pegar encima en ") + pegarEn, clipboard.valid);
+    m.addSeparator();
     m.addItem (8, tr ("Deshacer la última edición (Ctrl+Z)"), ! undoStack.empty());
     m.addItem (9, tr ("Restaurar el audio original (sin cortes)"), ! info->clips.empty());
     m.addSeparator();
@@ -1905,6 +1911,9 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
             undoLastEdit();
             return;
         }
+        if (result == 11) { copyClip (idx); return; }
+        if (result == 12) { duplicateClip (idx); return; }
+        if (result == 13 || result == 14) { pasteClipboard (t, result == 13); return; }
         if (result == 2 || result == 3)
         {
             askText (tr ("Desplazamiento en milisegundos (+ = más tarde, - = antes)"), "0", [this, idx, result, sourceLength] (const juce::String& text)
@@ -1962,6 +1971,101 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         else
             arrangementEdited();
     });
+}
+
+void MainComponent::copyClip (int index)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return;
+    auto clips = info->clips;
+    arrangement::ensureClips (clips, (double) sourceSong->length / engine.getSampleRate());
+    if (! juce::isPositiveAndBelow (index, (int) clips.size()))
+        return;
+    const auto& c = clips[(size_t) index];
+    clipboard.valid = true;
+    clipboard.clip = c;
+    clipboard.grid = arrangement::copyGrid (info->analysis, c.position, c.end());   // la grilla que se ve sobre ese tramo
+    // Secciones de tempo del rango: la vigente al inicio y las que empiezan dentro, relativas al tramo
+    clipboard.regions.clear();
+    const int first = info->tempoRegionAt (c.position);
+    if (first >= 0)
+        clipboard.regions.push_back ({ 0.0, info->tempoRegions[(size_t) first].origBpm, info->tempoRegions[(size_t) first].playBpm });
+    for (auto& r : info->tempoRegions)
+        if (r.start > c.position + 1.0e-6 && r.start < c.end() - 1.0e-6)
+            clipboard.regions.push_back ({ r.start - c.position, r.origBpm, r.playBpm });
+    sepLabel.setText (juce::String::formatted ("Tramo copiado (%.1f s, ", c.length()) + juce::String ((int) clipboard.grid.beats.size()) + tr (" tiempos)"), juce::dontSendNotification);
+}
+
+void MainComponent::pasteClipboard (double at, bool insert)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || ! clipboard.valid)
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    if (cutMode() == 2)
+        if (const double g = nearestGridTime (at); g >= 0.0)
+            at = g;   // a la rejilla: el pegado cae en el tiempo más cercano
+    at = juce::jmax (0.0, at);
+    pushUndo();
+    arrangement::ensureClips (info->clips, sourceLength);
+    if (! insert)
+    {
+        arrangement::pasteClip (info->clips, clipboard.clip, at, false);
+        arrangementEdited();
+        sepLabel.setText (tr ("Tramo pegado encima en ") + formatTime (timeMap.toPlayback (at)), juce::dontSendNotification);
+        return;
+    }
+    const double len = clipboard.clip.length();
+    // Tempo de la sección donde se pega, para restaurarlo después del tramo insertado
+    const int dstRegion = info->tempoRegionAt (at);
+    const double dstBpm = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].origBpm : 0.0;
+    const double dstPlay = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].playBpm : 0.0;
+    arrangement::pasteClip (info->clips, clipboard.clip, at, true);
+    arrangement::shiftGrid (*info, at, len);                 // abre el hueco en tiempos, acordes, marcadores y secciones
+    arrangement::pasteGrid (info->analysis, clipboard.grid, at);
+    if (! clipboard.regions.empty() && dstBpm > 0.0)
+    {
+        // El tramo trae sus secciones de tempo; después de él vuelve el tempo de destino. Las vecinas iguales se unen.
+        for (auto& r : clipboard.regions)
+            info->tempoRegions.push_back ({ at + r.start, r.origBpm, r.playBpm });
+        info->tempoRegions.push_back ({ at + len, dstBpm, dstPlay });
+        info->sortTempoRegions();
+        info->mergeEqualTempoRegions();
+    }
+    refreshFromInfo();
+    sepLabel.setText (tr ("Tramo pegado en ") + formatTime (timeMap.toPlayback (at)) + juce::String::formatted (" (%.1f s insertados)", len), juce::dontSendNotification);
+}
+
+void MainComponent::duplicateClip (int index)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return;
+    auto clips = info->clips;
+    arrangement::ensureClips (clips, (double) sourceSong->length / engine.getSampleRate());
+    if (! juce::isPositiveAndBelow (index, (int) clips.size()))
+        return;
+    const auto saved = clipboard;
+    copyClip (index);
+    const int mode = cutMode();
+    cutModeBox.setSelectedId (1, juce::dontSendNotification);   // justo a continuación, sin ajustar a la rejilla
+    pasteClipboard (clips[(size_t) index].end(), true);
+    cutModeBox.setSelectedId (mode, juce::dontSendNotification);
+    clipboard = saved.valid ? saved : clipboard;
+}
+
+void MainComponent::duplicateForCapture (double seconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return;
+    auto clips = info->clips;
+    arrangement::ensureClips (clips, (double) sourceSong->length / engine.getSampleRate());
+    const int idx = arrangement::clipAt (clips, seconds);
+    if (idx >= 0)
+        duplicateClip (idx);
+    std::cout << "captura: duplicado el tramo " << idx << ", tramos " << info->clips.size() << ", largo " << arrangement::lengthSeconds (info->clips, (double) sourceSong->length / engine.getSampleRate()) << "\n";
 }
 
 void MainComponent::clipDragged (double playbackSeconds, double delta, int lane)

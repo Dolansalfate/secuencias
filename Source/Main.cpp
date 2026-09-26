@@ -38,6 +38,8 @@ public:
                 captureCut = commandLine.fromFirstOccurrenceOf ("--corte=", false, false).getDoubleValue();
             if (commandLine.contains ("--desplazar="))
                 captureMoveMs = commandLine.fromFirstOccurrenceOf ("--desplazar=", false, false).getDoubleValue();
+            if (commandLine.contains ("--duplicar="))
+                captureDuplicate = commandLine.fromFirstOccurrenceOf ("--duplicar=", false, false).getDoubleValue();
             if (commandLine.contains ("--modocorte="))
                 captureCutMode = commandLine.fromFirstOccurrenceOf ("--modocorte=", false, false).getIntValue();
             if (commandLine.contains ("--cancion="))
@@ -68,6 +70,7 @@ public:
             if (captureTempo > 0.0 || captureTranspose != 0) mc->setTempoForCapture (captureTempo, captureTranspose);
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs);
+            if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
         }
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
                                              && ! mc->isRendering() && ! mc->isSeparating());
@@ -136,7 +139,7 @@ private:
     CaptureTimer captureTimer { *this };
     juce::File captureFile;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
-    double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0;
+    double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0;
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;
 };

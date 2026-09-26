@@ -57,8 +57,11 @@ El mismo código sigue compilando en macOS.
 - **Cortar y mover el audio** sin tocar la grilla: clic derecho sobre un carril para cortar
   los stems en ese punto (siempre todos a la vez, así nunca se desalinean), desplazar el
   tramo en milisegundos, alinear su inicio al tiempo más cercano, unir, eliminar (dejando
-  silencio o cerrando el hueco) o restaurar el audio original. Shift + arrastrar sobre un
-  carril mueve el tramo a mano. Ctrl+Z deshace la última edición. El selector junto a
+  silencio o cerrando el hueco) o restaurar el audio original. También copiar un tramo y
+  pegarlo en otro punto insertando (se abre espacio y todo lo que sigue, audio y grilla, se
+  corre; la copia lleva sus tiempos y acordes) o encima, y duplicarlo a continuación: así se
+  reordena una canción o se repite un coro. Shift + arrastrar sobre un carril mueve el tramo
+  a mano. Ctrl+Z deshace la última edición. El selector junto a
   "+ Marcador" elige cómo corta: libre, a la rejilla (al tiempo más cercano) o a la
   transiente (al golpe más cercano de la pista donde haces clic; usa la batería, que marca
   mejor el inicio de cada tiempo). Con el mismo modo, al arrastrar un tramo su inicio o su

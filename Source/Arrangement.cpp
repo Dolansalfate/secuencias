@@ -96,6 +96,43 @@ namespace arrangement
         sortClips (clips);
     }
 
+    void insertGap (std::vector<Clip>& clips, double at, double length)
+    {
+        if (length <= 0.0)
+            return;
+        for (int i = (int) clips.size(); --i >= 0;)
+        {
+            auto& c = clips[(size_t) i];
+            if (c.position < at - 1.0e-9 && c.end() > at + 1.0e-9)
+            {
+                // Atraviesa el punto: se parte y la segunda mitad se corre
+                const double offset = at - c.position;
+                Clip second { c.srcStart + offset, c.srcEnd, at + length };
+                c.srcEnd = c.srcStart + offset;
+                clips.insert (clips.begin() + i + 1, second);
+            }
+            else if (c.position >= at - 1.0e-9)
+                c.position += length;
+        }
+        sortClips (clips);
+    }
+
+    int pasteClip (std::vector<Clip>& clips, const Clip& source, double at, bool insert)
+    {
+        if (source.length() <= 0.0)
+            return -1;
+        if (insert)
+            insertGap (clips, at, source.length());
+        Clip copy { source.srcStart, source.srcEnd, juce::jmax (0.0, at) };
+        clips.push_back (copy);
+        sortClips (clips);
+        for (int i = 0; i < (int) clips.size(); ++i)
+            if (std::abs (clips[(size_t) i].position - copy.position) < 1.0e-9 && std::abs (clips[(size_t) i].srcStart - copy.srcStart) < 1.0e-9
+                && std::abs (clips[(size_t) i].srcEnd - copy.srcEnd) < 1.0e-9)
+                return i;
+        return -1;
+    }
+
     bool canJoinWithPrevious (const std::vector<Clip>& clips, int index)
     {
         if (index <= 0 || index >= (int) clips.size())
@@ -142,6 +179,14 @@ namespace arrangement
         for (int i = (int) a.chords.size(); --i >= 0;)
         {
             auto& c = a.chords[(size_t) i];
+            if (delta > 0.0 && c.start < from - 1.0e-9 && c.end > from + 1.0e-9)
+            {
+                // Atraviesa el hueco: se parte, y el hueco queda sin acorde
+                Chord second { from + delta, c.end + delta, c.name };
+                c.end = from;
+                a.chords.insert (a.chords.begin() + i + 1, second);
+                continue;
+            }
             c.start = mapT (c.start);
             c.end = mapEnd (c.end);
             if (c.end - c.start < 0.01)
@@ -159,6 +204,31 @@ namespace arrangement
         }
         info.sortTempoRegions();
         info.clickOffset = removed (info.clickOffset) ? from : mapT (info.clickOffset);
+    }
+
+    GridSlice copyGrid (const Analysis& a, double from, double to)
+    {
+        GridSlice g;
+        for (auto& b : a.beats)
+            if (b.seconds >= from - 1.0e-9 && b.seconds < to - 1.0e-9)
+                g.beats.push_back ({ b.seconds - from, b.beatInBar });
+        for (auto& c : a.chords)
+        {
+            const double s0 = juce::jmax (c.start, from), s1 = juce::jmin (c.end, to);
+            if (s1 - s0 > 0.01)
+                g.chords.push_back ({ s0 - from, s1 - from, c.name });
+        }
+        return g;
+    }
+
+    void pasteGrid (Analysis& a, const GridSlice& g, double at)
+    {
+        for (auto& b : g.beats)
+            a.beats.push_back ({ b.seconds + at, b.beatInBar });
+        for (auto& c : g.chords)
+            a.chords.push_back ({ c.start + at, c.end + at, c.name });
+        std::stable_sort (a.beats.begin(), a.beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
+        std::stable_sort (a.chords.begin(), a.chords.end(), [] (const Chord& x, const Chord& y) { return x.start < y.start; });
     }
 
     double findOnset (const juce::AudioBuffer<float>& buffer, double sr, double around, double window, double* strengthDb)

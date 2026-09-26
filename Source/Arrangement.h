@@ -21,14 +21,33 @@ namespace arrangement
     // Elimina un tramo; con closeGap los siguientes se adelantan lo que duraba (removedFrom y
     // removedLength lo informan para desplazar también la grilla)
     void removeClip (std::vector<Clip>&, int index, bool closeGap, double& removedFrom, double& removedLength);
+    // Abre un hueco de `length` s en `at`: lo que empieza en o después de `at` se corre; un tramo que
+    // atraviesa `at` se parte ahí. Para pegar insertando.
+    void insertGap (std::vector<Clip>&, double at, double length);
+    // Pega una copia de `source` (su rango del audio original) en `at`; con `insert` abre antes el
+    // hueco, si no se superpone. Devuelve el índice del tramo nuevo.
+    int pasteClip (std::vector<Clip>&, const Clip& source, double at, bool insert);
     bool canJoinWithPrevious (const std::vector<Clip>&, int index);     // continúa en la fuente y en la posición
     bool joinWithPrevious (std::vector<Clip>&, int index);
     void sortClips (std::vector<Clip>&);
 
     // Desplaza la grilla (tiempos, acordes, marcadores, secciones de tempo, inicio del click) al
     // cerrar un hueco: con delta < 0 lo que había en [from, from - delta) desaparece y lo que
-    // sigue se adelanta; con delta > 0 se abre un hueco. Los tramos de audio no se tocan.
+    // sigue se adelanta; con delta > 0 se abre un hueco (un acorde que lo atraviesa se parte en
+    // dos, y el hueco queda sin acorde). Los tramos de audio no se tocan.
     void shiftGrid (SongInfo&, double fromSeconds, double deltaSeconds);
+
+    // Grilla de un rango de la canción, relativa a su inicio: los tiempos dentro y los acordes
+    // recortados al rango. Es lo que viaja con un tramo copiado.
+    struct GridSlice
+    {
+        std::vector<Beat> beats;
+        std::vector<Chord> chords;
+    };
+    GridSlice copyGrid (const Analysis&, double fromSeconds, double toSeconds);
+    // Inserta una grilla copiada en `at` (tras abrir el hueco con shiftGrid): tiempos y acordes se
+    // suman desplazados y quedan ordenados
+    void pasteGrid (Analysis&, const GridSlice&, double at);
 
     // Transiente (ataque) más cercana a `aroundSeconds`, buscada en ±`windowSeconds` sobre la
     // envolvente del buffer (bloques de 1 ms): el mayor salto de nivel en 3 ms, con preferencia

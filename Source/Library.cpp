@@ -31,6 +31,17 @@ void SongInfo::sortTempoRegions()
         tempoRegions.insert (tempoRegions.begin(), TempoRegion { 0.0, tempoRegions.front().origBpm, 0.0 });
 }
 
+void SongInfo::mergeEqualTempoRegions()
+{
+    for (int i = (int) tempoRegions.size(); --i >= 1;)
+    {
+        const auto& a = tempoRegions[(size_t) i - 1];
+        const auto& b = tempoRegions[(size_t) i];
+        if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05)
+            tempoRegions.erase (tempoRegions.begin() + i);
+    }
+}
+
 int SongInfo::tempoRegionAt (double seconds) const
 {
     int found = -1;

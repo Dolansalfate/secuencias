@@ -94,8 +94,13 @@ modelo que usa Moises).
   stems en ese punto (todos a la vez), desplazar el tramo (o el tramo y los siguientes) en
   milisegundos, alinear su inicio al tiempo detectado más cercano, unir con el anterior,
   eliminar dejando silencio o cerrando el hueco, restaurar el audio original. Shift + arrastre
-  sobre un carril mueve el tramo bajo el mouse (se ve el desplazamiento en ms). La grilla no
-  se mueve con el audio, salvo al cerrar un hueco (`shiftGrid`). Los bordes de los tramos se
+  sobre un carril mueve el tramo bajo el mouse (se ve el desplazamiento en ms). "Copiar
+  tramo", "Pegar insertando" (abre espacio: el audio y la grilla que siguen se corren, y la
+  copia trae los tiempos y acordes de su rango y, si venía de una sección con otro tempo, su
+  propia sección de tempo), "Pegar encima" (superpone) y "Duplicar tramo" (pega insertando a
+  continuación): con eso se reordena una canción (cortar en los compases, copiar, pegar
+  insertando, eliminar el original cerrando el hueco). La grilla no se mueve con el audio,
+  salvo al cerrar o abrir un hueco (`shiftGrid`). Los bordes de los tramos se
   dibujan sobre los carriles y los huecos quedan sombreados. Ctrl+Z (o el menú) deshace la
   última edición de audio o de grilla (hasta 30 pasos; la mezcla no se deshace).
 - **Modo de corte** (selector junto a "+ Marcador", ajuste `cutMode`): "Corte libre" corta
@@ -497,8 +502,14 @@ Pasos de `run()`:
 - Edición: `ensureClips`, `cutAt`, `moveClip` (uno o "este y los siguientes", nunca antes de
   0), `removeClip` (con `closeGap` los siguientes se adelantan e informa qué se quitó),
   `joinWithPrevious` (solo si continúan en la fuente y en la posición), `clipAt` (de dos
-  solapados manda el último). `shiftGrid (info, desde, delta)` mueve o recorta tiempos,
-  acordes, marcadores, secciones de tempo y `clickOffset` al cerrar un hueco.
+  solapados manda el último), `insertGap` (parte el tramo que atraviesa el punto y corre lo
+  que sigue) y `pasteClip` (copia de un rango de la fuente, superpuesta o insertando).
+  `shiftGrid (info, desde, delta)` mueve o recorta tiempos, acordes, marcadores, secciones de
+  tempo y `clickOffset` al cerrar un hueco; con delta > 0 abre uno y parte el acorde que lo
+  atraviesa. `copyGrid` / `pasteGrid` (`GridSlice`) llevan los tiempos y acordes de un rango
+  con el tramo copiado. En MainComponent: `copyClip`, `pasteClipboard` (a la rejilla si el
+  modo de corte es rejilla; con inserción añade secciones de tempo si el origen tenía otro
+  tempo), `duplicateClip`; `--captura --duplicar=seg`.
 - Cadena de render en `MainComponent`: `sourceSong` (archivos) → `arrangedSong`
   (`arrangement::render`, la línea de tiempo de la canción) → `currentSong`
   (`stretcher::render` con el `TimeMap` construido sobre el largo del arreglo). La carga
@@ -680,8 +691,8 @@ Fases, en orden:
 4. **Edición** (en curso): `song.json` guarda el arreglo como lista de tramos del audio
    original (`clips`) colocados en la línea de tiempo. Hecho: cortar (todos los stems), mover
    (en ms, al tiempo más cercano o con Shift + arrastre), eliminar (con o sin cerrar el hueco),
-   unir, restaurar, deshacer. Pendiente: duplicar tramos, rehacer, silenciar tramos por pista,
-   recorte de inicio y fin como gesto directo.
+   unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer. Pendiente:
+   rehacer, silenciar tramos por pista, recorte de inicio y fin como gesto directo.
 
 Pendientes de antes que siguen vigentes: probar con interfaces multicanal reales, control
 MIDI, precarga de la siguiente canción, opción "cambiar de canción solo cuando está detenido",
@@ -695,6 +706,10 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.3**: copiar, pegar (insertando o encima) y duplicar tramos con su grilla
+  (`insertGap`, `pasteClip`, `copyGrid`, `pasteGrid`, `ClipClipboard` con las secciones de
+  tempo del rango; `SongInfo::mergeEqualTempoRegions`); `shiftGrid` parte el acorde que
+  atraviesa un hueco nuevo.
 - **v0.3.2**: `FilePicker` (selector dentro de la ventana en Linux y Windows), "Separar
   canción (IA)" sobre la canción seleccionada (`separateCurrentSong`, `Library::replaceStems`,
   `separationTarget`), `--captura --separar --selector`.

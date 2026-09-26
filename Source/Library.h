@@ -133,6 +133,7 @@ struct SongInfo
     void sortMarkers();
     void fitStemArrays();         // deja los vectores por stem del tamaño de `stems` (0 dB, sin medir)
     void sortTempoRegions();      // ordena y deja la primera en 0
+    void mergeEqualTempoRegions();   // une secciones vecinas con el mismo tempo original y de reproducción
     int tempoRegionAt (double originalSeconds) const;   // índice de la sección que contiene ese instante, o -1 si no hay
 };
 

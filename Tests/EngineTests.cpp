@@ -217,6 +217,10 @@ int main()
         si.tempoRegions = { { 10.0, 150.0, 0.0 } };
         si.sortTempoRegions();
         CHECK (si.tempoRegions.size() == 2 && std::abs (si.tempoRegions[0].start) < 1.0e-9 && std::abs (si.tempoRegions[0].origBpm - 150.0) < 1.0e-9);
+        // Vecinas iguales se unen (mismo tempo original y de reproducción); distintas se conservan
+        si.tempoRegions = { { 0.0, 100.0, 0.0 }, { 5.0, 100.0, 0.0 }, { 8.0, 120.0, 0.0 }, { 9.0, 120.0, 110.0 }, { 12.0, 100.0, 0.0 } };
+        si.mergeEqualTempoRegions();
+        CHECK (si.tempoRegions.size() == 4 && std::abs (si.tempoRegions[1].start - 8.0) < 1.0e-9 && std::abs (si.tempoRegions[2].start - 9.0) < 1.0e-9 && std::abs (si.tempoRegions[3].start - 12.0) < 1.0e-9);
         // Sin secciones pero con análisis, el tempo original es el del análisis
         si.tempoRegions.clear();
         si.analysis.bpm = 120.0;
@@ -582,6 +586,38 @@ int main()
         std::vector<Clip> two { { 0.0, 4.0, 0.0 }, { 4.0, 8.0, 4.0 } };
         arrangement::moveClip (two, 1, -1.0, false);
         CHECK (arrangement::clipAt (two, 3.5) == 1 && std::abs (arrangement::lengthSeconds (two, 8.0) - 7.0) < 1.0e-9);
+    }
+
+    std::cout << "[Arrangement] pegar insertando: hueco, copia y grilla\n";
+    {
+        std::vector<Clip> clips { { 0.0, 10.0, 0.0 } };
+        // Insertar un hueco de 2 s en 4 s: el tramo se parte y la segunda mitad se corre
+        arrangement::insertGap (clips, 4.0, 2.0);
+        CHECK (clips.size() == 2 && std::abs (clips[0].srcEnd - 4.0) < 1.0e-9 && std::abs (clips[1].position - 6.0) < 1.0e-9 && std::abs (clips[1].srcStart - 4.0) < 1.0e-9);
+        CHECK (arrangement::clipAt (clips, 5.0) == -1 && std::abs (arrangement::lengthSeconds (clips, 10.0) - 12.0) < 1.0e-9);
+        // Pegar insertando el primer tramo (0-4 del original) en 6 s: lo que sigue se corre 4 s más
+        const int pasted = arrangement::pasteClip (clips, clips[0], 6.0, true);
+        CHECK (pasted == 1 && clips.size() == 3 && std::abs (clips[1].position - 6.0) < 1.0e-9 && std::abs (clips[1].srcEnd - 4.0) < 1.0e-9
+               && std::abs (clips[2].position - 10.0) < 1.0e-9 && std::abs (arrangement::lengthSeconds (clips, 10.0) - 16.0) < 1.0e-9);
+        // Pegar encima: nada se mueve, el nuevo queda "arriba"
+        const int over = arrangement::pasteClip (clips, clips[0], 1.0, false);
+        CHECK (over >= 0 && clips.size() == 4 && arrangement::clipAt (clips, 2.0) == over && std::abs (clips[2].position - 6.0) < 1.0e-9);
+        CHECK (arrangement::pasteClip (clips, { 3.0, 3.0, 0.0 }, 1.0, true) == -1);   // tramo vacío: nada
+        // Grilla: copiar un rango y pegarlo tras abrir el hueco; un acorde que atraviesa el hueco se parte
+        SongInfo si;
+        for (int i = 0; i < 20; ++i) si.analysis.beats.push_back ({ i * 0.5, i % 4 + 1 });   // 0 .. 9,5
+        si.analysis.chords = { { 0.0, 3.0, "C" }, { 3.0, 10.0, "G" } };
+        const auto slice = arrangement::copyGrid (si.analysis, 1.0, 3.0);
+        CHECK (slice.beats.size() == 4 && std::abs (slice.beats[0].seconds) < 1.0e-9 && slice.beats[0].beatInBar == 3
+               && slice.chords.size() == 1 && slice.chords[0].name == "C" && std::abs (slice.chords[0].end - 2.0) < 1.0e-9);
+        arrangement::shiftGrid (si, 5.0, 2.0);   // hueco de 2 s en 5 s: G (3-10) se parte en 3-5 y 7-12
+        CHECK (si.analysis.chords.size() == 3 && std::abs (si.analysis.chords[1].end - 5.0) < 1.0e-9 && std::abs (si.analysis.chords[2].start - 7.0) < 1.0e-9
+               && std::abs (si.analysis.chords[2].end - 12.0) < 1.0e-9 && si.analysis.chords[2].name == "G");
+        CHECK (si.analysis.beats.size() == 20 && std::abs (si.analysis.beats[10].seconds - 7.0) < 1.0e-9 && std::abs (si.analysis.beats[9].seconds - 4.5) < 1.0e-9);
+        arrangement::pasteGrid (si.analysis, slice, 5.0);
+        CHECK (si.analysis.beats.size() == 24 && std::abs (si.analysis.beats[10].seconds - 5.0) < 1.0e-9 && si.analysis.beats[10].beatInBar == 3
+               && std::abs (si.analysis.beats[13].seconds - 6.5) < 1.0e-9 && std::abs (si.analysis.beats[14].seconds - 7.0) < 1.0e-9);
+        CHECK (si.analysis.chords.size() == 4 && std::abs (si.analysis.chords[2].start - 5.0) < 1.0e-9 && si.analysis.chords[2].name == "C" && si.analysis.chordAt (6.0) == 2 && si.analysis.chordAt (8.0) == 3);
     }
 
     std::cout << "[Arrangement] render: huecos en silencio, tramos desplazados, fundidos, identidad\n";

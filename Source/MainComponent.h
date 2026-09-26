@@ -48,6 +48,7 @@ public:
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void openImportPickerForCapture()                         { chooseStems(); }
+    void duplicateForCapture (double seconds);                // duplica el tramo que contiene ese instante (herramienta de captura)
     void setSeparationOptionsForCapture (int stems, int quality)   // sin guardar en los ajustes
     {
         if (stems > 0)   stemsBox.setSelectedId (juce::jlimit (1, 2, stems), juce::dontSendNotification);
@@ -138,6 +139,17 @@ private:
     // Arreglo (fase 4): cortar, mover, eliminar y unir tramos de audio; deshacer
     std::vector<TimelineView::ClipView> mappedClips() const;
     void clipMenu (double playbackSeconds, int lane);
+    // Portapapeles de tramos: el tramo copiado con la grilla (tiempos y acordes) de su rango y el tempo de su sección
+    struct ClipClipboard
+    {
+        bool valid = false;
+        Clip clip;
+        arrangement::GridSlice grid;
+        std::vector<TempoRegion> regions;   // secciones de tempo del rango, con inicio relativo al tramo
+    };
+    void copyClip (int index);
+    void pasteClipboard (double songSeconds, bool insert);   // insert: abre espacio (audio y grilla); si no, superpone
+    void duplicateClip (int index);                          // copia y pega insertando justo después del tramo
     void clipDragged (double playbackSeconds, double deltaSeconds, int lane);
     int cutMode() const { return cutModeBox.getSelectedId(); }          // 1 libre, 2 a la rejilla, 3 a la transiente
     double nearestGridTime (double songSeconds) const;                   // tiempo detectado (o de la rejilla fija) más cercano
@@ -252,6 +264,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<FilePicker> picker;
     juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
+    ClipClipboard clipboard;
 
     std::atomic<bool> abortJobs { false };
     juce::ThreadPool loaderPool { 1 };   // último: se destruye primero
