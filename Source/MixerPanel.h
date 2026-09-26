@@ -40,6 +40,36 @@ private:
     juce::ComboBox outBox;
 };
 
+// Canal del click: encendido, fader en dB, medidor y salida. Es el mismo click de la fila de
+// controles (BPM, inicio, volumen, salida); aquí solo cambia dónde se ve y se mueve.
+class ClickStrip : public juce::Component
+{
+public:
+    ClickStrip();
+
+    std::function<void (bool enabled, float gainDb, int outputPair)> onChanged;
+
+    juce::ComboBox& outputBox() { return outBox; }
+    void setState (bool enabled, float gainDb, int outputPair);   // desde la canción, sin avisar
+    void setLevel (float peak);
+    void tick() { meter.tick(); }
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    static constexpr int width = 106;
+
+private:
+    void changed();
+
+    juce::Label nameLabel;
+    LevelMeter meter { 1 };
+    juce::Slider fader;
+    juce::TextButton onBtn;
+    juce::ComboBox outBox;
+    int currentPair = 0;
+};
+
 // Canal maestro: fader de salida general y medidor de las salidas 1-2 con escala.
 class MasterStrip : public juce::Component
 {
@@ -73,6 +103,10 @@ public:
     std::function<void (float gainDb)> onMasterGainChanged;
 
     std::function<void (int stemIndex, double db)> onLevelEdited;   // casilla de nivelado de un canal
+    std::function<void (bool enabled, float gainDb, int outputPair)> onClickChanged;   // canal del click
+
+    void setClickState (bool enabled, float gainDb, int outputPair) { click.setState (enabled, gainDb, outputPair); }
+    void setClickVisible (bool visible);
 
     void setSong (std::shared_ptr<LoadedSong>);   // nullptr = sin canales
     void refreshOutputs();                        // cambió el dispositivo: rehacer los ComboBox de salida
@@ -87,5 +121,6 @@ private:
     juce::Viewport view;
     juce::Component holder;
     juce::OwnedArray<ChannelStrip> strips;
+    ClickStrip click;
     MasterStrip master;
 };

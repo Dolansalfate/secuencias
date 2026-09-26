@@ -135,6 +135,84 @@ void ChannelStrip::resized()
 }
 
 //==============================================================================
+ClickStrip::ClickStrip()
+{
+    nameLabel.setText ("CLICK", juce::dontSendNotification);
+    nameLabel.setJustificationType (juce::Justification::centred);
+    nameLabel.setFont (ui::font (13.0f, true));
+    addAndMakeVisible (nameLabel);
+    addAndMakeVisible (meter);
+
+    fader.setSliderStyle (juce::Slider::LinearVertical);
+    fader.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 60, 16);
+    fader.setRange (-40.0, 6.0, 0.5);
+    fader.setSkewFactorFromMidPoint (-12.0);
+    fader.setTextValueSuffix (" dB");
+    fader.setDoubleClickReturnValue (true, -6.0);
+    fader.setColour (juce::Slider::trackColourId, juce::Colours::lightgrey.withAlpha (0.5f));
+    fader.setColour (juce::Slider::thumbColourId, juce::Colours::lightgrey);
+    fader.setValue (-6.0, juce::dontSendNotification);
+    fader.onValueChange = [this] { changed(); };
+    addAndMakeVisible (fader);
+
+    onBtn.setButtonText ("On");
+    onBtn.setClickingTogglesState (true);
+    onBtn.setColour (juce::TextButton::buttonOnColourId, ui::accent.darker (0.2f));
+    onBtn.onClick = [this] { changed(); };
+    addAndMakeVisible (onBtn);
+
+    outBox.onChange = [this] { currentPair = juce::jmax (0, outBox.getSelectedId() - 1); changed(); };
+    addAndMakeVisible (outBox);
+
+    ui::disableFocus (*this);
+    setWantsKeyboardFocus (false);
+}
+
+void ClickStrip::changed()
+{
+    if (onChanged)
+        onChanged (onBtn.getToggleState(), (float) fader.getValue(), currentPair);
+}
+
+void ClickStrip::setState (bool enabled, float gainDb, int outputPair)
+{
+    currentPair = juce::jmax (0, outputPair);
+    if (onBtn.getToggleState() != enabled)
+        onBtn.setToggleState (enabled, juce::dontSendNotification);
+    if (std::abs (fader.getValue() - gainDb) >= 0.05)
+        fader.setValue (gainDb, juce::dontSendNotification);
+    if (outBox.getSelectedId() != outputPair + 1 && outBox.getNumItems() > 0)
+        outBox.setSelectedId (juce::jmin (outBox.getNumItems(), outputPair + 1), juce::dontSendNotification);
+}
+
+void ClickStrip::setLevel (float peak)
+{
+    meter.setLevels (0, peak, 0.0f);
+}
+
+void ClickStrip::paint (juce::Graphics& g)
+{
+    g.setColour (ui::panelAlt);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
+    g.setColour (juce::Colours::lightgrey);
+    g.fillRoundedRectangle (getLocalBounds().removeFromTop (4).toFloat().reduced (6.0f, 0.0f), 2.0f);
+}
+
+void ClickStrip::resized()
+{
+    auto r = getLocalBounds().reduced (6);
+    r.removeFromTop (4);
+    nameLabel.setBounds (r.removeFromTop (20));
+    outBox.setBounds (r.removeFromBottom (22));
+    r.removeFromBottom (4);
+    onBtn.setBounds (r.removeFromBottom (24).reduced (2, 0));
+    r.removeFromBottom (4);
+    meter.setBounds (r.removeFromRight (16).withTrimmedBottom (18));
+    r.removeFromRight (2);
+    fader.setBounds (r);
+}
+
+//==============================================================================
 MasterStrip::MasterStrip()
 {
     label.setText ("MASTER", juce::dontSendNotification);
@@ -192,9 +270,20 @@ MixerPanel::MixerPanel()
     view.setViewedComponent (&holder, false);
     view.setScrollBarsShown (false, true);
     addAndMakeVisible (view);
+    addAndMakeVisible (click);
     addAndMakeVisible (master);
     master.onGainChanged = [this] (float db) { if (onMasterGainChanged) onMasterGainChanged (db); };
+    click.onChanged = [this] (bool on, float db, int pair) { if (onClickChanged) onClickChanged (on, db, pair); };
     setWantsKeyboardFocus (false);
+}
+
+void MixerPanel::setClickVisible (bool visible)
+{
+    if (click.isVisible() != visible)
+    {
+        click.setVisible (visible);
+        resized();
+    }
 }
 
 void MixerPanel::setSong (std::shared_ptr<LoadedSong> song)
@@ -233,12 +322,15 @@ void MixerPanel::refreshOutputs()
         return;
     for (auto* strip : strips)
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
+    fillOutputBox (click.outputBox(), juce::jmax (0, click.outputBox().getSelectedId() - 1));
 }
 
 void MixerPanel::tick (AudioEngine& engine)
 {
     for (auto* strip : strips)
         strip->tick();
+    click.setLevel (engine.takeClickPeak());
+    click.tick();
     master.setLevels (engine.takeOutputPeak (0), engine.takeOutputPeak (1), engine.getOutputRms (0), engine.getOutputRms (1));
     master.tick();
 }
@@ -248,6 +340,11 @@ void MixerPanel::resized()
     auto r = getLocalBounds();
     master.setBounds (r.removeFromRight (MasterStrip::width));
     r.removeFromRight (8);
+    if (click.isVisible())
+    {
+        click.setBounds (r.removeFromRight (ClickStrip::width));
+        r.removeFromRight (8);
+    }
     view.setBounds (r);
 
     const int gap = 6;

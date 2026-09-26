@@ -514,6 +514,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
 
         if (outL != nullptr && outR != nullptr)
         {
+            float peak = 0.0f;
             for (int i = 0; i < n; ++i)
             {
                 const auto p = positions[(size_t) i];
@@ -550,7 +551,10 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 outL[offset + i] += v;
                 if (outR != outL)
                     outR[offset + i] += v;
+                peak = juce::jmax (peak, std::abs (v));
             }
+            if (peak > clickPeak.load())
+                clickPeak = peak;
         }
     }
 }

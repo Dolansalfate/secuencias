@@ -107,6 +107,7 @@ public:
 
     // Medidores de las salidas del dispositivo (después del fader maestro)
     float takeOutputPeak (int channel);         // pico desde la última lectura; 0 si el canal no existe
+    float takeClickPeak()                       { return clickPeak.exchange (0.0f); }   // pico del click generado desde la última lectura
     float getOutputRms (int channel) const;
 
     double getSampleRate() const    { return sampleRate.load(); }
@@ -150,6 +151,7 @@ private:
     std::atomic<double> clickBpm { 120.0 }, clickOffset { 0.0 };
     std::atomic<float> clickGain { 0.5f };
     std::atomic<int> clickPair { 0 };
+    std::atomic<float> clickPeak { 0.0f };
 
     std::atomic<float> masterGain { 1.0f };
     float smoothedMaster = 1.0f;             // solo hilo de audio

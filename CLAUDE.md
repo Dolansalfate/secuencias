@@ -53,8 +53,12 @@ modelo que usa Moises).
   S; cabezal; loop sombreado; clic o arrastre = saltar; Ctrl+rueda = zoom, rueda = desplazar,
   "Ajustar" = ver toda la canción. Sigue al cabezal mientras suena.
 - **Mezclador** (`MixerPanel`): un canal por stem con fader en dB, medidor estéreo de pico y
-  RMS con retención de pico, clip que se apaga con un clic, mute, solo y salida; canal maestro
-  con fader (se guarda por canción como `masterGainDb`) y medidor con escala en dB.
+  RMS con retención de pico, clip que se apaga con un clic, mute, solo y salida; **canal del
+  click** (`ClickStrip`: encendido, fader, medidor del click generado con `takeClickPeak`, y
+  salida propia, sincronizado con la fila del click); canal maestro con fader (se guarda por
+  canción como `masterGainDb`) y medidor con escala en dB. Las salidas que se pueden elegir
+  son los pares de canales del dispositivo activo: con "default" de PulseAudio solo 1-2; con
+  una interfaz multicanal elegida en "Audio" (ALSA directo) o con JACK/PipeWire, los demás.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -706,6 +710,8 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.4**: el click como canal del mezclador (`ClickStrip`, `AudioEngine::takeClickPeak`,
+  `onClickChanged`), sincronizado con la fila del click.
 - **v0.3.3**: copiar, pegar (insertando o encima) y duplicar tramos con su grilla
   (`insertGap`, `pasteClip`, `copyGrid`, `pasteGrid`, `ClipClipboard` con las secciones de
   tempo del rango; `SongInfo::mergeEqualTempoRegions`); `shiftGrid` parte el acorde que

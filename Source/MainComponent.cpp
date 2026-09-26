@@ -303,6 +303,17 @@ MainComponent::MainComponent()
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
     mixer.onLevelEdited = [this] (int stem, double db) { stemLevelEdited (stem, db); };
+    mixer.onClickChanged = [this] (bool on, float db, int pair)
+    {
+        if (auto* s = currentInfo())
+        {
+            s->clickEnabled = on;
+            s->clickGainDb = db;
+            s->clickOutputPair = juce::jmax (0, pair);
+            pushClick();
+            clickControlsFromSong();   // la fila del click muestra lo mismo
+        }
+    };
     timeline.onClipDragged = [this] (double t, double delta, int lane) { clipDragged (t, delta, lane); };
     timeline.onMarkerClicked = [this] (int i, bool popup) { if (popup) markerMenu (i); else jumpToMarker (i); };
     timeline.onMarkerMoved = [this] (int i, double t)
@@ -2204,7 +2215,10 @@ void MainComponent::clickControlsFromSong()
     for (auto* c : std::initializer_list<juce::Component*> { &clickBtn, &bpmSlider, &offsetSlider, &clickGainSlider, &clickOutBox, &addMarkerBtn })
         c->setEnabled (has);
     if (! has)
+    {
+        mixer.setClickVisible (false);
         return;
+    }
 
     tempoControlsFromSong();
     clickBtn.setToggleState (info->clickEnabled, juce::dontSendNotification);
@@ -2216,6 +2230,9 @@ void MainComponent::clickControlsFromSong()
     offsetSlider.setValue (info->clickOffset, juce::dontSendNotification);
     clickGainSlider.setValue (info->clickGainDb, juce::dontSendNotification);
     fillOutputBox (clickOutBox, info->clickOutputPair);
+    mixer.setClickVisible (true);
+    mixer.refreshOutputs();
+    mixer.setClickState (info->clickEnabled, info->clickGainDb, info->clickOutputPair);
 }
 
 void MainComponent::applyClick()

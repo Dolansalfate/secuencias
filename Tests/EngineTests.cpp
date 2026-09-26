@@ -937,7 +937,7 @@ int main()
         song->tracks[1]->muted = false;
     }
 
-    std::cout << "[AudioEngine] el click sigue la rejilla de tiempos detectados\n";
+    std::cout << "[AudioEngine] el click sigue la rejilla de tiempos detectados (y publica su pico)\n";
     {
         song->tracks[0]->muted = true;
         song->tracks[1]->muted = true;
@@ -966,6 +966,7 @@ int main()
         (void) samplePos;
         CHECK (silentPeak < 1.0e-4f);
         CHECK (beatPeak > 0.3f);
+        CHECK (engine.takeClickPeak() > 0.3f && engine.takeClickPeak() < 1.0e-6f);   // el pico del click se publica y se consume al leerlo
         engine.setBeatGrid (nullptr);
         engine.setClick (false, 120.0, 0.0, 0.0f, 0);
         song->tracks[0]->muted = false;

@@ -17,8 +17,11 @@ El mismo código sigue compilando en macOS.
 - **Modo en vivo** (botón "En vivo" o F11): esconde la vista de arreglo y agranda el título,
   la sección y el tiempo para leerlos desde lejos.
 - **Marcadores** (intro, verso, coro…) para saltar en vivo, y **loop de sección**.
-- **Click generado** con BPM, inicio, volumen y salida propia. Tras analizar la canción, el
-  click sigue los tiempos detectados, aunque el tempo varíe.
+- **Click generado** con BPM, inicio, volumen y salida propia; en el mezclador aparece como un
+  canal más ("CLICK", con fader, medidor, encendido y salida), así puedes mandarlo a los
+  in-ears por otro par de salidas. Tras analizar la canción, el click sigue los tiempos
+  detectados, aunque el tempo varíe. Las salidas disponibles son las del dispositivo elegido
+  en "Audio": con una interfaz multicanal aparecen los pares 3-4, 5-6, etc.
 - **Tempo y tono**: cambia el BPM sin que cambie la afinación, y transpone en semitonos si lo
   quieres. Tras analizar, la regla muestra una fila con las **secciones de tempo** detectadas
   (por ejemplo, cada canción de un mix con su BPM); con un clic en una sección puedes darle su
