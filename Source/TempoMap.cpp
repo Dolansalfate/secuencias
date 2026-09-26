@@ -11,6 +11,11 @@ double effectivePlayBpm (const SongInfo& info, const TempoRegion& r)
     return r.origBpm;
 }
 
+int effectiveTranspose (const SongInfo& info, const TempoRegion& r)
+{
+    return r.transpose != TempoRegion::followSong ? juce::jlimit (-12, 12, r.transpose) : info.transpose;
+}
+
 TimeMap TimeMap::build (const SongInfo& info, double length)
 {
     TimeMap map;
@@ -35,6 +40,7 @@ TimeMap TimeMap::build (const SongInfo& info, double length)
         s.origBpm = juce::jmax (1.0, regions[i].origBpm);
         s.playBpm = juce::jmax (1.0, effectivePlayBpm (info, regions[i]));
         s.ratio = s.origBpm / s.playBpm;
+        s.transpose = effectiveTranspose (info, regions[i]);
         playStart = s.playEnd();
         map.segs.push_back (s);
     }
@@ -72,6 +78,24 @@ bool TimeMap::isIdentity() const
         if (std::abs (s.ratio - 1.0) > 1.0e-6)
             return false;
     return true;
+}
+
+bool TimeMap::hasPitchShift() const
+{
+    for (auto& s : segs)
+        if (s.transpose != 0)
+            return true;
+    return false;
+}
+
+const TempoSegment* TimeMap::segmentAtPlayback (double t) const
+{
+    if (segs.empty())
+        return nullptr;
+    for (auto& s : segs)
+        if (t < s.playEnd())
+            return &s;
+    return &segs.back();
 }
 
 //==============================================================================

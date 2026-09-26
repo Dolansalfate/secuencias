@@ -37,7 +37,7 @@ void SongInfo::mergeEqualTempoRegions()
     {
         const auto& a = tempoRegions[(size_t) i - 1];
         const auto& b = tempoRegions[(size_t) i];
-        if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05)
+        if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05 && a.transpose == b.transpose)
             tempoRegions.erase (tempoRegions.begin() + i);
     }
 }
@@ -340,6 +340,8 @@ SongInfo Library::readSong (const juce::File& folder) const
                 reg.start   = juce::jmax (0.0, (double) r.getProperty ("start", 0.0));
                 reg.origBpm = juce::jlimit (20.0, 400.0, (double) r.getProperty ("bpm", s.bpm));
                 reg.playBpm = juce::jlimit (0.0, 400.0, (double) r.getProperty ("playBpm", 0.0));
+                if (r.hasProperty ("transpose"))
+                    reg.transpose = juce::jlimit (-12, 12, (int) r.getProperty ("transpose", 0));
                 s.tempoRegions.push_back (reg);
             }
         s.sortTempoRegions();   // ordena y garantiza una sección que empieza en 0
@@ -482,6 +484,8 @@ bool Library::saveSong (const SongInfo& s) const
             ro->setProperty ("start", r.start);
             ro->setProperty ("bpm", r.origBpm);
             ro->setProperty ("playBpm", r.playBpm);
+            if (r.transpose != TempoRegion::followSong)
+                ro->setProperty ("transpose", r.transpose);
             regions.add (juce::var (ro));
         }
         obj->setProperty ("tempoRegions", regions);

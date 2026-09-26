@@ -140,7 +140,7 @@ public:
             if (band.end < t0 || band.start > t1) continue;
             const float a = juce::jmax ((float) headerWidth, x (band.start)), b = juce::jmin ((float) getWidth(), x (band.end));
             if (b - a < 1.0f) continue;
-            const bool stretched = std::abs (band.playBpm - band.origBpm) >= 0.05;
+            const bool stretched = std::abs (band.playBpm - band.origBpm) >= 0.05 || band.transpose != 0;
             g.setColour (stretched ? ui::accent.withAlpha (0.35f) : (i % 2 == 0 ? juce::Colour (0xff2f3b47) : juce::Colour (0xff28333e)));
             g.fillRect (a, (float) rowTempo + 1.0f, b - a, (float) (rowBars - rowTempo - 2));
             g.setColour (juce::Colours::white.withAlpha (0.5f));
@@ -149,8 +149,10 @@ public:
             {
                 g.setColour (juce::Colours::white.withAlpha (stretched ? 1.0f : 0.85f));
                 g.setFont (ui::font (11.0f, true));
-                const auto text = stretched ? juce::String::formatted ("%.1f -> %.1f BPM", band.origBpm, band.playBpm)
-                                            : juce::String::formatted ("%.1f BPM", band.origBpm);
+                auto text = std::abs (band.playBpm - band.origBpm) >= 0.05 ? juce::String::formatted ("%.1f -> %.1f BPM", band.origBpm, band.playBpm)
+                                                                          : juce::String::formatted ("%.1f BPM", band.origBpm);
+                if (band.transpose != 0)
+                    text += juce::String::formatted ("  %+d st", band.transpose);
                 g.drawText (text, (int) a + 5, rowTempo, (int) (b - a) - 8, rowBars - rowTempo, juce::Justification::centredLeft, true);
             }
         }

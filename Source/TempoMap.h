@@ -10,6 +10,7 @@ struct TempoSegment
     double playStart = 0.0;                  // dónde empieza en el tiempo de reproducción
     double origBpm = 120.0, playBpm = 120.0;
     double ratio = 1.0;
+    int transpose = 0;                       // semitonos efectivos del tramo (los de la sección, si no los de la canción)
     double playEnd() const { return playStart + (origEnd - origStart) * ratio; }
 };
 
@@ -26,6 +27,9 @@ public:
     double toOriginal (double playbackSeconds) const;
     double playbackLength() const;
     bool isIdentity() const;                  // ningún tramo cambia de tempo
+    bool hasPitchShift() const;               // algún tramo transpone
+    bool isPlain() const { return isIdentity() && ! hasPitchShift(); }   // nada que renderizar
+    const TempoSegment* segmentAtPlayback (double playbackSeconds) const;   // nullptr si no hay tramos
     const std::vector<TempoSegment>& segments() const { return segs; }
 
 private:
@@ -35,6 +39,8 @@ private:
 
 // Tempo de reproducción efectivo de una sección: el suyo, si no el de la canción, si no el original.
 double effectivePlayBpm (const SongInfo&, const TempoRegion&);
+// Semitonos efectivos de una sección: los suyos, si no los de la canción.
+int effectiveTranspose (const SongInfo&, const TempoRegion&);
 
 // Tempo de los tiempos detectados entre dos instantes: promedio de los intervalos a menos del
 // 25 % de la mediana, redondeado a 0,1 BPM; 0 si no hay al menos dos tiempos.

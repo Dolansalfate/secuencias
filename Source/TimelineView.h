@@ -22,6 +22,7 @@ public:
     {
         double start = 0.0, end = 0.0;
         double origBpm = 0.0, playBpm = 0.0;   // distintos = sección estirada
+        int transpose = 0;                     // semitonos efectivos de la sección
     };
     void setTempoBands (const std::vector<TempoBand>&);
     // Tramos del arreglo (audio) en tiempo de reproducción: bordes sobre los carriles y huecos sombreados

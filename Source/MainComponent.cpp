@@ -890,10 +890,10 @@ void MainComponent::loadSongAt (int index)
                     if (arranged != nullptr)
                     {
                         const auto map = TimeMap::build (info, (double) arranged->length / sr);
-                        if (! map.isIdentity() || info.transpose != 0)
+                        if (! map.isPlain())
                         {
                             juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->sectionLabel.setText (tr ("Renderizando tempo y tono..."), juce::dontSendNotification); });
-                            song = stretcher::render (arranged, map, info.transpose, sr, abort);
+                            song = stretcher::render (arranged, map, sr, abort);
                         }
                     }
                 }
@@ -1108,6 +1108,7 @@ std::vector<TimelineView::TempoBand> MainComponent::mappedTempoBands() const
         b.end = timeMap.toPlayback (i + 1 < regions.size() ? juce::jmin (length, regions[i + 1].start) : length);
         b.origBpm = regions[i].origBpm;
         b.playBpm = effectivePlayBpm (info, regions[i]);
+        b.transpose = effectiveTranspose (info, regions[i]);
         out.push_back (b);
     }
     return out;
@@ -1170,6 +1171,11 @@ void MainComponent::tempoControlsFromSong()
         text += tr ("  |  secciones con tempo propio");
     if (renderedTranspose != 0)
         text += juce::String::formatted ("  |  %+d st", renderedTranspose);
+    bool ownPitch = false;
+    for (auto& r : info->tempoRegions)
+        ownPitch = ownPitch || r.transpose != TempoRegion::followSong;
+    if (ownPitch)
+        text += tr ("  |  secciones con tono propio");
     tempoInfoLabel.setText (text, juce::dontSendNotification);
 }
 
@@ -1187,7 +1193,8 @@ static bool sameStretch (const TimeMap& a, const TimeMap& b)
     {
         const auto& x = a.segments()[i];
         const auto& y = b.segments()[i];
-        if (std::abs (x.origStart - y.origStart) > 1.0e-6 || std::abs (x.origEnd - y.origEnd) > 1.0e-6 || std::abs (x.ratio - y.ratio) > 1.0e-6)
+        if (std::abs (x.origStart - y.origStart) > 1.0e-6 || std::abs (x.origEnd - y.origEnd) > 1.0e-6 || std::abs (x.ratio - y.ratio) > 1.0e-6
+            || x.transpose != y.transpose)
             return false;
     }
     return true;
@@ -1246,7 +1253,7 @@ void MainComponent::renderTempo()
             if (arranged == nullptr)
                 arranged = arrangement::render (source, clips, sr, abort);
             if (arranged != nullptr)
-                rendered = stretcher::render (arranged, newMap, transpose, sr, abort, progress);
+                rendered = stretcher::render (arranged, newMap, sr, abort, progress);
         }
         catch (const std::exception&) {}
         juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, rgen]
@@ -1292,7 +1299,7 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
             engine.play();
         tempoControlsFromSong();
         updateLoopRegion();
-        const bool plain = timeMap.isIdentity() && renderedTranspose == 0;
+        const bool plain = timeMap.isPlain();
         const bool cut = sourceSong != nullptr && ! arrangement::isIdentity (renderedClips, (double) sourceSong->length / engine.getSampleRate());
         sepLabel.setText (plain ? (cut ? tr ("Arreglo aplicado") : tr ("Tempo y tono originales")) : tr ("Tempo y tono aplicados"),
                           juce::dontSendNotification);
@@ -1519,6 +1526,10 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
     m.addItem (5, tr ("Unir con la sección anterior"), index > 0);
     m.addItem (6, tr ("Corregir el tempo detectado... (") + juce::String (r.origBpm, 1) + " BPM)");
     m.addSeparator();
+    const int tr_ = effectiveTranspose (*info, r);
+    m.addItem (20, tr ("Tono de la sección... (") + juce::String::formatted ("%+d st", tr_) + (r.transpose == TempoRegion::followSong ? tr (", el de la canción)") : tr (", propio)")));
+    m.addItem (21, tr ("Tono de la canción para esta sección"), r.transpose != TempoRegion::followSong);
+    m.addSeparator();
     juce::PopupMenu click;
     click.addItem (40, tr ("Tiempos a la mitad (suena en corcheas)"), hasBeats);
     click.addItem (41, tr ("Tiempos al doble (suena en blancas)"), hasBeats);
@@ -1544,8 +1555,8 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
             return;
         auto& reg = inf->tempoRegions[(size_t) index];
         const bool single = inf->tempoRegions.size() == 1;
-        if (result != 1 && result != 6)
-            pushUndo();   // los diálogos (1 y 6) lo hacen al aceptar
+        if (result != 1 && result != 6 && result != 20)
+            pushUndo();   // los diálogos (1, 6 y 20) lo hacen al aceptar
 
         auto applied = [this] (SongInfo& s)
         {
@@ -1577,7 +1588,26 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
             });
             return;
         }
-        if (result == 6)
+        if (result == 20)
+        {
+            askText (tr ("Tono de la sección en semitonos (-12 a 12; vacío = el de la canción)"),
+                     reg.transpose == TempoRegion::followSong ? juce::String() : juce::String (reg.transpose), [this, index] (const juce::String& text)
+            {
+                auto* s = currentInfo();
+                if (s == nullptr || ! juce::isPositiveAndBelow (index, (int) s->tempoRegions.size()))
+                    return;
+                pushUndo();
+                s->tempoRegions[(size_t) index].transpose = text.trim().isEmpty() ? TempoRegion::followSong : juce::jlimit (-12, 12, text.trim().getIntValue());
+                library.saveSong (*s);
+                tempoControlsFromSong();
+                syncTimelineMarkers();
+                requestRender();
+            });
+            return;
+        }
+        if (result == 21)
+            reg.transpose = TempoRegion::followSong;
+        else if (result == 6)
         {
             askText (tr ("Tempo original de la sección (BPM), si el detectado no es correcto"), juce::String (reg.origBpm, 1),
                      [this, index] (const juce::String& text)
@@ -1597,7 +1627,11 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
             });
             return;
         }
-        if (result == 2)
+        if (result == 21)
+        {
+            // ya aplicado arriba
+        }
+        else if (result == 2)
         {
             if (single)
                 inf->playBpm = 0.0;

@@ -23,9 +23,11 @@ struct SongMarker   // "Marker" a secas choca con AIFF.h de macOS (CoreServices)
 // tempo sostenido abre una sección) o dividida a mano. La primera siempre empieza en 0.
 struct TempoRegion
 {
+    static constexpr int followSong = -100;   // transpose: la sección sigue el tono de la canción
     double start = 0.0;      // segundos del audio original
     double origBpm = 120.0;  // tempo detectado (o el BPM del click si no hay análisis)
     double playBpm = 0.0;    // tempo de reproducción (0 = el de la canción)
+    int transpose = followSong;   // semitonos propios de la sección, o followSong
 };
 
 // Tramo del audio original colocado en la línea de tiempo de la canción (arreglo, fase 4)

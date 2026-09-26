@@ -66,7 +66,7 @@ namespace
 
 namespace stretcher
 {
-    juce::AudioBuffer<float> renderBuffer (const juce::AudioBuffer<float>& in, const TimeMap& map, int semitones,
+    juce::AudioBuffer<float> renderBuffer (const juce::AudioBuffer<float>& in, const TimeMap& map,
                                            double sr, const std::function<bool()>& shouldAbort)
     {
         const int channels = juce::jmin (2, in.getNumChannels());
@@ -78,6 +78,7 @@ namespace stretcher
 
         signalsmith::stretch::SignalsmithStretch<float> stretch;
         stretch.presetDefault (channels, (float) sr);
+        int semitones = map.segments().empty() ? 0 : map.segments().front().transpose;
         stretch.setTransposeSemitones ((float) semitones);
 
         // Posición del audio original (en muestras) que corresponde a una muestra de salida
@@ -100,6 +101,12 @@ namespace stretcher
             if (shouldAbort && shouldAbort())
                 return {};
             const int n = juce::jmin (block, mainEnd - outIndex);
+            // Semitonos del tramo en el que cae este bloque (cambian en las fronteras de sección)
+            if (auto* seg = map.segmentAtPlayback ((outIndex + n * 0.5) / sr); seg != nullptr && seg->transpose != semitones)
+            {
+                semitones = seg->transpose;
+                stretch.setTransposeSemitones ((float) semitones);
+            }
             const int wantedInput = (int) std::llround (inputPosFor (outIndex + n + stretch.outputLatency())) + stretch.inputLatency();
             const int inputSamples = juce::jmax (0, wantedInput - inputIndex);
             input.offset = inputIndex;
@@ -112,13 +119,13 @@ namespace stretcher
         return out;
     }
 
-    std::shared_ptr<LoadedSong> render (std::shared_ptr<LoadedSong> source, const TimeMap& map, int semitones,
+    std::shared_ptr<LoadedSong> render (std::shared_ptr<LoadedSong> source, const TimeMap& map,
                                         double sr, const std::function<bool()>& shouldAbort,
                                         const std::function<void (float)>& progress)
     {
         if (source == nullptr)
             return nullptr;
-        if (map.isIdentity() && semitones == 0)
+        if (map.isPlain())
             return source;
 
         auto out = std::make_shared<LoadedSong>();
@@ -137,7 +144,7 @@ namespace stretcher
             t->muted = src->muted.load();
             t->solo = src->solo.load();
             t->outputPair = src->outputPair.load();
-            t->buffer = renderBuffer (src->buffer, map, semitones, sr, shouldAbort);
+            t->buffer = renderBuffer (src->buffer, map, sr, shouldAbort);
             if (t->buffer.getNumSamples() == 0)
                 return nullptr;   // abortado
             out->length = juce::jmax (out->length, (juce::int64) t->buffer.getNumSamples());

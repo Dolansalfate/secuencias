@@ -288,19 +288,31 @@ int main()
         SongInfo si;
         si.bpm = 120.0;
         si.playBpm = 60.0;                 // la mitad de tempo: el doble de largo, misma altura
-        auto slow = stretcher::renderBuffer (tone, TimeMap::build (si, 3.0), 0, rate);
+        auto slow = stretcher::renderBuffer (tone, TimeMap::build (si, 3.0), rate);
         CHECK (std::abs (slow.getNumSamples() - 6.0 * rate) < rate * 0.02);
         CHECK (std::abs (zeroCrossingsPerSecond (slow, rate, 1.0, 5.0) - 764.0) < 764.0 * 0.03);
         CHECK (slow.getMagnitude (0, (int) rate, (int) (4.0 * rate)) > 0.3f);   // nivel conservado
         si.playBpm = 0.0;
-        auto up = stretcher::renderBuffer (tone, TimeMap::build (si, 3.0), 12, rate);   // una octava arriba, mismo largo
+        si.transpose = 12;
+        auto up = stretcher::renderBuffer (tone, TimeMap::build (si, 3.0), rate);   // una octava arriba, mismo largo
         CHECK (std::abs (up.getNumSamples() - 3.0 * rate) < rate * 0.02);
         CHECK (std::abs (zeroCrossingsPerSecond (up, rate, 0.5, 2.5) - 1528.0) < 1528.0 * 0.04);
+        // Tono por sección: solo la segunda mitad sube una octava; la primera sigue la canción (0 st)
+        si.transpose = 0;
+        si.tempoRegions = { { 0.0, 120.0, 0.0 }, { 1.5, 120.0, 0.0 } };
+        si.tempoRegions[1].transpose = 12;
+        const auto half = TimeMap::build (si, 3.0);
+        CHECK (! half.isPlain() && half.isIdentity() && half.hasPitchShift() && half.segments()[0].transpose == 0 && half.segments()[1].transpose == 12);
+        CHECK (half.segmentAtPlayback (0.5)->transpose == 0 && half.segmentAtPlayback (2.0)->transpose == 12 && half.segmentAtPlayback (99.0)->transpose == 12);
+        auto halfUp = stretcher::renderBuffer (tone, half, rate);
+        CHECK (std::abs (zeroCrossingsPerSecond (halfUp, rate, 0.3, 1.2) - 764.0) < 764.0 * 0.05);
+        CHECK (std::abs (zeroCrossingsPerSecond (halfUp, rate, 1.9, 2.8) - 1528.0) < 1528.0 * 0.05);
+        si.tempoRegions.clear();
         // Mapa con dos tramos distintos: el largo total sigue el mapa
         si.tempoRegions = { { 0.0, 120.0, 0.0 }, { 1.0, 120.0, 240.0 } };
         si.playBpm = 60.0;
         const auto map = TimeMap::build (si, 3.0);     // 1 s x2 + 2 s x0.5 = 3 s
-        auto mixed = stretcher::renderBuffer (tone, map, 0, rate);
+        auto mixed = stretcher::renderBuffer (tone, map, rate);
         CHECK (std::abs (mixed.getNumSamples() - map.playbackLength() * rate) < 2.0);
         // Identidad: se devuelve la misma canción
         auto song0 = std::make_shared<LoadedSong>();
@@ -311,14 +323,14 @@ int main()
         song0->tracks.push_back (std::move (tr));
         si.tempoRegions.clear();
         si.playBpm = 0.0;
-        CHECK (stretcher::render (song0, TimeMap::build (si, 3.0), 0, rate, {}) == song0);
+        CHECK (stretcher::render (song0, TimeMap::build (si, 3.0), rate, {}) == song0);
         si.playBpm = 90.0;
         float lastProgress = 0.0f;
-        auto rendered = stretcher::render (song0, TimeMap::build (si, 3.0), 0, rate, {}, [&] (float p) { lastProgress = p; });
+        auto rendered = stretcher::render (song0, TimeMap::build (si, 3.0), rate, {}, [&] (float p) { lastProgress = p; });
         CHECK (rendered != nullptr && rendered != song0 && rendered->tracks.size() == 1
                && std::abs ((double) rendered->length - 4.0 * rate) < rate * 0.02 && lastProgress > 0.99f);
         CHECK (rendered != nullptr && rendered->tracks[0]->waveform.numBins() > 0);
-        CHECK (stretcher::render (song0, TimeMap::build (si, 3.0), 0, rate, [] { return true; }) == nullptr);   // abortado
+        CHECK (stretcher::render (song0, TimeMap::build (si, 3.0), rate, [] { return true; }) == nullptr);   // abortado
     }
 
     std::cout << "[Loudness] EBU R128: seno de 1 kHz a -23 dBFS mide -23 LUFS; pico real; tramos; puertas\n";
@@ -396,6 +408,7 @@ int main()
         CHECK (back != nullptr && back->tempoRegions.size() == 1 && std::abs (back->tempoRegions[0].origBpm - 128.0) < 1.0);
         // Secciones guardadas: ida y vuelta, ordenadas y con la primera en 0; escritura y tonalidad elegida
         si.tempoRegions = { { 1.5, 140.0, 150.0 }, { 0.0, 128.0, 0.0 } };
+        si.tempoRegions[0].transpose = -3;
         si.spelling = 2;
         si.keyOverride = "Eb major";
         CHECK (lib.saveSong (si));
@@ -405,7 +418,8 @@ int main()
         for (auto& sng : l4.songs) if (sng.folder == si.folder) back = &sng;
         CHECK (back != nullptr && back->tempoRegions.size() == 2 && std::abs (back->tempoRegions[0].start) < 1.0e-9
                && std::abs (back->tempoRegions[1].start - 1.5) < 1.0e-9 && std::abs (back->tempoRegions[1].origBpm - 140.0) < 1.0e-9
-               && std::abs (back->tempoRegions[1].playBpm - 150.0) < 1.0e-9);
+               && std::abs (back->tempoRegions[1].playBpm - 150.0) < 1.0e-9
+               && back->tempoRegions[1].transpose == -3 && back->tempoRegions[0].transpose == TempoRegion::followSong);
         CHECK (back != nullptr && back->spelling == 2 && back->keyOverride == "Eb major");
         // Nivelado por pista: vectores por stem, ajustados al número de stems al leer
         si.stems.clear();

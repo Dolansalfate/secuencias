@@ -141,8 +141,11 @@ modelo que usa Moises).
   dan mediciones sin sentido: los marcadores para nivelar van en los cambios de tema. "Nivelar setlist" mide todas las canciones y les da
   una ganancia global (`songGainDb`) para que suenen parejas al pasar de una a otra.
 - **Tempo y tono** (`TempoMap`, `Stretcher`, Signalsmith Stretch): fila "Tempo" con el BPM al
-  que suenan todas las secciones (botón "Original" lo devuelve), "Tono" en semitonos. El tempo
-  cambia sin alterar el tono; el tono solo con el control de semitonos. Se renderiza en segundo
+  que suenan todas las secciones (botón "Original" lo devuelve), "Tono" en semitonos para la
+  canción; cada sección de tempo puede tener además su propio tono ("Tono de la sección..." en
+  el menú de la banda; `TempoRegion::transpose`, `followSong` = el de la canción), que se ve
+  en la banda como "+2 st". El tempo cambia sin alterar el tono; el tono solo con esos
+  controles. Se renderiza en segundo
   plano a partir de la canción original y se intercambia con fundido conservando el punto y el
   estado de reproducción. Marcadores, tiempos, acordes, click y nivelado se muestran y aplican
   en el tiempo de reproducción mediante el mapa. Sirve para igualar el BPM de varias canciones
@@ -352,8 +355,9 @@ Secuencias/
 - `readSong()` acota todo lo numérico (`outputPair >= 0`, ganancias entre -60 y 12 dB, BPM entre
   20 y 400): un `song.json` editado a mano no debe poder sacar al motor de rango.
 - Tempo y tono: `playBpm` (0 = original) y `transpose` (semitonos) por canción, y
-  `tempoRegions`: `[{ "start", "bpm", "playBpm" }]`, las secciones de tempo en segundos del
-  audio original (`bpm` = tempo detectado o corregido, `playBpm` 0 = el de la canción). Se
+  `tempoRegions`: `[{ "start", "bpm", "playBpm", "transpose"? }]`, las secciones de tempo en
+  segundos del audio original (`bpm` = tempo detectado o corregido, `playBpm` 0 = el de la
+  canción, `transpose` solo si la sección tiene tono propio). Se
   ordenan al leer y siempre hay una que empieza en 0. Si una canción analizada no las tiene
   (guardada antes de esta versión), `readSong` las detecta de los tiempos guardados
   (`detectTempoRegions`). Sin secciones ni análisis, el tempo original es el `bpm` de la canción.
@@ -474,9 +478,10 @@ Pasos de `run()`:
 ### 5.4d TempoMap y Stretcher (tempo y tono)
 - `TimeMap::build (info, largoOriginal)`: un `TempoSegment` por sección de tempo
   (`tempoRegions`; sin ellas, una sola con el tempo del análisis o `bpm`) con `origBpm`,
-  `playBpm` (`effectivePlayBpm`: el de la sección, si no el de la canción, si no el original)
-  y `ratio = origBpm / playBpm`. `toPlayback`, `toOriginal`, `playbackLength`, `isIdentity`.
-  Los marcadores no afectan al mapa.
+  `playBpm` (`effectivePlayBpm`: el de la sección, si no el de la canción, si no el original),
+  `ratio = origBpm / playBpm` y `transpose` (`effectiveTranspose`: el de la sección o el de la
+  canción). `toPlayback`, `toOriginal`, `playbackLength`, `isIdentity` (tempo), `hasPitchShift`,
+  `isPlain` (nada que renderizar), `segmentAtPlayback`. Los marcadores no afectan al mapa.
 - `detectTempoRegions (analysis, bpmRespaldo)`: tempo local entre tiempos consecutivos;
   compara la mediana de los 8 anteriores con la de los 8 siguientes y, donde la diferencia
   supera el 4 %, sitúa el cambio en el intervalo que mejor separa el tempo de antes del de
@@ -485,11 +490,13 @@ Pasos de `run()`:
   pasos de 10 ms y la mediana sola se desvía hasta un 2 %); las vecinas a menos del 2 % se
   unen. Se llama al aplicar el análisis (se pierden los tempos por sección) y al leer canciones
   antiguas.
-- `stretcher::render (fuente, mapa, semitonos, sr, abort, progreso)`: por pista,
-  `SignalsmithStretch<float>` con `presetDefault`, `setTransposeSemitones`, `outputSeek` de
-  pre-roll alineado, bloques de 1024 muestras de salida pidiendo la entrada que marca el mapa
-  (más `inputLatency`), y `flush` al final. Vistas de entrada/salida con ceros fuera del audio,
-  sin copiar. Identidad y 0 semitonos devuelven el mismo `shared_ptr`.
+- `stretcher::render (fuente, mapa, sr, abort, progreso)`: por pista,
+  `SignalsmithStretch<float>` con `presetDefault`, `outputSeek` de pre-roll alineado, bloques
+  de 1024 muestras de salida pidiendo la entrada que marca el mapa (más `inputLatency`), y
+  `flush` al final; en cada bloque `setTransposeSemitones` con los semitonos del tramo en que
+  cae (`segmentAtPlayback`), así el tono cambia en las fronteras de sección. Vistas de
+  entrada/salida con ceros fuera del audio, sin copiar. Un mapa `isPlain` devuelve el mismo
+  `shared_ptr`.
 - En `MainComponent`: `sourceSong` (original) y `currentSong` (lo que suena); `timeMap` es el
   mapa de lo que suena. La carga renderiza antes de mostrar si hay tempo o tono guardados. Los
   cambios de controles piden un render con 800 ms de retardo (`requestRender` / `renderTempo`
@@ -718,6 +725,8 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.6**: tono por sección (`TempoRegion::transpose`, `TempoSegment::transpose`,
+  `effectiveTranspose`, `setTransposeSemitones` por bloque en el stretcher, menú de la banda).
 - **v0.3.5**: guía de escenario (`StageView`, `StageWindow`, botón "Pantalla", F12,
   `--captura --escenario --posicion`).
 - **v0.3.4**: el click como canal del mezclador (`ClickStrip`, `AudioEngine::takeClickPeak`,

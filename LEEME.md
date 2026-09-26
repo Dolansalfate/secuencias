@@ -31,7 +31,9 @@ El mismo código sigue compilando en macOS.
   quieres. Tras analizar, la regla muestra una fila con las **secciones de tempo** detectadas
   (por ejemplo, cada canción de un mix con su BPM); con un clic en una sección puedes darle su
   propio tempo, igualar todas las secciones a un mismo BPM, dividirla o unirla, o corregir el
-  tempo detectado. El campo "Tempo" es el BPM al que suenan todas las secciones. El cambio se
+  tempo detectado, o darle a esa sección su propio tono en semitonos ("Tono de la sección...",
+  por ejemplo para subir medio tono solo un tema del mix). El campo "Tempo" es el BPM al que
+  suenan todas las secciones y "Tono" el de toda la canción, salvo las secciones con tono propio. El cambio se
   prepara en segundo plano (unos 40 s para 6 pistas de 7 minutos) y entra sin cortar el audio.
 - **Nivelar volumen**: mide la sonoridad real (LUFS, como Spotify) de cada pista y de la
   mezcla en cada tramo entre marcadores. Primero empareja cada pista consigo misma a lo largo
