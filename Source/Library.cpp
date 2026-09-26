@@ -590,6 +590,37 @@ int Library::importProject (const juce::File& folder)
     return (int) songs.size() - 1;
 }
 
+bool Library::replaceStems (int index, const juce::File& resultFolder)
+{
+    if (! juce::isPositiveAndBelow (index, (int) songs.size()) || audioFilesIn (resultFolder).isEmpty())
+        return false;
+    const auto folder = songs[(size_t) index].folder;
+    const auto originals = folder.getChildFile ("original");
+    if (! originals.createDirectory())
+        return false;
+    for (auto& f : audioFilesIn (folder))
+        if (! f.moveFileTo (originals.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
+            return false;
+    for (auto& f : audioFilesIn (resultFolder))
+        if (! f.moveFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
+            return false;
+    auto song = readSong (folder);   // conserva nombre, marcadores, análisis, tempo, cortes; los stems nuevos entran traducidos
+    song.headStemGainsDb.clear();
+    song.headStemLufs.clear();
+    song.stemSongLufs.clear();
+    song.headLufs = unmeasuredDb;    // el nivelado se vuelve a medir con las pistas nuevas
+    for (auto& m : song.markers)
+    {
+        m.stemGainsDb.clear();
+        m.stemLufs.clear();
+        m.lufs = unmeasuredDb;
+    }
+    song.fitStemArrays();
+    songs[(size_t) index] = song;
+    saveSong (song);
+    return true;
+}
+
 bool Library::exportSong (int index, const juce::File& destination) const
 {
     if (! juce::isPositiveAndBelow (index, (int) songs.size()) || ! destination.isDirectory())

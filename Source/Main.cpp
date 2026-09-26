@@ -24,6 +24,12 @@ public:
             const bool live = commandLine.contains ("--vivo");
             captureAnalyze = commandLine.contains ("--analizar");
             captureLevel = commandLine.contains ("--nivelar");
+            captureSeparate = commandLine.contains ("--separar");
+            captureSelector = commandLine.contains ("--selector");
+            if (commandLine.contains ("--calidad="))
+                captureQuality = commandLine.fromFirstOccurrenceOf ("--calidad=", false, false).getIntValue();
+            if (commandLine.contains ("--pistas="))
+                captureStems = commandLine.fromFirstOccurrenceOf ("--pistas=", false, false).getIntValue();
             if (commandLine.contains ("--tempo="))
                 captureTempo = commandLine.fromFirstOccurrenceOf ("--tempo=", false, false).getDoubleValue();
             if (commandLine.contains ("--tono="))
@@ -56,11 +62,15 @@ public:
             captureAnalysisStarted = true;
             if (captureAnalyze) mc->analyzeCurrentSong();
             if (captureLevel)   mc->levelCurrentSong();
+            if (captureQuality > 0 || captureStems > 0) mc->setSeparationOptionsForCapture (captureStems, captureQuality);
+            if (captureSeparate) mc->separateCurrentSong();
+            if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
             if (captureTempo > 0.0 || captureTranspose != 0) mc->setTempoForCapture (captureTempo, captureTranspose);
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs);
         }
-        const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling() && ! mc->isRendering());
+        const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
+                                             && ! mc->isRendering() && ! mc->isSeparating());
         if ((ready && ++captureTicks >= 4) || captureTicks++ > 2400)   // tope: 10 min (los renders largos)
         {
             captureTimer.stopTimer();
@@ -125,9 +135,9 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     CaptureTimer captureTimer { *this };
     juce::File captureFile;
-    bool captureLive = false, captureAnalyze = false, captureLevel = false, captureAnalysisStarted = false;
+    bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0;
-    int captureTranspose = 0, captureCutMode = 0;
+    int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;
 };
 

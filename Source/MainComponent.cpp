@@ -22,14 +22,6 @@ namespace
        #endif
     }
 
-   #if JUCE_LINUX
-    // En Linux se usa el selector propio de JUCE en vez del nativo (zenity/kdialog): zenity no
-    // permite elegir archivos y carpetas a la vez y, con GNOME en Wayland, su ventana se abre
-    // detrás de la app (prevención de robo de foco), así que parece que el botón no hace nada.
-    constexpr bool useNativeChooser = false;
-   #else
-    constexpr bool useNativeChooser = true;
-   #endif
 }
 
 //==============================================================================
@@ -425,6 +417,8 @@ void MainComponent::paint (juce::Graphics& g)
 
 void MainComponent::resized()
 {
+    if (picker != nullptr)
+        picker->setBounds (getLocalBounds());
     auto r = getLocalBounds().reduced (10);
 
     auto top = r.removeFromTop (34);
@@ -564,6 +558,8 @@ void MainComponent::resized()
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
     const int code = key.getKeyCode();
+    if (picker != nullptr)
+        return picker->keyPressed (key);   // el selector de archivos está abierto: Esc cancela, Enter acepta
 
     // Autorrepetición: una tecla (o pedal) mantenida no debe repetir la acción, por ejemplo
     // saltar varias canciones o alternar play/pausa varias veces.
@@ -688,12 +684,12 @@ void MainComponent::songMenu (int row)
         if (result == 5 || result == 6)
         {
             const bool all = result == 6;
-            chooser = std::make_unique<juce::FileChooser> (all ? tr ("Carpeta donde exportar todo el setlist") : tr ("Carpeta donde exportar la canción"),
-                                                           juce::File::getSpecialLocation (juce::File::userHomeDirectory), "*", useNativeChooser);
-            chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                                  [this, row, all] (const juce::FileChooser& fc)
+            pickFiles (all ? tr ("Carpeta donde exportar todo el setlist") : tr ("Carpeta donde exportar la canción"),
+                       juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                       juce::File::getSpecialLocation (juce::File::userHomeDirectory), "*",
+                       [this, row, all] (const juce::Array<juce::File>& files)
             {
-                const auto dest = fc.getResult();
+                const auto dest = files.size() > 0 ? files[0] : juce::File();
                 if (! dest.isDirectory())
                     return;
                 saveCurrentMix();
@@ -2137,7 +2133,7 @@ void MainComponent::timerCallback()
     // Mantener el foco para los atajos de teclado / pedal, salvo mientras se escribe en un
     // editor de texto (los valores de los faders, el BPM...) o hay una ventana modal.
     const bool typing = dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr;
-    if (isShowing() && ! typing && ! hasKeyboardFocus (false)
+    if (isShowing() && ! typing && ! hasKeyboardFocus (false) && picker == nullptr
         && juce::ModalComponentManager::getInstance()->getNumModalComponents() == 0
         && juce::Process::isForegroundProcess())
         grabKeyboardFocus();
@@ -2245,6 +2241,27 @@ void MainComponent::timerCallback()
         sepProgress = p < 0.0f ? -1.0 : (double) p;
         sepLabel.setText (tr ("Análisis: ") + analyzer.getMessage(), juce::dontSendNotification);
     }
+    else if (st == Separator::State::done && separationTarget != juce::File())
+    {
+        // Separación de una canción del setlist: sus pistas se reemplazan por los stems
+        int target = -1;
+        for (int i = 0; i < (int) library.songs.size(); ++i)
+            if (library.songs[(size_t) i].folder == separationTarget)
+                target = i;
+        const bool ok = target >= 0 && library.replaceStems (target, separator.getResultFolder());
+        const auto name = target >= 0 ? library.songs[(size_t) target].name : juce::String();
+        separator.reset();
+        separationTarget = juce::File();
+        if (! ok)
+            sepLabel.setText (tr ("No se pudieron reemplazar las pistas"), juce::dontSendNotification);
+        else
+        {
+            sepLabel.setText (tr ("«") + name + tr ("» separada: ") + juce::String ((int) library.songs[(size_t) target].stems.size()) + tr (" pistas"), juce::dontSendNotification);
+            if (target == currentIndex)
+                loadSongAt (currentIndex);   // recarga con los stems nuevos (con fundido si estaba sonando)
+        }
+        refreshSetlist();
+    }
     else if (st == Separator::State::done)
     {
         const auto name = separator.getSongName();
@@ -2266,12 +2283,14 @@ void MainComponent::timerCallback()
     else if (st == Separator::State::cancelled)
     {
         separator.reset();
+        separationTarget = juce::File();
         sepLabel.setText (tr ("Separación cancelada."), juce::dontSendNotification);
     }
     else if (st == Separator::State::failed)
     {
         const auto msg = separator.getMessage();
         separator.reset();
+        separationTarget = juce::File();
         sepLabel.setText ({}, juce::dontSendNotification);
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
                                                 tr ("No se pudo separar la canción"), msg);
@@ -2323,20 +2342,43 @@ void MainComponent::askText (const juce::String& title, const juce::String& init
     }), true);
 }
 
+void MainComponent::pickFiles (const juce::String& title, int browserFlags, const juce::File& startDir, const juce::String& patterns,
+                               std::function<void (const juce::Array<juce::File>&)> onDone)
+{
+   #if JUCE_MAC
+    chooser = std::make_unique<juce::FileChooser> (title, startDir, patterns, true);
+    chooser->launchAsync (browserFlags, [onDone] (const juce::FileChooser& fc) { if (onDone) onDone (fc.getResults()); });
+   #else
+    // Panel dentro de la ventana: no depende del gestor de ventanas (en GNOME las ventanas nuevas
+    // se abrían detrás de la principal y, al ser modales, la app parecía colgada)
+    picker = std::make_unique<FilePicker> (title, browserFlags, startDir, patterns,
+                                           [this, onDone] (const juce::Array<juce::File>& files)
+    {
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::MessageManager::callAsync ([safe, onDone, files]
+        {
+            if (safe == nullptr)
+                return;
+            safe->picker.reset();
+            safe->grabKeyboardFocus();
+            if (! files.isEmpty() && onDone)
+                onDone (files);
+        });
+    });
+    addAndMakeVisible (*picker);
+    picker->setBounds (getLocalBounds());
+    picker->toFront (true);
+    picker->grabKeyboardFocus();
+   #endif
+}
+
 void MainComponent::chooseStems()
 {
-    chooser = std::make_unique<juce::FileChooser> (tr ("Elige los stems de una canción (varios archivos o una carpeta)"),
-                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                   Library::audioFilePatterns(),
-                                                   useNativeChooser);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
-                              | juce::FileBrowserComponent::canSelectDirectories
-                              | juce::FileBrowserComponent::canSelectMultipleItems,
-                          [this] (const juce::FileChooser& fc)
-                          {
-                              if (! fc.getResults().isEmpty())
-                                  importStems (fc.getResults());
-                          });
+    pickFiles (tr ("Elige los stems de una canción (varios archivos o una carpeta)"),
+               juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                   | juce::FileBrowserComponent::canSelectDirectories | juce::FileBrowserComponent::canSelectMultipleItems,
+               juce::File::getSpecialLocation (juce::File::userMusicDirectory), Library::audioFilePatterns(),
+               [this] (const juce::Array<juce::File>& files) { importStems (files); });
 }
 
 void MainComponent::importStems (const juce::Array<juce::File>& selection)
@@ -2402,16 +2444,69 @@ void MainComponent::importStems (const juce::Array<juce::File>& selection)
 
 void MainComponent::chooseSongToSeparate()
 {
-    chooser = std::make_unique<juce::FileChooser> (tr ("Elige la canción completa a separar"),
-                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                   Library::audioFilePatterns(),
-                                                   useNativeChooser);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc)
-                          {
-                              if (fc.getResult().existsAsFile())
-                                  startSeparation (fc.getResult());
-                          });
+    auto pickFile = [this]
+    {
+        pickFiles (tr ("Elige la canción completa a separar"),
+                   juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                   juce::File::getSpecialLocation (juce::File::userMusicDirectory), Library::audioFilePatterns(),
+                   [this] (const juce::Array<juce::File>& files) { if (files.size() > 0 && files[0].existsAsFile()) startSeparation (files[0]); });
+    };
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || arrangedSong == nullptr)
+    {
+        pickFile();
+        return;
+    }
+    // Con una canción cargada, lo normal es separar esa: sus pistas se reemplazan por los stems
+    const int numStems = (int) info->stems.size();
+    auto* w = new juce::AlertWindow (tr ("Separar canción (IA)"),
+                                     tr ("«") + info->name + tr ("» tiene ") + juce::String (numStems) + (numStems == 1 ? tr (" pista") : tr (" pistas"))
+                                         + tr (". Separar la canción seleccionada reemplaza sus pistas por los stems (el audio actual queda guardado en la subcarpeta «original») "
+                                               "y conserva marcadores, análisis, tempo y cortes.\n\nTambién puedes elegir otro archivo, que se agrega como canción nueva."),
+                                     juce::MessageBoxIconType::QuestionIcon, this);
+    w->addButton (tr ("Separar «") + info->name + tr ("»"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton (tr ("Elegir un archivo..."), 2);
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, pickFile] (int result)
+    {
+        if (result == 1)
+            separateCurrentSong();
+        else if (result == 2)
+            pickFile();
+    }), true);
+}
+
+void MainComponent::separateCurrentSong()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || arrangedSong == nullptr || loadedFolder != info->folder)
+        return;
+    if (separator.getState() == Separator::State::running)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Separar", tr ("Ya hay una separación en curso. Espera a que termine."));
+        return;
+    }
+    juce::File input;
+    if (info->stems.size() == 1)
+        input = info->folder.getChildFile (info->stems[0].fileName);   // una sola pista: el archivo tal cual, sin remezclar
+    if (! input.existsAsFile())
+    {
+        // Varias pistas: la mezcla del arreglo (línea de tiempo de la canción) a un WAV temporal
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("secuencias_mezcla");
+        dir.createDirectory();
+        input = dir.getNonexistentChildFile ("mezcla", ".wav", false);
+        std::vector<bool> all (arrangedSong->tracks.size(), true);
+        juce::String error;
+        if (! Analyzer::writeMix (*arrangedSong, all, engine.getSampleRate(), input, error))
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Separar", tr ("No se pudo escribir la mezcla: ") + error);
+            return;
+        }
+    }
+    separationTarget = info->folder;
+    startSeparation (input);
+    if (separator.getState() != Separator::State::running)
+        separationTarget = juce::File();
 }
 
 void MainComponent::startSeparation (const juce::File& file)
@@ -2428,21 +2523,7 @@ void MainComponent::startSeparation (const juce::File& file)
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Falta Demucs"),
             tr ("No encuentro Python con Demucs en:\n") + py
-            + tr ("\n\nInstálalo una vez en la Terminal:\n\n"
-                 #if JUCE_LINUX
-                  "sudo apt install python3-venv ffmpeg\n"
-                  "python3 -m venv ~/demucs-env\n"
-                  "~/demucs-env/bin/pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 "
-                  "--index-url https://download.pytorch.org/whl/cu126\n"
-                  "~/demucs-env/bin/pip install demucs soundfile\n"
-                  "~/demucs-env/bin/pip install audio-separator onnxruntime torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0\n\n"
-                  "(Sin tarjeta NVIDIA, cambia cu126 por cpu en la primera línea de pip.)\n"
-                  "La última línea es opcional: activa las voces con Roformer en calidad alta y máxima.\n\n"
-                 #else
-                  "python3 -m venv ~/demucs-env\n"
-                  "~/demucs-env/bin/pip install demucs soundfile \"torchaudio<2.9\"\n\n"
-                 #endif
-                  "Si lo instalaste en otro lugar, cambia la ruta en «Ajustes IA» (ruta completa)."));
+            + tr ("\n\nInstálalo desde «Ajustes IA» > «Instalar motores de IA» (o cambia ahí la ruta si ya lo tienes en otro lugar)."));
         return;
     }
 

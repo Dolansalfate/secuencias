@@ -154,6 +154,10 @@ public:
     // Proyecto: una carpeta de canción completa (song.json + stems). Importar la copia a la biblioteca
     // con todos sus ajustes; exportar copia la carpeta de la canción (o todas y el setlist) a otro lugar.
     static bool isProjectFolder (const juce::File& folder);
+    // Separación de una canción del setlist: sus archivos de audio pasan a la subcarpeta "original"
+    // y los stems de `resultFolder` (temporales propios) se mueven a la carpeta de la canción; el
+    // resto (marcadores, análisis, tempo, cortes) se conserva. El nivelado por pista se reinicia.
+    bool replaceStems (int index, const juce::File& resultFolder);
     int importProject (const juce::File& folder);
     bool exportSong (int index, const juce::File& destinationFolder) const;
     bool exportAll (const juce::File& destinationFolder) const;

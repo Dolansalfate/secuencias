@@ -32,7 +32,11 @@ modelo que usa Moises).
 - Fundidos de unos 6 ms al dar play, pausa o stop y al saltar: nunca hay clics. El cierre del
   loop hace un crossfade (equal-power) con lo que precede al inicio de la región, el final de la
   canción se funde, y al cambiar de canción primero se apaga con fundido la que suena.
-- Separación con IA: se elige un archivo o se arrastra uno solo a la ventana. Dos selectores:
+- Separación con IA: con una canción cargada, "Separar canción (IA)" ofrece separar **esa**
+  canción (sus pistas se reemplazan por los stems y el audio anterior queda en la subcarpeta
+  `original`; marcadores, análisis, tempo y cortes se conservan; `Library::replaceStems`) o
+  elegir otro archivo, que se agrega como canción nueva; también se puede arrastrar uno solo a
+  la ventana. Dos selectores:
   **pistas** (4, o 6 con guitarra y piano) y **calidad** (normal, alta, máxima). El pipeline
   corre en un hilo aparte con barra de progreso global y al terminar se importa como canción
   nueva. Normal usa `htdemucs` o `htdemucs_6s`; alta usa los modelos afinados `htdemucs_ft`
@@ -220,6 +224,7 @@ Source/
                        modo en vivo; integra TimelineView y MixerPanel (MarkerButton vive en el .cpp)
   TimelineView.h/.cpp  Vista de arreglo: regla, carriles con forma de onda, cabezal, zoom
   MixerPanel.h/.cpp    ChannelStrip, MasterStrip y MixerPanel
+  FilePicker.h/.cpp    Selector de archivos dentro de la ventana (Linux y Windows)
   Meters.h/.cpp        LevelMeter (pico, RMS, retención, clip, escala)
   UiUtils.h            Colores, fuentes, paleta de pistas, disableFocus, formatTime
   AudioEngine.h/.cpp   Motor de reproducción (AudioIODeviceCallback)
@@ -560,15 +565,20 @@ Pasos de `run()`:
   repinta solo su franja. Los carriles van en un `Viewport` vertical (mínimo 44 px cada uno).
   `MixerPanel` recibe `fillOutputBox` de MainComponent y sincroniza M/S con los atómicos en
   cada tick, igual que los carriles (`refreshTrackStates`).
-- `--captura=archivo.png [--cancion=N] [--vivo] [--analizar] [--nivelar] [--tempo=BPM] [--tono=N] [--corte=seg --desplazar=ms --modocorte=N]`
+- `--captura=archivo.png [--cancion=N] [--vivo] [--analizar] [--nivelar] [--separar] [--selector] [--tempo=BPM] [--tono=N] [--corte=seg --desplazar=ms --modocorte=N]`
   (Main.cpp): herramienta de desarrollo que permite una segunda instancia, espera a que cargue
   la canción (y a que termine el análisis, el nivelado o el render pedidos) y guarda
   `createComponentSnapshot`.
 - Diálogos: siempre asíncronos (`AlertWindow` + `enterModalState(..., deleteWhenDismissed=true)`,
   `showMessageBoxAsync`, `FileChooser::launchAsync`). Nunca uses modales bloqueantes.
-- En Linux todos los `FileChooser` usan el selector de JUCE (no el nativo): zenity no permite
-  elegir archivos y carpetas a la vez y, con GNOME en Wayland, su ventana se abre detrás de la
-  app por la prevención de robo de foco (parece que el botón no hace nada).
+- Selector de archivos: `pickFiles (título, flags, carpeta, patrones, callback)`. En macOS usa
+  el `FileChooser` nativo; en Linux y Windows, `FilePicker`, un panel **dentro de la ventana**
+  con un `FileBrowserComponent` y Aceptar / Cancelar. Motivo: cualquier ventana nueva (zenity,
+  el selector de JUCE) se abría a veces detrás de la principal por la prevención de robo de
+  foco de GNOME y, al ser modal, la app parecía colgada. Mientras el panel está abierto, el
+  Timer no roba el foco y `keyPressed` le pasa las teclas (Esc cancela, Enter acepta). Con
+  `canSelectDirectories` y nada marcado devuelve la carpeta abierta. `--captura --selector`
+  lo muestra.
 
 ## 6. Convenciones y trampas conocidas
 
@@ -685,6 +695,9 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.2**: `FilePicker` (selector dentro de la ventana en Linux y Windows), "Separar
+  canción (IA)" sobre la canción seleccionada (`separateCurrentSong`, `Library::replaceStems`,
+  `separationTarget`), `--captura --separar --selector`.
 - **v0.3.1 (Windows)**: preset `release-win`, `/utf-8` en MSVC, rutas por plataforma
   (`venvPython`, `isAbsolutePath`, `ffmpeg.exe`, `audio-separator.exe`), m4a en Windows,
   `instalar-ia.ps1`, instalador Inno Setup con ruedas de madmom compiladas en Actions, job

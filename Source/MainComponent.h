@@ -10,6 +10,7 @@
 #include "Arrangement.h"
 #include "TimelineView.h"
 #include "MixerPanel.h"
+#include "FilePicker.h"
 
 class MarkerButton;
 
@@ -45,6 +46,14 @@ public:
     bool isRendering() const  { return rendering || tempoDirtySince != 0; }
     void editForCapture (double cutSeconds, double moveMs);   // corta los stems y desplaza el tramo que sigue (herramienta de captura)
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
+    void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
+    void openImportPickerForCapture()                         { chooseStems(); }
+    void setSeparationOptionsForCapture (int stems, int quality)   // sin guardar en los ajustes
+    {
+        if (stems > 0)   stemsBox.setSelectedId (juce::jlimit (1, 2, stems), juce::dontSendNotification);
+        if (quality > 0) qualityBox.setSelectedId (juce::jlimit (1, 3, quality), juce::dontSendNotification);
+    }
+    bool isSeparating() const                                 { return separator.getState() == Separator::State::running; }
     void setTempoForCapture (double playBpm, int transpose)
     {
         if (auto* info = currentInfo())
@@ -163,6 +172,9 @@ private:
     // Importar / separar / ajustes
     void chooseStems();
     void chooseSongToSeparate();
+    // Selector de archivos: nativo en macOS; en Linux y Windows, un panel dentro de la ventana (FilePicker)
+    void pickFiles (const juce::String& title, int browserFlags, const juce::File& startDir, const juce::String& patterns,
+                    std::function<void (const juce::Array<juce::File>&)> onDone);
     void importStems (const juce::Array<juce::File>&);
     void startSeparation (const juce::File&);
     void showAudioSettings();
@@ -238,6 +250,8 @@ private:
 
     juce::Label helpLabel;
     std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<FilePicker> picker;
+    juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
 
     std::atomic<bool> abortJobs { false };
     juce::ThreadPool loaderPool { 1 };   // último: se destruye primero

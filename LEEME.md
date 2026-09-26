@@ -63,7 +63,9 @@ El mismo código sigue compilando en macOS.
   transiente (al golpe más cercano de la pista donde haces clic; usa la batería, que marca
   mejor el inicio de cada tiempo). Con el mismo modo, al arrastrar un tramo su inicio o su
   primer golpe encajan en el tiempo más cercano.
-- **Separar canción (IA)**: separa una canción completa en 4 o 6 stems y la agrega al setlist,
+- **Separar canción (IA)**: separa la canción seleccionada (sus pistas se reemplazan por los
+  stems y se conservan marcadores, análisis, tempo y cortes; el audio anterior queda en la
+  subcarpeta "original") o un archivo que elijas, que se agrega al setlist,
   con tres niveles de calidad. En calidad alta y máxima las voces se sacan con Roformer, y
   la pista "otros" es exactamente lo que falta para reconstruir la mezcla original.
 - Fundidos automáticos al dar play, stop, saltar, cerrar el loop y cambiar de canción (sin clics).
