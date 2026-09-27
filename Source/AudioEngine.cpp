@@ -123,6 +123,17 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
     return song;
 }
 
+void AudioEngine::setInstruments (std::shared_ptr<InstrumentSet> set)
+{
+    std::shared_ptr<InstrumentSet> old;
+    {
+        const juce::SpinLock::ScopedLockType sl (songLock);
+        old = std::move (instruments);
+        instruments = std::move (set);
+    }
+    // "old" se libera aquí, fuera del lock y en el hilo de mensajes (destrucción de plugins)
+}
+
 void AudioEngine::setSamplers (std::shared_ptr<SamplerSet> set)
 {
     std::shared_ptr<SamplerSet> old;
@@ -545,6 +556,10 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
     if (sampler != nullptr)
         for (auto& lane : sampler->lanes)
             anySolo = anySolo || lane->control.solo.load();
+    InstrumentSet* inst = instruments.get();
+    if (inst != nullptr)
+        for (auto& lane : inst->lanes)
+            anySolo = anySolo || lane->control.solo.load();
 
     for (auto& t : s.tracks)
     {
@@ -639,6 +654,58 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             const float target = silent ? 0.0f : c.gain.load();
             float g = c.smoothedGain;
             const float gStep = (target - g) / (float) n;
+            // Línea que dispara un instrumento del rack: sus golpes salen como notas MIDI hacia ese plugin
+            if (lane.instrumentId >= 0)
+            {
+                InstrumentLane* dest = nullptr;
+                if (inst != nullptr)
+                    for (auto& il : inst->lanes)
+                        if (il->id == lane.instrumentId)
+                        {
+                            dest = il.get();
+                            break;
+                        }
+                if (dest == nullptr)
+                    continue;
+                const juce::int64 lead = dest->latency;   // el plugin tarda esto en sonar: el golpe se le manda antes
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto p0 = positions[(size_t) i];
+                    if (p0 < 0)
+                        continue;
+                    const auto p = p0 + lead;
+                    if (p != lane.lastPos + 1)
+                    {
+                        auto it = std::lower_bound (lane.events.begin(), lane.events.end(), p,
+                                                    [] (const TriggerEvent& e, juce::int64 v) { return e.sample < v; });
+                        lane.nextEvent = (size_t) (it - lane.events.begin());
+                    }
+                    lane.lastPos = p;
+                    while (lane.nextEvent < lane.events.size() && lane.events[lane.nextEvent].sample <= p)
+                    {
+                        const auto& ev = lane.events[lane.nextEvent++];
+                        if (ev.sample != p)
+                            continue;
+                        const float vel = 0.25f + 0.75f * juce::jlimit (0.0f, 1.0f, ev.velocity);
+                        dest->midi.addEvent (juce::MidiMessage::noteOn (1, lane.note, vel), i);
+                        // Note-off 50 ms después: hueco libre, o se cierra el más antiguo
+                        InstrumentLane::PendingOff* slot = nullptr;
+                        for (auto& o : dest->offs)
+                            if (o.note < 0) { slot = &o; break; }
+                        if (slot == nullptr)
+                        {
+                            slot = &dest->offs[0];
+                            for (auto& o : dest->offs)
+                                if (o.remaining < slot->remaining) slot = &o;
+                            dest->midi.addEvent (juce::MidiMessage::noteOff (1, slot->note), i);
+                        }
+                        slot->note = lane.note;
+                        slot->remaining = i + dest->holdSamples;
+                    }
+                }
+                continue;
+            }
+
             const bool hasBank = lane.bank != nullptr && ! lane.bank->hits.empty();
 
             for (int i = 0; i < n; ++i)
@@ -711,6 +778,73 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                     g += gStep;
                     const float e = envelope[(size_t) i] * g;
                     const float sl = laneL[(size_t) i] * e, sr2 = laneR[(size_t) i] * e;
+                    if (outL == outR)
+                        outL[offset + i] += 0.5f * (sl + sr2);
+                    else
+                    {
+                        outL[offset + i] += sl;
+                        outR[offset + i] += sr2;
+                    }
+                    peakL = juce::jmax (peakL, std::abs (sl));
+                    peakR = juce::jmax (peakR, std::abs (sr2));
+                    sumL += sl * sl;
+                    sumR += sr2 * sr2;
+                }
+            }
+            c.smoothedGain = target;
+            if (peakL > c.peakL.load()) c.peakL = peakL;
+            if (peakR > c.peakR.load()) c.peakR = peakR;
+            c.rmsL = std::sqrt (sumL / (float) n);
+            c.rmsR = std::sqrt (sumR / (float) n);
+        }
+    }
+
+    // 2c) Instrumentos del rack: note-offs pendientes, proceso del plugin y mezcla de su salida
+    if (inst != nullptr)
+    {
+        for (auto& lanePtr : inst->lanes)
+        {
+            auto& lane = *lanePtr;
+            auto& c = lane.control;
+            if (lane.plugin == nullptr)
+                continue;
+            for (auto& o : lane.offs)
+            {
+                if (o.note < 0)
+                    continue;
+                if (o.remaining < n)
+                {
+                    lane.midi.addEvent (juce::MidiMessage::noteOff (1, o.note), juce::jmax (0, o.remaining));
+                    o.note = -1;
+                }
+                else
+                    o.remaining -= n;
+            }
+            const int chans = lane.work.getNumChannels();
+            juce::AudioBuffer<float> view (lane.work.getArrayOfWritePointers(), chans, n);
+            view.clear();
+            if (! lane.plugin->isSuspended())
+                lane.plugin->processBlock (view, lane.midi);
+            lane.midi.clear();
+
+            const bool silent = c.muted.load() || (anySolo && ! c.solo.load());
+            const float target = silent ? 0.0f : c.gain.load();
+            float g = c.smoothedGain;
+            const float gStep = (target - g) / (float) n;
+            const float* srcL = view.getReadPointer (0);
+            const float* srcR = view.getReadPointer (juce::jmin (1, chans - 1));
+            int l, r;
+            outputPairChannels (c.outputPair.load(), numOuts, l, r);
+            float* outL = outputs[l];
+            float* outR = outputs[r];
+            float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;
+            if (outL != nullptr && outR != nullptr && (g > 0.0f || target > 0.0f))
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    g += gStep;
+                    const float e = envelope[(size_t) i] * g;
+                    const float sl = srcL[i] * e, sr2 = srcR[i] * e;
                     if (outL == outR)
                         outL[offset + i] += 0.5f * (sl + sr2);
                     else

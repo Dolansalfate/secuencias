@@ -109,6 +109,17 @@ modelo que usa Moises).
   primeras solas (y "Audio" ahora deja elegir hasta 32 entradas). Grabar una pista exige tempo
   y tono originales (la toma se alinea con el audio guardado). Ajustes: `recordInput`,
   `recordMonitor` (-1 = no escuchar), `recordOffsetMs`.
+- **Instrumentos VST3/AU** (botón "Instrumentos", `InstrumentRack`, `InstrumentLane` en el motor):
+  rack global (el mismo para todo el setlist) de instrumentos VST3 (y AU en macOS), por ejemplo
+  Addictive Drums. "Buscar instrumentos instalados" recorre las carpetas estándar (o una carpeta
+  elegida) en un hilo aparte; "Añadir instrumento" carga uno de los conocidos; cada uno tiene su
+  canal en el mezclador (lila: fader, mute, solo, salida y medidor; clic en el nombre abre la
+  ventana del plugin) y su estado, mezcla y descripción se guardan en `instrumentos.xml` junto a
+  los ajustes y se restauran al abrir la app. En el menú del trigger de una pista, "Sonido" ofrece
+  los instrumentos del rack: los golpes de esa pista salen como notas MIDI hacia el plugin (la nota
+  de "Nota MIDI", velocidad 0,25 + 0,75 × fuerza del golpe, 50 ms de duración), adelantadas la
+  latencia que el plugin declara, así el sonido cae exacto en el golpe. La pista original se
+  silencia o no según el modo (solo trigger / ambas).
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -275,6 +286,11 @@ compila, la tarea "Tests" corre los tests, y F5 depura (hay configuraciones con 
    delante. No debe haber "JUCE Assertion failure" en la salida.
 4. Si agregas lógica al motor o a la biblioteca, agrega un caso en `Tests/EngineTests.cpp`.
 
+Los tests compilan además un VST3 mínimo (`Tests/TestSynth.cpp`, target `SecuenciasTestSynth_VST3`:
+en cada noteOn emite 50 ms de nivel igual a la velocidad) y lo cargan con el host real
+(`VST3PluginFormat`); su ruta llega por la definición `SECUENCIAS_TEST_SYNTH`. En la CI de Ubuntu
+`ctest` corre bajo `xvfb-run` por si el host VST3 necesita pantalla.
+
 ## 4. Estructura
 
 ```
@@ -301,8 +317,10 @@ Source/
   Arrangement.h/.cpp   Arreglo: tramos de audio (cortar, mover, eliminar, unir), render a RAM, shiftGrid
   Triggers.h/.cpp      Golpes detectados (detect), bancos de muestras (loadBank, sliceHits, writeWav)
   Recorder.h/.cpp      Grabación: alinear la toma con la canción (writeAligned), banco desde golpes (saveBank)
+  Instruments.h/.cpp   InstrumentRack: plugins VST3/AU (carga, estado, editor, búsqueda) y su entrega al motor
   Stretcher.h/.cpp     Render de tempo y tono con Signalsmith Stretch (FetchContent, MIT)
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
+Tests/TestSynth.cpp    VST3 mínimo que compilan los tests para probar el host de instrumentos
 linux/                 .desktop (plantilla con @EXEC@), ícono SVG y empaquetar-deb.sh
 mac/                   icono.png (ícono del bundle) y empaquetar.sh (DMG universal, firma ad hoc)
 windows/               icono.ico e instalador.iss (Inno Setup)
@@ -324,6 +342,7 @@ LEEME.md               Guía para el usuario final
 | **Separador** | `Separator` (`juce::Thread`) ejecuta Demucs con `ChildProcess` | La UI consulta `getState()`, `getProgress()` y `getMessage()` desde el Timer. Sin callbacks cruzados. |
 | **Analizador** | `Analyzer` (`juce::Thread`) mezcla los stems en RAM a WAV y ejecuta madmom | Mismo patrón que el separador; el resultado (`Analysis`) se aplica en la UI al ver `done`. |
 | **Grabación** | `TimeSliceThread` de un `AudioFormatWriter::ThreadedWriter` (JUCE): vuelca a disco lo que el callback deja en su cola sin bloqueo | Vive en `MainComponent::recording` mientras se graba; al detener, la toma se alinea o se corta en el hilo de carga. |
+| **Búsqueda de plugins** | `InstrumentRack::Scanner` (`juce::Thread`): `PluginDirectoryScanner` sobre las carpetas de cada formato | Progreso y fin llegan con `callAsync`; `KnownPluginList` tiene su propio lock. Los plugins se **crean y destruyen en el hilo de mensajes**. |
 
 ### 5.2 AudioEngine
 - `LoadedSong` contiene `LoadedTrack`s. Cada pista es un `AudioBuffer<float>` **estéreo, a la
@@ -354,6 +373,17 @@ LEEME.md               Guía para el usuario final
   una línea silencia las pistas y viceversa. `LoadedTrack::replaced` (atómico, lo pone
   `buildSamplers` cuando el trigger está en modo "solo el sonido" y tiene banco) silencia la
   pista como un mute aparte del del usuario.
+- Instrumentos del rack: `setInstruments (InstrumentSet)` bajo `songLock` (`setSong` no lo toca;
+  el conjunto anterior se libera fuera del lock en el hilo que llama, la UI, donde pueden morir
+  los plugins quitados). Cada `InstrumentLane` lleva el plugin ya preparado con `maxBlockSize`,
+  `work` (canales del plugin × 2048), `midi` (`ensureSize`), `latency`, `holdSamples` y 64
+  note-offs pendientes. Las líneas del sampler con `instrumentId` no tienen voces: en 2b) buscan
+  su instrumento por id y meten `noteOn` en su `midi` en la muestra en que `position + latency`
+  coincide con el golpe (misma relocalización binaria tras un salto), y programan el `noteOff`;
+  en 2c) cada instrumento emite los note-offs vencidos, `processBlock` sobre una vista de `work`
+  de n muestras (salvo `isSuspended`), y su salida (canales 0 y 1) va con ganancia en rampa,
+  envolvente global, par de salida y medidores, como las líneas del sampler. El solo cuenta
+  también para ellos.
 - Grabación de la entrada (`processInput`, antes de la canción): `setRecorder (RecordSetup)`
   publica un puntero atómico a una de dos configuraciones alternas (writer, canales de entrada
   entre los activos, escucha y su par) y espera con `waitForCallback` (`callbackDepth`) a que
@@ -444,7 +474,7 @@ Secuencias/
   (tiempos, acordes, marcadores, secciones de tempo, nivelado) está en la línea de tiempo de
   la canción, no en la del audio original.
 - Triggers: por stem, `trigger`: `{ enabled, keepAudio (false = solo suena el trigger), sound
-  ("banco:<nombre>" o "vst:<n>"), note (MIDI, para instrumentos), thresholdDb,
+  ("banco:<nombre>" o "vst:<id>", el id estable del instrumento en el rack), note (MIDI, para instrumentos), thresholdDb,
   sensitivity, minMs, gainDb, muted, outputPair }` (`TriggerSettings`), y `songTime` (la pista
   ya está en la línea de tiempo del arreglo: `arrangement::render` la copia tal cual en vez de
   pasarla por los clips; lo llevan las grabaciones, `<nombre>.wav` en la carpeta de la
@@ -666,6 +696,33 @@ Pasos de `run()`:
   vacía la caché de bancos y asigna el banco al trigger de la pista). Cambiar de canción cierra
   y guarda la toma; cerrar la app la descarta.
 
+### 5.4h Instruments (rack VST3/AU)
+- `InstrumentRack (motor, carpetaDeAjustes)`: `formats.addDefaultFormats()` (VST3; AU en macOS),
+  `known` (`KnownPluginList`, persistida en `plugins.xml`), `slots` (id estable, `PluginDescription`,
+  `lane`, ventana del editor, ganancia/mute/salida, `savedState`). `restore()` lee
+  `instrumentos.xml` (`<INSTRUMENTO id gainDb muted outputPair estado=base64><PLUGIN/>`), aplica
+  el "dead man's pedal" (`plugin-en-prueba.txt`: el plugin que tumbó la app en una búsqueda
+  queda vetado) y carga cada plugin con `createPluginInstanceAsync`; `makeLane` pone el estado,
+  `prepareToPlay (sr, maxBlockSize)`, latencia, buffer y cola MIDI; `publish()` arma un
+  `InstrumentSet` nuevo con las líneas cargadas (compartidas por `shared_ptr`: quitar una no toca a
+  las demás) y llama a `onChanged`. `save()` (al cargar, quitar, cerrar el editor y al salir)
+  guarda `getStateInformation` y la mezcla de cada línea. `openEditor` usa
+  `createEditorIfNeeded` o `GenericAudioProcessorEditor` en una `DocumentWindow` que al cerrarse
+  se destruye en el siguiente mensaje. `prepareAll (sr)` saca el conjunto del motor, vuelve a
+  preparar y publica (lo llama el Timer con `needsReload`). `scan` (hilo `Scanner`) recorre
+  `getDefaultLocationsToSearch()` de cada formato más las carpetas extra; `describeFile` registra
+  los plugins de un archivo concreto (`--captura --instrumento=<ruta.vst3>` lo usa y asigna el
+  instrumento al trigger de la batería). Callbacks tardíos se protegen con un `weak_ptr` (`alive`).
+- En `MainComponent`: `rack` se crea tras abrir el dispositivo y restaura en el primer mensaje;
+  `rack->onChanged` refresca los canales del mezclador (`MixerPanel::setInstruments`, nombre
+  clicable → `openEditor`), `refreshReplaced` (la pista solo se silencia si el instrumento existe) y
+  las casillas; `instrumentsMenu` (cargados con abrir/quitar, "Añadir instrumento" de los
+  conocidos, buscar instalados o en una carpeta, cancelar) y `scanInstruments`; `buildSamplers`
+  crea para `"vst:<id>"` una línea con `instrumentId` y `note` (sin banco, sin canal propio en el
+  mezclador); el menú del trigger lista los instrumentos (ids 300+) y "Añadir o buscar
+  instrumentos..." (298). El destructor cierra editores, guarda y destruye el rack después de
+  quitar el callback de audio.
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -770,6 +827,10 @@ Pasos de `run()`:
   `Fixed`, `Style`, `Cell`... Los tipos del modelo van con nombre propio (`SongMarker`,
   `SongInfo`, `TempoRegion`, `Clip`) o dentro de un namespace. La compilación en Mac solo se ve
   en GitHub Actions, así que revisa el nombre antes de subir.
+- **Plugins**: se crean, editan y destruyen solo en el hilo de mensajes; el motor únicamente
+  llama a `processBlock` (el plugin es responsable de su tiempo real). Nunca destruyas un
+  `AudioPluginInstance` con su editor abierto. En CMake, la propiedad `JUCE_PLUGIN_ARTEFACT_FILE`
+  de un target `_VST3` trae genexes anidados: léela con `$<GENEX_EVAL:...>`.
 - El estilo del código es parecido al de JUCE (llaves en línea propia, espacio antes de `(`,
   4 espacios). Hay un `.clang-format`, pero no reformatees archivos completos sin motivo.
 - No agregues dependencias de sistema nuevas sin actualizar el README, `install.sh` y esta guía.
@@ -793,6 +854,11 @@ Pasos de `run()`:
   siguiente canción.
 - Probado con tests y en Xvfb (sin tarjeta de sonido real); falta probar con interfaces
   multicanal reales.
+- Instrumentos: solo instrumentos (no efectos), una salida estéreo por plugin (las salidas
+  múltiples de Addictive Drums se ignoran), sin `AudioPlayHead` (no reciben tempo ni posición),
+  solo noteOn/noteOff (sin CC ni aftertouch). La búsqueda de plugins es en el mismo proceso:
+  un plugin roto puede cerrar la app durante la búsqueda (a la siguiente queda vetado). Los
+  plugins con latencia se compensan solo en los golpes del trigger.
 - Grabación: la alineación confía en las latencias que informa el dispositivo (con PipeWire
   o ALSA suelen ser correctas; si no, está la compensación extra en ms). Saltar con el cabezal
   durante una toma desalinea lo grabado después del salto (la toma se alinea por su inicio).
@@ -835,6 +901,11 @@ Fases, en orden:
    unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer. Pendiente:
    rehacer, silenciar tramos por pista, recorte de inicio y fin como gesto directo.
 
+**Plan de estudio en vivo** (acordado el 2026-09-27): 1) triggers de las pistas separadas con
+sampler interno y bancos grabados (hecho, v0.4.0), 2) grabación de entradas como pistas nuevas y
+como bancos (hecho, v0.4.1), 3) instrumentos VST3/AU disparados por los triggers (hecho, v0.5.0),
+4) disparo desde un micrófono en vivo (no hace falta por ahora).
+
 Pendientes de antes que siguen vigentes: probar con interfaces multicanal reales, control
 MIDI, precarga de la siguiente canción, opción "cambiar de canción solo cuando está detenido",
 avance automático, count-in y compases distintos de 4/4 en la rejilla fija, AppImage, y
@@ -847,6 +918,14 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.5.0 (instrumentos VST3/AU, punto 3)**: `Instruments` (`InstrumentRack`: búsqueda con
+  `PluginDirectoryScanner` en un hilo, carga asíncrona, estado en `instrumentos.xml`, editor en
+  ventana propia, `prepareAll`), `InstrumentLane`/`InstrumentSet` en el motor (MIDI desde los
+  golpes con compensación de latencia, note-offs, `processBlock` por trozo, canal en el
+  mezclador), `SamplerLane::instrumentId` y `note`, botón "Instrumentos" y su menú, instrumentos
+  en el menú del trigger (`"vst:<id>"`), canales lila en el mezclador con nombre clicable,
+  `JUCE_PLUGINHOST_VST3` (y `_AU` en macOS), VST3 de prueba (`Tests/TestSynth.cpp`) y test del
+  host, `--captura --instrumento=<ruta>`, `xvfb-run` en la CI.
 - **v0.4.1 (grabación de entradas, punto 2)**: `RecordSetup` / `setRecorder` /
   `processInput` en el motor (cola sin bloqueo, escucha con rampa, latencias, `callbackDepth`),
   `Recorder` (`writeAligned`, `saveBank`, `compensation`), `LoadedTrack::songTime` respetado

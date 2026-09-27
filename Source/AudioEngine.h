@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 #include "Library.h"
 #include "Triggers.h"
 #include <atomic>
@@ -55,6 +56,8 @@ struct SamplerLane
     int stemIndex = -1;                          // pista de origen
     std::vector<TriggerEvent> events;            // ordenados por muestra (línea de tiempo de reproducción)
     std::shared_ptr<const SampleBankData> bank;
+    int instrumentId = -1;                       // >= 0: los golpes van como notas MIDI al instrumento del rack con ese id
+    int note = 36;                               // nota MIDI que se envía
     // Solo hilo de audio
     size_t nextEvent = 0;
     juce::int64 lastPos = -2;
@@ -71,6 +74,34 @@ struct SamplerLane
 struct SamplerSet
 {
     std::vector<std::unique_ptr<SamplerLane>> lanes;
+};
+
+// Instrumento VST3/AU del rack (punto 3): el plugin ya preparado, su buffer de trabajo y su cola
+// MIDI prealocados, y un LoadedTrack de control para el mezclador. Las líneas del sampler con
+// `instrumentId` le meten noteOn en `midi` (adelantados `latency` muestras) y el motor procesa el
+// plugin una vez por trozo. Los plugins se crean y destruyen en el hilo de mensajes.
+struct InstrumentLane
+{
+    LoadedTrack control;
+    juce::String name;
+    int id = 0;
+    std::unique_ptr<juce::AudioPluginInstance> plugin;
+    juce::AudioBuffer<float> work;               // canales del plugin x maxBlockSize
+    juce::MidiBuffer midi;                       // eventos del trozo en curso
+    int latency = 0;                             // plugin->getLatencySamples()
+    int holdSamples = 2205;                      // duración de cada nota (50 ms) antes del noteOff
+    // Solo hilo de audio: note-offs pendientes (muestras contadas desde el inicio del trozo actual)
+    struct PendingOff
+    {
+        int note = -1;
+        int remaining = 0;
+    };
+    PendingOff offs[64];
+};
+
+struct InstrumentSet
+{
+    std::vector<std::shared_ptr<InstrumentLane>> lanes;   // compartidas entre conjuntos sucesivos: quitar uno no toca a los demás
 };
 
 // Grabación de una entrada (punto 2). La UI crea el ThreadedWriter (y lo destruye después de
@@ -113,6 +144,7 @@ public:
     // Largo de los fundidos (play, pausa, saltos, cierre del loop y final de la canción), en muestras.
     static constexpr int fadeSamples = 256;
     static constexpr int maxMeteredOutputs = 64;
+    static constexpr int maxBlockSize = 2048;   // tamaño máximo de trozo (también el que se prepara en los plugins)
 
     // Se llama desde un hilo de fondo. Devuelve nullptr si se aborta.
     static std::shared_ptr<LoadedSong> loadSong (const SongInfo&, double sampleRate,
@@ -150,6 +182,10 @@ public:
     void setGainCurve (std::shared_ptr<const GainCurve>);   // nullptr = sin nivelado
     void setSamplers (std::shared_ptr<SamplerSet>);          // nullptr = sin triggers; se cambia bajo songLock
     std::shared_ptr<SamplerSet> getSamplers() const          { return samplers; }
+    // Instrumentos del rack: independientes de la canción (setSong no los toca); el conjunto anterior
+    // se libera fuera del lock, en el hilo que llama (la UI), donde pueden morir los plugins quitados.
+    void setInstruments (std::shared_ptr<InstrumentSet>);
+    std::shared_ptr<InstrumentSet> getInstruments() const    { return instruments; }
 
     // Medidores de las salidas del dispositivo (después del fader maestro)
     float takeOutputPeak (int channel);         // pico desde la última lectura; 0 si el canal no existe
@@ -209,6 +245,7 @@ private:
     std::shared_ptr<const BeatGrid> beatGrid;   // también bajo songLock
     std::shared_ptr<const GainCurve> gainCurve; // también bajo songLock
     std::shared_ptr<SamplerSet> samplers;       // también bajo songLock
+    std::shared_ptr<InstrumentSet> instruments; // también bajo songLock; no lo toca setSong
     float levelSmooth = 1.0f;                   // ganancia por tramo suavizada (hilo de audio)
     std::atomic<float> songGain { 1.0f };
 

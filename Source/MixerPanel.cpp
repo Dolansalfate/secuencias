@@ -10,6 +10,7 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setFont (ui::font (13.0f, true));
     nameLabel.setMinimumHorizontalScale (0.7f);
+    nameLabel.onClick = [this] { if (onNameClicked) onNameClicked(); };
     addAndMakeVisible (nameLabel);
 
     addAndMakeVisible (meter);
@@ -344,11 +345,31 @@ void MixerPanel::setSamplers (std::shared_ptr<SamplerSet> set)
     if (set != nullptr)
         for (auto& lane : set->lanes)
         {
+            if (lane->instrumentId >= 0)
+                continue;   // suena a través de un instrumento del rack: su canal es el del instrumento
             auto* strip = samplerStrips.add (new ChannelStrip (set, lane->control, juce::Colours::orange));
             strip->setTriggerBoxVisible (false);
             if (fillOutputBox)
                 fillOutputBox (strip->outputBox(), lane->control.outputPair.load());
             strip->onChanged = [this] { if (onChanged) onChanged(); };
+            holder.addAndMakeVisible (strip);
+        }
+    resized();
+}
+
+void MixerPanel::setInstruments (std::shared_ptr<InstrumentSet> set)
+{
+    instrumentStrips.clear();
+    if (set != nullptr)
+        for (auto& lane : set->lanes)
+        {
+            auto* strip = instrumentStrips.add (new ChannelStrip (set, lane->control, juce::Colour (0xffb08cff)));
+            strip->setTriggerBoxVisible (false);
+            if (fillOutputBox)
+                fillOutputBox (strip->outputBox(), lane->control.outputPair.load());
+            strip->onChanged = [this] { if (onChanged) onChanged(); };
+            const int id = lane->id;
+            strip->onNameClicked = [this, id] { if (onInstrumentClicked) onInstrumentClicked (id); };
             holder.addAndMakeVisible (strip);
         }
     resized();
@@ -378,6 +399,8 @@ void MixerPanel::refreshOutputs()
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
     for (auto* strip : samplerStrips)
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
+    for (auto* strip : instrumentStrips)
+        fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
     fillOutputBox (click.outputBox(), juce::jmax (0, click.outputBox().getSelectedId() - 1));
 }
 
@@ -386,6 +409,8 @@ void MixerPanel::tick (AudioEngine& engine)
     for (auto* strip : strips)
         strip->tick();
     for (auto* strip : samplerStrips)
+        strip->tick();
+    for (auto* strip : instrumentStrips)
         strip->tick();
     click.setLevel (engine.takeClickPeak());
     click.tick();
@@ -407,11 +432,15 @@ void MixerPanel::resized()
 
     const int gap = 6;
     const int h = juce::jmax (150, view.getHeight() - view.getScrollBarThickness() - 2);
-    const int total = strips.size() + samplerStrips.size();
-    holder.setSize (juce::jmax (1, total * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0)), h);
+    const int total = strips.size() + samplerStrips.size() + instrumentStrips.size();
+    holder.setSize (juce::jmax (1, total * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0)
+                                     + (instrumentStrips.size() > 0 ? gap * 2 : 0)), h);
     for (int i = 0; i < strips.size(); ++i)
         strips[i]->setBounds (i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
-    const int x0 = strips.size() * (ChannelStrip::width + gap) + gap * 2;   // los samplers, algo separados
+    int x0 = strips.size() * (ChannelStrip::width + gap) + gap * 2;   // los samplers, algo separados
     for (int i = 0; i < samplerStrips.size(); ++i)
         samplerStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
+    x0 += samplerStrips.size() * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0);   // y los instrumentos
+    for (int i = 0; i < instrumentStrips.size(); ++i)
+        instrumentStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
 }

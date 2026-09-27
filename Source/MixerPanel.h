@@ -20,6 +20,7 @@ public:
     std::function<void()> onChanged;   // cambió algo que se guarda en song.json (ganancia, mute, salida)
     std::function<void (double db)> onLevelEdited;   // se escribió un valor en la casilla de nivelado
     std::function<void()> onTriggerClicked;          // clic en la casilla del trigger (abre el menú)
+    std::function<void()> onNameClicked;             // clic en el nombre (los instrumentos abren su ventana)
 
     // Casilla del trigger: qué suena en esta pista. mode: 0 = "Audio" (suena por sí misma), 1 = solo el
     // sonido del trigger, 2 = ambas, 3 = trigger sin sonido asignado (aviso).
@@ -44,7 +45,7 @@ private:
     std::shared_ptr<void> keepAlive;    // mantiene viva la pista (la canción o el conjunto de samplers)
     LoadedTrack& track;
     juce::Colour colour;
-    juce::Label nameLabel;
+    ClickLabel nameLabel;
     LevelMeter meter { 2 };
     juce::Slider fader;
     juce::Label levelBox;              // nivelado del tramo (editable con un clic)
@@ -120,6 +121,7 @@ public:
 
     std::function<void (int stemIndex, double db)> onLevelEdited;   // casilla de nivelado de un canal
     std::function<void (int track)> onTriggerClicked;               // casilla del trigger de un canal (índice de pista)
+    std::function<void (int id)> onInstrumentClicked;               // nombre de un canal de instrumento (abre su ventana)
     std::function<void (bool enabled, float gainDb, int outputPair)> onClickChanged;   // canal del click
 
     void setClickState (bool enabled, float gainDb, int outputPair) { click.setState (enabled, gainDb, outputPair); }
@@ -127,6 +129,7 @@ public:
 
     void setSong (std::shared_ptr<LoadedSong>);   // nullptr = sin canales
     void setSamplers (std::shared_ptr<SamplerSet>);   // canales de los triggers (sampler), después de las pistas
+    void setInstruments (std::shared_ptr<InstrumentSet>);   // canales de los instrumentos del rack, al final
     void refreshOutputs();                        // cambió el dispositivo: rehacer los ComboBox de salida
     // Nivelado por pista del tramo actual: dB por stemIndex (vacío o sin nivelado = "--")
     void setLevelGains (const std::vector<double>& dbPerStem, bool enabled);
@@ -139,7 +142,7 @@ public:
 private:
     juce::Viewport view;
     juce::Component holder;
-    juce::OwnedArray<ChannelStrip> strips, samplerStrips;
+    juce::OwnedArray<ChannelStrip> strips, samplerStrips, instrumentStrips;
     ClickStrip click;
     MasterStrip master;
 };

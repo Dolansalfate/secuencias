@@ -1165,6 +1165,88 @@ int main()
         render (engine, out, 4);
     }
 
+#if defined (SECUENCIAS_TEST_SYNTH)
+    std::cout << "[Instrumentos] carga un VST3 (sintetizador de prueba) y el motor le manda los golpes como MIDI\n";
+    {
+        juce::VST3PluginFormat vst3;
+        juce::OwnedArray<juce::PluginDescription> found;
+        vst3.findAllTypesForFile (found, SECUENCIAS_TEST_SYNTH);
+        CHECK (found.size() == 1);
+        std::unique_ptr<juce::AudioPluginInstance> plugin;
+        juce::String error;
+        if (found.size() == 1)
+            plugin = vst3.createInstanceFromDescription (*found[0], sr, block, error);
+        CHECK (plugin != nullptr);
+        if (plugin != nullptr)
+        {
+            CHECK (plugin->acceptsMidi() && found[0]->isInstrument);
+            plugin->prepareToPlay (sr, AudioEngine::maxBlockSize);
+            // Directo: una nota en la muestra 10 -> nivel = velocidad desde ahí
+            juce::AudioBuffer<float> direct (2, block);
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 36, 0.5f), 10);
+            direct.clear();
+            plugin->processBlock (direct, midi);
+            CHECK (std::abs (direct.getSample (0, 9)) < 1.0e-6f && std::abs (direct.getSample (0, 10) - 0.5f) < 0.02f);
+
+            // En el motor: línea de instrumento + línea del sampler que le manda golpes (0,25 s fuerte, 0,6 s suave)
+            auto iset = std::make_shared<InstrumentSet>();
+            auto ilane = std::make_shared<InstrumentLane>();
+            ilane->id = 7;
+            ilane->name = "prueba";
+            ilane->control.gain = 1.0f;
+            ilane->control.outputPair = 0;
+            ilane->latency = plugin->getLatencySamples();
+            ilane->holdSamples = (int) (0.05 * sr);
+            ilane->work.setSize (2, AudioEngine::maxBlockSize);
+            ilane->midi.ensureSize (4096);
+            ilane->plugin = std::move (plugin);
+            iset->lanes.push_back (ilane);
+            engine.setInstruments (iset);
+            auto set = std::make_shared<SamplerSet>();
+            auto lane = std::make_unique<SamplerLane>();
+            lane->instrumentId = 7;
+            lane->note = 38;
+            lane->events = { { (juce::int64) (0.25 * sr), 1.0f }, { (juce::int64) (0.6 * sr), 0.4f } };
+            set->lanes.push_back (std::move (lane));
+            engine.setSamplers (set);
+            song->tracks[0]->muted = true;
+            song->tracks[1]->muted = true;
+            engine.seekSeconds (0.0);
+            engine.play();
+            render (engine, out, 20);
+            float before = 0.0f, strong = 0.0f, between = 0.0f, soft = 0.0f;
+            for (int b = 0; b < 200 && engine.isPlaying(); ++b)
+            {
+                render (engine, out, 1);
+                const double t = engine.getPositionSeconds() - block / sr;
+                const float pk = out.peak (0);
+                if (t > 0.12 && t + block / sr < 0.24) before = std::max (before, pk);
+                if (t > 0.26 && t + block / sr < 0.29) strong = std::max (strong, pk);
+                if (t > 0.34 && t + block / sr < 0.58) between = std::max (between, pk);
+                if (t > 0.61 && t + block / sr < 0.64) soft = std::max (soft, pk);
+            }
+            CHECK (before < 1.0e-4f && between < 1.0e-4f);      // 50 ms por golpe y silencio fuera
+            CHECK (std::abs (strong - 1.0f) < 0.03f);            // velocidad 1 -> nota a 127 -> nivel 1
+            CHECK (std::abs (soft - 0.55f) < 0.03f);             // velocidad 0,4 -> 0,25 + 0,75 x 0,4
+            CHECK (ilane->control.peakL.load() > 0.9f);          // medidores del canal del instrumento
+            ilane->control.muted = true;
+            engine.seekSeconds (0.2);
+            render (engine, out, 20);
+            float muted = 0.0f;
+            for (int b = 0; b < 12; ++b) { render (engine, out, 1); muted = std::max (muted, out.peak (0)); }
+            CHECK (muted < 1.0e-3f);
+            engine.setSamplers (nullptr);
+            engine.setInstruments (nullptr);   // aquí muere el plugin (hilo de mensajes)
+            engine.pause();
+            song->tracks[0]->muted = false;
+            song->tracks[1]->muted = false;
+            engine.seekSeconds (0.0);
+            render (engine, out, 4);
+        }
+    }
+#endif
+
     std::cout << "[AudioEngine] grabación de la entrada: archivo, posición inicial, escucha con rampa\n";
     {
         song->tracks[0]->muted = true;

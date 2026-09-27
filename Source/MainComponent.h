@@ -13,6 +13,7 @@
 #include "FilePicker.h"
 #include "StageView.h"
 #include "Recorder.h"
+#include "Instruments.h"
 #include <map>
 
 class MarkerButton;
@@ -53,6 +54,8 @@ public:
     void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
     void setDrumPartsForCapture (bool on)                     { drumPartsBtn.setToggleState (on, juce::dontSendNotification); }
     void setTriggerForCapture (const juce::String& bank);     // activa el trigger de la batería con ese banco (herramienta de captura)
+    void setInstrumentForCapture (const juce::String& path);  // carga ese plugin en el rack y lo pone como trigger de la batería (captura)
+    bool isLoadingInstruments() const { return rack != nullptr && rack->isLoading(); }
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
@@ -162,7 +165,8 @@ private:
     static std::shared_ptr<SamplerSet> buildSamplers (LoadedSong& rendered, const SongInfo&, double sampleRate,
                                                       const juce::File& banksFolder, juce::AudioFormatManager&, BankCache&);
     static std::vector<TriggerSettings> triggersOf (const SongInfo&);
-    static juce::String triggerLabelFor (const TriggerSettings&, bool hasSound, int& mode);   // casilla del mezclador
+    static juce::String triggerLabelFor (const TriggerSettings&, bool hasSound, const juce::String& instrumentName, int& mode);   // casilla del mezclador
+    void refreshReplaced();   // LoadedTrack::replaced según el modo del trigger y si su sonido (banco o instrumento) existe
     void applySamplers (std::shared_ptr<SamplerSet>);   // al motor, al mezclador y a las marcas de la regla
     void syncTriggerMarks();
     void triggerMenu (int track);
@@ -190,6 +194,10 @@ private:
     void stopRecording (bool discard);                   // cierra la toma y la guarda (alineada o como banco) en el hilo de carga
     void recordingFinished (bool ok, const juce::String& message, const juce::String& fileName, const juce::String& name,
                             bool toBank, int bankTrack, const juce::String& bankName, const juce::File& songFolder);
+
+    // Instrumentos VST3/AU (punto 3): rack global; menú del botón "Instrumentos" y búsqueda de plugins
+    void instrumentsMenu();
+    void scanInstruments (const juce::FileSearchPath& extraFolders);
     double songLengthSeconds() const;              // largo de la línea de tiempo de la canción (arreglo, sin estirar)
 
     // Arreglo (fase 4): cortar, mover, eliminar y unir tramos de audio; deshacer
@@ -270,6 +278,7 @@ private:
     std::vector<TriggerSettings> renderedTriggers;
     BankCache bankCache;
     Recording recording;
+    std::unique_ptr<InstrumentRack> rack;      // se crea tras abrir el dispositivo (necesita la frecuencia)
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)
@@ -288,7 +297,7 @@ private:
     juce::Array<int> heldKeys;           // teclas pulsadas, para ignorar la autorrepetición
 
     // --- UI ---
-    juce::TextButton importBtn, separateBtn, audioBtn, aiBtn, cancelSepBtn;
+    juce::TextButton importBtn, separateBtn, audioBtn, aiBtn, instrumentsBtn, cancelSepBtn;
     juce::ComboBox stemsBox, qualityBox;
     juce::ToggleButton drumPartsBtn;           // "Batería en partes" al separar
     juce::ProgressBar sepBar { sepProgress };

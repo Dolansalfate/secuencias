@@ -58,6 +58,20 @@ MainComponent::MainComponent()
     deviceManager.addAudioCallback (&engine);
     deviceManager.addChangeListener (this);
 
+    // Rack de instrumentos: junto a los ajustes; los plugins guardados se cargan (asíncrono) cuando la ventana ya existe
+    rack = std::make_unique<InstrumentRack> (engine, props.getUserSettings()->getFile().getParentDirectory());
+    rack->onChanged = [this]
+    {
+        mixer.setInstruments (engine.getInstruments());
+        refreshReplaced();
+        syncTriggerMarks();
+    };
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+    {
+        if (safe != nullptr && safe->rack != nullptr)
+            safe->rack->restore();
+    });
+
     library.load();
 
     // --- Barra superior ---
@@ -86,13 +100,15 @@ MainComponent::MainComponent()
     addAndMakeVisible (drumPartsBtn);
     audioBtn.setButtonText ("Audio");
     audioBtn.onClick = [this] { showAudioSettings(); };
+    instrumentsBtn.setButtonText ("Instrumentos");
+    instrumentsBtn.onClick = [this] { instrumentsMenu(); };
     aiBtn.setButtonText ("Ajustes IA");
     aiBtn.onClick = [this] { showAiSettings(); };
     cancelSepBtn.setButtonText ("Cancelar");
     cancelSepBtn.onClick = [this] { separator.cancel(); analyzer.cancel(); };
     sepLabel.setFont (font (13.0f));
 
-    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &stemsBox, &qualityBox, &audioBtn, &aiBtn,
+    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &stemsBox, &qualityBox, &audioBtn, &aiBtn, &instrumentsBtn,
                      &sepBar, &sepLabel, &cancelSepBtn })
         addAndMakeVisible (c);
     sepBar.setVisible (false);
@@ -327,6 +343,7 @@ MainComponent::MainComponent()
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
     mixer.onLevelEdited = [this] (int stem, double db) { stemLevelEdited (stem, db); };
     mixer.onTriggerClicked = [this] (int track) { triggerMenu (track); };
+    mixer.onInstrumentClicked = [this] (int id) { if (rack != nullptr) rack->openEditor (id); };
     mixer.onClickChanged = [this] (bool on, float db, int pair)
     {
         if (auto* s = currentInfo())
@@ -418,6 +435,11 @@ MainComponent::~MainComponent()
 {
     if (recording.active)
         stopRecording (true);   // sin hilos de grabación vivos al salir
+    if (rack != nullptr)
+    {
+        rack->closeEditors();
+        rack->save();
+    }
     ++loadGeneration;
     abortJobs = true;
     levelPool.removeAllJobs (true, 10000);
@@ -428,6 +450,8 @@ MainComponent::~MainComponent()
     analyzer.cancel();
     deviceManager.removeAudioCallback (&engine);
     deviceManager.removeChangeListener (this);
+    mixer.setInstruments (nullptr);
+    rack.reset();   // ya sin callback de audio: los plugins mueren aquí
     if (auto xml = deviceManager.createStateXml())
         props.getUserSettings()->setValue ("audioDevice", xml.get());
     props.saveIfNeeded();
@@ -471,6 +495,8 @@ void MainComponent::resized()
     aiBtn.setBounds (top.removeFromRight (100));
     top.removeFromRight (8);
     audioBtn.setBounds (top.removeFromRight (90));
+    top.removeFromRight (8);
+    instrumentsBtn.setBounds (top.removeFromRight (110));
 
     r.removeFromTop (6);
     auto sepRow = r.removeFromTop (22);
@@ -2168,10 +2194,13 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
             continue;
         const auto& st = info.stems[(size_t) t->stemIndex];
         const auto& tg = st.trigger;
-        if (! tg.enabled || ! tg.sound.startsWith ("banco:"))
+        const bool isBank = tg.sound.startsWith ("banco:");
+        const bool isInstrument = tg.sound.startsWith ("vst:");
+        if (! tg.enabled || (! isBank && ! isInstrument))
             continue;
-        const auto bankName = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
+        const auto bankName = isBank ? tg.sound.fromFirstOccurrenceOf ("banco:", false, false) : juce::String();
         std::shared_ptr<SampleBankData> bank;
+        if (isBank)
         {
             const auto key = bankName + "@" + juce::String (sr);
             const juce::ScopedLock sl (cache.lock);
@@ -2179,7 +2208,7 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
             if (it != cache.banks.end())
                 bank = it->second;
         }
-        if (bank == nullptr)
+        if (isBank && bank == nullptr)
         {
             bank = triggers::loadBank (banksFolder.getChildFile (juce::File::createLegalFileName (bankName)), sr, formats);
             if (bank != nullptr)
@@ -2193,20 +2222,23 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
         lane->stemIndex = t->stemIndex;
         lane->events = triggers::detect (t->buffer, sr, tg.thresholdDb, tg.sensitivity, tg.minMs);
         lane->bank = bank;
+        lane->instrumentId = isInstrument ? tg.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue() : -1;
+        lane->note = tg.note;
         lane->control.name = lane->name;
         lane->control.stemIndex = -1;
         lane->control.gain = tg.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (tg.gainDb);
         lane->control.smoothedGain = lane->control.gain.load();
         lane->control.muted = tg.muted;
         lane->control.outputPair = tg.outputPair;
-        // La pista deja de sonar solo si su trigger tiene un sonido que dar (si no, se oiría nada sin aviso)
-        t->replaced = ! tg.keepAudio && bank != nullptr;
+        // La pista deja de sonar solo si su trigger tiene un sonido que dar (si no, se oiría nada sin aviso);
+        // con un instrumento se confirma en refreshReplaced (el rack vive en la UI)
+        t->replaced = ! tg.keepAudio && (bank != nullptr || isInstrument);
         set->lanes.push_back (std::move (lane));
     }
     return set;
 }
 
-juce::String MainComponent::triggerLabelFor (const TriggerSettings& tg, bool hasSound, int& mode)
+juce::String MainComponent::triggerLabelFor (const TriggerSettings& tg, bool hasSound, const juce::String& instrumentName, int& mode)
 {
     if (! tg.enabled)
     {
@@ -2216,8 +2248,8 @@ juce::String MainComponent::triggerLabelFor (const TriggerSettings& tg, bool has
     juce::String sound;
     if (tg.sound.startsWith ("banco:"))
         sound = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
-    else if (tg.sound.startsWith ("vst:"))
-        sound = "VST " + juce::MidiMessage::getMidiNoteName (tg.note, true, true, 3);
+    else if (tg.sound.startsWith ("vst:") && instrumentName.isNotEmpty())
+        sound = instrumentName + " " + juce::MidiMessage::getMidiNoteName (tg.note, true, true, 3);
     if (sound.isEmpty() || ! hasSound)
     {
         mode = 3;
@@ -2232,7 +2264,27 @@ void MainComponent::applySamplers (std::shared_ptr<SamplerSet> set)
     samplers = std::move (set);
     engine.setSamplers (samplers);
     mixer.setSamplers (samplers);
+    refreshReplaced();
     syncTriggerMarks();
+}
+
+void MainComponent::refreshReplaced()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr)
+        return;
+    for (auto& t : currentSong->tracks)
+    {
+        if (! juce::isPositiveAndBelow (t->stemIndex, (int) info->stems.size()))
+            continue;
+        const auto& tg = info->stems[(size_t) t->stemIndex].trigger;
+        bool has = false;
+        if (tg.enabled && samplers != nullptr)
+            for (auto& lane : samplers->lanes)
+                if (lane->stemIndex == t->stemIndex)
+                    has = lane->instrumentId >= 0 ? (rack != nullptr && rack->has (lane->instrumentId)) : lane->bank != nullptr;
+        t->replaced = tg.enabled && ! tg.keepAudio && has;
+    }
 }
 
 void MainComponent::syncTriggerMarks()
@@ -2249,11 +2301,18 @@ void MainComponent::syncTriggerMarks()
         states.push_back (has && info->stems[(size_t) t->stemIndex].trigger.enabled);
         std::vector<TimelineView::TriggerMark> m;
         bool hasSound = false;
+        juce::String instrumentName;
         if (samplers != nullptr)
             for (auto& lane : samplers->lanes)
                 if (lane->stemIndex == t->stemIndex)
                 {
-                    hasSound = lane->bank != nullptr;
+                    if (lane->instrumentId >= 0)
+                    {
+                        instrumentName = rack != nullptr ? rack->nameOf (lane->instrumentId) : juce::String();
+                        hasSound = rack != nullptr && rack->has (lane->instrumentId);
+                    }
+                    else
+                        hasSound = lane->bank != nullptr;
                     for (auto& e : lane->events)
                         m.push_back ({ (double) e.sample / sr, e.velocity });
                 }
@@ -2261,7 +2320,7 @@ void MainComponent::syncTriggerMarks()
         if (has)
         {
             int mode = 0;
-            const auto text = triggerLabelFor (info->stems[(size_t) t->stemIndex].trigger, hasSound, mode);
+            const auto text = triggerLabelFor (info->stems[(size_t) t->stemIndex].trigger, hasSound, instrumentName, mode);
             mixer.setTriggerLabel ((int) states.size() - 1, text, mode);
         }
     }
@@ -2330,13 +2389,24 @@ void MainComponent::triggerMenu (int track)
     sound.addItem (2, tr ("Importar muestras (wav) como banco nuevo..."));
     sound.addItem (5, tr ("Grabar golpes como banco nuevo..."));
     sound.addSeparator();
-    sound.addSectionHeader (tr ("Instrumentos VST / AU"));
-    sound.addItem (299, tr ("(sin instrumentos cargados)"), false);
+    sound.addSectionHeader (tr ("Instrumentos ") + InstrumentRack::formatsAvailable());
+    std::vector<int> instrumentIds;
+    if (rack != nullptr)
+        for (auto& slot : rack->getSlots())
+        {
+            instrumentIds.push_back (slot.id);
+            sound.addItem (300 + (int) instrumentIds.size() - 1, slot.description.name + (slot.lane == nullptr ? tr (" (no cargado)") : juce::String()),
+                           true, tg.sound == "vst:" + juce::String (slot.id));
+        }
+    if (instrumentIds.empty())
+        sound.addItem (299, tr ("(sin instrumentos cargados)"), false);
+    sound.addItem (298, tr ("Añadir o buscar instrumentos..."));
     juce::String soundName = tr ("sin sonido");
     if (tg.sound.startsWith ("banco:"))
         soundName = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
     else if (tg.sound.startsWith ("vst:"))
-        soundName = "VST";
+        soundName = rack != nullptr && rack->nameOf (tg.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue()).isNotEmpty()
+                        ? rack->nameOf (tg.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue()) : tr ("instrumento ausente");
     m.addSubMenu (tr ("Sonido: ") + soundName, sound);
     juce::PopupMenu notes;
     for (size_t i = 0; i < std::size (drumNotes); ++i)
@@ -2351,13 +2421,27 @@ void MainComponent::triggerMenu (int track)
 
     const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
-                     [this, track, stem, banks] (int result)
+                     [this, track, stem, banks, instrumentIds] (int result)
     {
         auto* inf = currentInfo();
         if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
             return;
         auto& t = inf->stems[(size_t) stem].trigger;
         bool chooseSound = false;
+        if (result == 298)
+        {
+            instrumentsMenu();
+            return;
+        }
+        if (result >= 300 && result < 300 + (int) instrumentIds.size())
+        {
+            t.sound = "vst:" + juce::String (instrumentIds[(size_t) (result - 300)]);
+            t.enabled = true;
+            library.saveSong (*inf);
+            syncTriggerMarks();
+            requestRender();
+            return;
+        }
         if (result == 10)
             t.enabled = false;
         else if (result == 11 || result == 12)
@@ -2799,6 +2883,150 @@ void MainComponent::recordingFinished (bool ok, const juce::String& message, con
     }
 }
 
+//==============================================================================
+// Instrumentos VST3/AU (punto 3)
+
+void MainComponent::instrumentsMenu()
+{
+    if (rack == nullptr)
+        return;
+    juce::PopupMenu m;
+    const auto& slots = rack->getSlots();
+    std::vector<int> ids;
+    m.addSectionHeader (tr ("Instrumentos cargados (") + InstrumentRack::formatsAvailable() + ")");
+    if (slots.empty())
+        m.addItem (99, tr ("(ninguno)"), false);
+    for (size_t i = 0; i < slots.size(); ++i)
+    {
+        const auto& s = slots[i];
+        ids.push_back (s.id);
+        juce::PopupMenu sub;
+        sub.addItem (1000 + (int) i * 10 + 1, tr ("Abrir la ventana del instrumento"), s.lane != nullptr);
+        sub.addItem (1000 + (int) i * 10 + 2, tr ("Quitar del rack"));
+        juce::String label = s.description.name + " (" + s.description.pluginFormatName + ")";
+        if (s.loading)
+            label += tr ("  -  cargando...");
+        else if (s.error.isNotEmpty())
+            label += tr ("  -  error: ") + s.error;
+        m.addSubMenu (label, sub);
+    }
+    m.addSeparator();
+    juce::PopupMenu addMenu;
+    const auto knownList = rack->knownInstruments();
+    for (int k = 0; k < knownList.size(); ++k)
+        addMenu.addItem (2000 + k, knownList[k].name + " (" + knownList[k].pluginFormatName + ")");
+    if (knownList.isEmpty())
+        addMenu.addItem (98, tr ("(no hay instrumentos conocidos: busca primero)"), false);
+    m.addSubMenu (tr ("Añadir instrumento"), addMenu);
+    if (rack->isScanning())
+        m.addItem (4, tr ("Cancelar la búsqueda"));
+    else
+    {
+        m.addItem (2, tr ("Buscar instrumentos instalados (") + InstrumentRack::formatsAvailable() + ")...");
+        m.addItem (3, tr ("Buscar en una carpeta..."));
+    }
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this, safe, ids, knownList] (int result)
+    {
+        if (safe == nullptr || rack == nullptr || result == 0)
+            return;
+        if (result == 2)
+            scanInstruments ({});
+        else if (result == 3)
+            pickFiles (tr ("Carpeta con plugins"), juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                       juce::File::getSpecialLocation (juce::File::userHomeDirectory), "*", [this, safe] (const juce::Array<juce::File>& files)
+            {
+                if (safe != nullptr && ! files.isEmpty())
+                    scanInstruments (juce::FileSearchPath (files[0].getFullPathName()));
+            });
+        else if (result == 4)
+            rack->cancelScan();
+        else if (result >= 2000 && result < 2000 + knownList.size())
+        {
+            sepLabel.setText (tr ("Cargando ") + knownList[result - 2000].name + "...", juce::dontSendNotification);
+            rack->add (knownList[result - 2000], [safe] (int, const juce::String& error)
+            {
+                if (safe != nullptr)
+                    safe->sepLabel.setText (error.isNotEmpty() ? tr ("No se pudo cargar el instrumento: ") + error : tr ("Instrumento cargado"),
+                                            juce::dontSendNotification);
+            });
+        }
+        else if (result >= 1000)
+        {
+            const int idx = (result - 1000) / 10, action = (result - 1000) % 10;
+            if (idx < (int) ids.size())
+            {
+                if (action == 1)
+                    rack->openEditor (ids[(size_t) idx]);
+                else if (action == 2)
+                {
+                    rack->remove (ids[(size_t) idx]);
+                    sepLabel.setText (tr ("Instrumento quitado del rack"), juce::dontSendNotification);
+                }
+            }
+        }
+    });
+}
+
+void MainComponent::scanInstruments (const juce::FileSearchPath& extraFolders)
+{
+    if (rack == nullptr)
+        return;
+    sepLabel.setText (tr ("Buscando instrumentos..."), juce::dontSendNotification);
+    juce::Component::SafePointer<MainComponent> safe (this);
+    rack->scan (extraFolders, [safe] (float p, const juce::String& name)
+    {
+        if (safe != nullptr)
+            safe->sepLabel.setText (tr ("Buscando instrumentos... ") + juce::String ((int) (p * 100.0f)) + "%  " + name, juce::dontSendNotification);
+    }, [safe] (int found)
+    {
+        if (safe == nullptr || safe->rack == nullptr)
+            return;
+        safe->rack->save();
+        safe->sepLabel.setText (tr ("Búsqueda terminada: ") + juce::String (found) + tr (" plugins nuevos; ")
+                                + juce::String (safe->rack->knownInstruments().size()) + tr (" instrumentos conocidos"), juce::dontSendNotification);
+        safe->instrumentsMenu();
+    });
+}
+
+void MainComponent::setInstrumentForCapture (const juce::String& path)
+{
+    if (rack == nullptr || ! juce::File::isAbsolutePath (path))
+        return;
+    const auto descriptions = rack->describeFile (juce::File (path));
+    if (descriptions.isEmpty())
+    {
+        sepLabel.setText (tr ("No se encontró un plugin en ") + path, juce::dontSendNotification);
+        return;
+    }
+    juce::Component::SafePointer<MainComponent> safe (this);
+    rack->add (descriptions[0], [safe] (int id, const juce::String& error)
+    {
+        if (safe == nullptr)
+            return;
+        if (error.isNotEmpty())
+        {
+            safe->sepLabel.setText (tr ("No se pudo cargar el instrumento: ") + error, juce::dontSendNotification);
+            return;
+        }
+        auto* info = safe->currentInfo();
+        if (info == nullptr)
+            return;
+        for (auto& st : info->stems)
+            if (Analyzer::isDrumsTrack (st.name, st.fileName) || st.name.containsIgnoreCase ("bombo") || st.fileName.containsIgnoreCase ("kick"))
+            {
+                st.trigger.enabled = true;
+                st.trigger.keepAudio = false;
+                st.trigger.sound = "vst:" + juce::String (id);
+                break;
+            }
+        safe->library.saveSong (*info);
+        safe->requestRender();
+    });
+}
+
 void MainComponent::clipMenu (double playbackSeconds, int lane)
 {
     auto* info = currentInfo();
@@ -3193,8 +3421,13 @@ void MainComponent::timerCallback()
         if (! juce::KeyPress::isKeyCurrentlyDown (heldKeys[i]))
             heldKeys.remove (i);
 
-    if (engine.needsReload.exchange (false) && currentIndex >= 0)
-        loadSongAt (currentIndex);   // guarda la mezcla y recarga a la nueva frecuencia
+    if (engine.needsReload.exchange (false))
+    {
+        if (rack != nullptr)
+            rack->prepareAll (engine.getSampleRate());   // los plugins se preparan a la frecuencia nueva
+        if (currentIndex >= 0)
+            loadSongAt (currentIndex);   // guarda la mezcla y recarga a la nueva frecuencia
+    }
 
     if (recording.active)
     {

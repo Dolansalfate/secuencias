@@ -43,6 +43,19 @@ El mismo código sigue compilando en macOS.
   para el trigger**: en el menú del trigger de la pista, "Sonido" > "Grabar golpes como banco
   nuevo...": toca golpes sueltos de suave a fuerte con silencio entre ellos y detén; cada golpe
   queda como una muestra del banco y el trigger de esa pista pasa a usarlo.
+- **Instrumentos VST3 / AU (por ejemplo Addictive Drums)**: botón "Instrumentos" arriba. La primera
+  vez, "Buscar instrumentos instalados" (recorre las carpetas habituales de VST3, y de AU en Mac;
+  si tienes plugins en otra carpeta, "Buscar en una carpeta..."). Después, "Añadir instrumento" y
+  eliges uno: aparece como un canal lila en el mezclador, con su fader, salida y medidor; un clic
+  en su nombre abre la ventana del plugin para elegir el kit y ajustarlo. Todo eso se recuerda
+  entre sesiones. Para que una pista lo dispare: en la casilla del trigger de esa pista (o el "T"),
+  "Sonido" > el instrumento, y en "Nota MIDI" la pieza que quieres (36 bombo, 38 caja, 42 hi-hat
+  cerrado...; Addictive Drums usa el mapa General MIDI). Cada golpe detectado llega al plugin como
+  una nota con la fuerza del golpe, adelantada la latencia del plugin, así suena exactamente en el
+  golpe. Con "Es trigger" la pista original se silencia; con "Trigger y audio" suenan las dos. Un
+  mismo instrumento puede recibir varias pistas (bombo a la nota 36, caja a la 38...). Los
+  instrumentos son globales: sirven para todas las canciones del setlist. Solo se cargan
+  instrumentos (no efectos) y se usa su salida estéreo principal.
 - **Notas de texto** ("+ Nota" o tecla N, o clic derecho en la fila de notas de la regla):
   un comentario anclado a un punto de la canción, por ejemplo "corte de batería, entra solo
   el bajo" en el compás 111, con los segundos que debe quedarse visible. En la guía de

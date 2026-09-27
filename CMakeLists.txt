@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Secuencias VERSION 0.4.1 LANGUAGES C CXX)
+project(Secuencias VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,7 +50,12 @@ set(SECUENCIAS_CORE_SOURCES
 set(SECUENCIAS_COMMON_DEFINITIONS
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_USE_MP3AUDIOFORMAT=1)
+    JUCE_USE_MP3AUDIOFORMAT=1
+    JUCE_PLUGINHOST_VST3=1)   # instrumentos VST3 (rack); en macOS también AU
+
+if(APPLE)
+    list(APPEND SECUENCIAS_COMMON_DEFINITIONS JUCE_PLUGINHOST_AU=1)
+endif()
 
 if(UNIX AND NOT APPLE)
     # Linux: ALSA + JACK (con PipeWire se usa a través de pw-jack)
@@ -79,6 +84,7 @@ target_sources(Secuencias PRIVATE
     Source/TimelineView.cpp
     Source/FilePicker.cpp
     Source/StageView.cpp
+    Source/Instruments.cpp
     Source/Separator.cpp)
 
 target_compile_definitions(Secuencias PRIVATE
@@ -89,6 +95,7 @@ target_compile_definitions(Secuencias PRIVATE
 target_link_libraries(Secuencias
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_audio_processors
         juce::juce_audio_devices
         juce::juce_audio_formats
         signalsmith-stretch
@@ -96,6 +103,10 @@ target_link_libraries(Secuencias
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+if(APPLE)
+    target_link_libraries(Secuencias PRIVATE "-framework CoreAudioKit")   # vistas de los Audio Units
+endif()
 
 # ---------------------------------------------------------------- Tests
 if(SECUENCIAS_BUILD_TESTS)
@@ -107,12 +118,33 @@ if(SECUENCIAS_BUILD_TESTS)
     target_compile_definitions(SecuenciasTests PRIVATE ${SECUENCIAS_COMMON_DEFINITIONS})
     target_link_libraries(SecuenciasTests
         PRIVATE
+            juce::juce_audio_processors
             juce::juce_audio_devices
             juce::juce_audio_formats
             signalsmith-stretch
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
+
+    # Sintetizador VST3 mínimo para probar el host de instrumentos (no se distribuye)
+    juce_add_plugin(SecuenciasTestSynth
+        PRODUCT_NAME "SecuenciasTestSynth"
+        COMPANY_NAME "Secuencias"
+        PLUGIN_MANUFACTURER_CODE Secu
+        PLUGIN_CODE Tsyn
+        FORMATS VST3
+        IS_SYNTH TRUE
+        NEEDS_MIDI_INPUT TRUE
+        COPY_PLUGIN_AFTER_BUILD FALSE
+        VST3_CATEGORIES Instrument)
+    target_sources(SecuenciasTestSynth PRIVATE Tests/TestSynth.cpp)
+    target_compile_definitions(SecuenciasTestSynth PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+    target_link_libraries(SecuenciasTestSynth
+        PRIVATE juce::juce_audio_utils
+        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    add_dependencies(SecuenciasTests SecuenciasTestSynth_VST3)
+    target_compile_definitions(SecuenciasTests PRIVATE
+        SECUENCIAS_TEST_SYNTH="$<GENEX_EVAL:$<TARGET_PROPERTY:SecuenciasTestSynth_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>")   # la ruta del bundle .vst3 (la propiedad trae genexes anidados)
 
     add_test(NAME SecuenciasTests COMMAND SecuenciasTests)
 endif()
