@@ -264,7 +264,7 @@ void Analyzer::run()
 
     // 2) Script
     const auto script = workDir.getChildFile ("analizar.py");
-    script.replaceWithText (analyzerScript);
+    script.replaceWithText (juce::String::fromUTF8 (analyzerScript));   // el script tiene comentarios con tildes
     const auto resultFile = workDir.getChildFile ("resultado.json");
     setStatus (State::running, tr ("Analizando tempo, compases y acordes... (la primera vez tarda más)"));
 

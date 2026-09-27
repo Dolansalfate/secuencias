@@ -47,6 +47,18 @@ El mismo código sigue compilando en macOS.
   para el trigger**: en el menú del trigger de la pista, "Sonido" > "Grabar golpes como banco
   nuevo...": toca golpes sueltos de suave a fuerte con silencio entre ellos y detén; cada golpe
   queda como una muestra del banco y el trigger de esa pista pasa a usarlo.
+- **Armar mix (antes de separar)**: botón "Armar mix" > "Mix nuevo...". Con "+ Canción" cargas las
+  canciones originales completas; la app las analiza sola (tiempos y compases, con la IA de
+  análisis). Eliges una canción en la lista, arrastras sobre su onda para seleccionar un tramo
+  (se ajusta a los compases y al golpe) y "Agregar al mix"; repites con otras canciones. Abajo ves
+  los tramos en orden: cada uno se ajusta al tempo del mix de modo que las uniones caen exactas en
+  el pulso (puedes elegir "Cada tramo a su tempo" o darle a un tramo su propio tempo). Por tramo
+  puedes moverlo, quitarlo, alargarlo o acortarlo por compases, cambiarle el tono, la ganancia y el
+  fundido con el anterior (corte o 1-2 tiempos o compases). "Escuchar el mix" o "Escuchar la unión"
+  (con "Click" para comprobar el pulso). Ctrl+Z deshace. Al final, "Crear canción...": separarla con
+  IA (con las opciones de pistas y calidad de arriba) o agregarla sin separar; la canción aparece en
+  el setlist con sus tiempos, compases, acordes, secciones de tempo y un marcador en cada tramo, sin
+  tener que analizarla de nuevo. El mix queda guardado para seguir otro día ("Armar mix" > su nombre).
 - **Instrumentos VST3 / AU (por ejemplo Addictive Drums)**: botón "Instrumentos" arriba. La primera
   vez, "Buscar instrumentos instalados" (recorre las carpetas habituales de VST3, y de AU en Mac;
   si tienes plugins en otra carpeta, "Buscar en una carpeta..."). Después, "Añadir instrumento" y

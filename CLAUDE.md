@@ -52,6 +52,24 @@ modelo que usa Moises).
   diálogo de "Separar canción (IA)" ofrece "Solo la batería en partes" (`startDrumParts`,
   `Library::replaceStem`: la batería pasa a `original/` y entran las partes). Ambas requieren
   audio-separator y ffmpeg ("Ajustes IA" > "Instalar también Roformer y DrumSep").
+- **Armar mix antes de separar** (botón "Armar mix", `MixProject`, `MixEditor`): una sección que
+  reemplaza la vista de la canción mientras está abierta. Se cargan las canciones originales
+  completas ("+ Canción"; se copian a `_mixes/<mix>/fuentes`), madmom las analiza solas una tras
+  otra (tiempos, primeros tiempos de compás, acordes y tonalidad; con un `Analyzer` propio,
+  `mixAnalyzer`), y en la vista de la fuente se seleccionan tramos arrastrando sobre la forma de
+  onda, ajustados a compases o tiempos y a la transiente (`mix::refineToOnset`), que se agregan al
+  mix en orden. Cada tramo se estira con razón constante para durar exactamente sus tiempos al
+  tempo del mix (el del primer tramo o el que se escriba; o "Cada tramo a su tempo"), así cada
+  unión cae justo en la rejilla, y dentro del tramo se conserva el pulso de la grabación. Por
+  tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
+  fundido cruzado (corte de 10 ms, 1 o 2 tiempos, 1 o 2 compases) y nombre. "Escuchar el mix" y
+  "Escuchar la unión" (4 s antes) renderizan a `mezcla.wav` y lo reproducen con el click opcional
+  siguiendo los tiempos del mix; también se escucha la fuente con su click para comprobar el
+  análisis (con menú para tiempos a la mitad o al doble, compases de 3 o 4 y "este tiempo es el
+  1"). Ctrl+Z deshace (hasta 40 pasos). "Crear canción..." separa el mix con IA (con las opciones
+  de la barra de arriba) o lo agrega sin separar; la canción nueva ya trae los tiempos, compases,
+  acordes y tonalidad (transpuestos si hace falta), secciones de tempo y un marcador por tramo
+  (`mix::describeSong`), así el click, la guía de escenario y el nivelado funcionan sin analizar.
 - Importar stems: varios archivos o una carpeta (o arrastrar varios archivos a la ventana).
   Formatos: wav, aiff, flac, mp3, ogg (m4a solo en macOS: JUCE no decodifica AAC en Linux).
 - **Vista de arreglo** (`TimelineView`): regla con marcadores (clic = ir, arrastrar = mover,
@@ -321,6 +339,8 @@ Source/
   Triggers.h/.cpp      Golpes detectados (detect), bancos de muestras (loadBank, sliceHits, writeWav)
   Recorder.h/.cpp      Grabación: alinear la toma con la canción (writeAligned), banco desde golpes (saveBank)
   Instruments.h/.cpp   InstrumentRack: plugins VST3/AU (carga, estado, editor, búsqueda) y su entrega al motor
+  MixProject.h/.cpp    Armar mix: fuentes, tramos, mix.json, ubicación (layout), render y la canción que resulta
+  MixEditor.h/.cpp     Sección "Armar mix": lista de fuentes, vista de la fuente, línea del mix, panel del tramo
   Stretcher.h/.cpp     Render de tempo y tono con Signalsmith Stretch (FetchContent, MIT)
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
 Tests/TestSynth.cpp    VST3 mínimo que compilan los tests para probar el host de instrumentos
@@ -728,6 +748,56 @@ Pasos de `run()`:
   instrumentos..." (298). El destructor cierra editores, guarda y destruye el rack después de
   quitar el callback de audio.
 
+### 5.4i MixProject y MixEditor (armar mix antes de separar)
+- Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, sources: [{ name, file, length,
+  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats }] }`),
+  `fuentes/` (copias de las canciones originales) y `mezcla.wav` (último render, 44,1 kHz, 24 bits).
+  `Library::isReservedFolder` hace que `load()` no tome `_mixes` ni `_bancos` como canciones; el
+  análisis se guarda con `Library::analysisToVar` / `analysisFromVar` (el mismo formato de song.json).
+- Tiempo: un tramo va de un tiempo detectado (`start`) al tiempo siguiente al último incluido
+  (`end`), en segundos de su fuente. `mix::segmentBpm` = 60·(l−f)/(b_l−b_f) con los tiempos dentro
+  del tramo; `ratio = srcBpm / playBpm` (constante por tramo); duración en el mix
+  (end−start)·ratio, que con start y end en tiempos da exactamente sus tiempos al tempo del mix.
+  `mix::layout` encadena los tramos (`outStart` = `outEnd` del anterior) y calcula los fundidos:
+  el que entra lee su audio previo y sube con un seno en [J−F, J]; el que sale baja con un coseno
+  en el mismo intervalo y termina en J (F = fadeBeats·60/playBpm, o 10 ms; acotado por el audio
+  previo disponible). Sin análisis, ratio = 1.
+- `mix::render` lee de cada fuente solo su tramo (`readRange`, con remuestreo sinc a 44,1 kHz),
+  lo estira y transpone con `stretcher::renderBuffer` y un `TimeMap` de una sección (o lo copia si
+  no hace falta), aplica ganancia y fundidos y lo suma. `mix::describeSong` arma la canción: tiempos
+  y acordes llevados al mix con `toMix` (acordes y tonalidad transpuestos con
+  `music::transposeChord` / `transposeKey`), una sección de tempo por tramo (unidas si coinciden),
+  un marcador por tramo, `bpm` y `clickOffset`.
+- `MixEditor` (no toca el motor ni archivos): cabecera, fuentes, vista de la fuente (onda con
+  compases, selección ajustada con `snapToBeat` + `refineCut`), línea del mix y panel del tramo;
+  edita el proyecto en el hilo de mensajes y avisa con `onChanged`; pide lo demás con callbacks.
+- En `MainComponent`: `openMix` descarga la canción (`unloadSong`; se recuerda por carpeta en
+  `mixReturnFolder`, que se conserva al pasar de un mix a otro) y pone el editor encima del área
+  de la canción; no se abre mientras la canción se analiza o se nivela (el resultado se aplica a
+  la canción cargada). `closeMix` lo quita y vuelve a la canción. Las fuentes se copian en
+  segundo plano (`addMixSourceFiles`, también al arrastrar archivos sobre la ventana con el mix
+  abierto) y se analizan en cola (`queueMixAnalysis`: se leen a 44,1 kHz en `mixPool` y van a
+  `mixAnalyzer`; `mixAnalyzerFile` es la fuente para la que se arrancó, y solo sus estados finales
+  se aplican: un análisis cancelado de un mix cerrado se descarta con `reset` al pedir el
+  siguiente; el Timer aplica el resultado por nombre de archivo, también a los estados de
+  deshacer); las formas de onda se calculan en `mixPool` (`mix::computePeaks`, 200 por segundo,
+  abortable). `mixPool` es un hilo aparte de `loaderPool` para que la escucha no espere detrás.
+  `renderMix` renderiza en `loaderPool` si `mixRenderedVersion != mixVersion` (si algún pico pasa
+  de 1, baja todo el mix por igual antes de escribirlo, para no recortar en 24 bits) y guarda
+  `mixRenderedInfo` (describeSong del render); `playMix` / `playMixSource` cargan el render o la
+  fuente con `AudioEngine::loadSong` a la frecuencia del dispositivo y `setMixPreview` los pone en el
+  motor con fundido, con su `BeatGrid` y el click si está pedido; la fuente que suena se guarda
+  por archivo (`mixPreviewSourceFile`), y `mixPlayRequest` evita que una carga vieja arranque
+  después de un Stop. Si cambia la frecuencia del dispositivo, `dropMixPreview` descarta lo
+  cargado. `mixGeneration` (atómico) invalida los trabajos de un mix cerrado. `createSongFromMix` / `startMixSong`: separar copia
+  el render a un temporal (`pendingMixInput`), guarda `pendingMixSong` y llama a
+  `startSeparation (archivo, nombre)`; al terminar la separación, `applyMixSongInfo` pone los
+  metadatos en la canción importada; con el mix abierto la canción nueva no se selecciona (no se
+  cierra el mix bajo el usuario). Si el mix se editó mientras se preparaba, `startMixSong` vuelve
+  a renderizar antes de crear la canción. Sin separar: `importStemFiles ({ mezcla.wav })` y lo
+  mismo. Elegir una canción del setlist cierra el mix. `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
+  [--mixtramos] [--mixcancion=1|2]` (rutas sin espacios).
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -867,6 +937,11 @@ Pasos de `run()`:
   solo noteOn/noteOff (sin CC ni aftertouch). La búsqueda de plugins es en el mismo proceso:
   un plugin roto puede cerrar la app durante la búsqueda (a la siguiente queda vetado). Los
   plugins con latencia se compensan solo en los golpes del trigger.
+- Armar mix: cada tramo se estira con una razón constante (conserva el pulso de la grabación
+  dentro del tramo; una canción tocada sin click no queda cuantizada); la exactitud de las uniones
+  depende del análisis de madmom (los menús de la fuente corrigen tiempos a la mitad, al doble o
+  el 1 del compás). Al crear la canción, la copia del render para separar y la importación sin
+  separar se hacen en el hilo de mensajes (un instante con mixes de varios minutos).
 - Grabación: la alineación confía en las latencias que informa el dispositivo (con PipeWire
   o ALSA suelen ser correctas; si no, está la compensación extra en ms). Saltar con el cabezal
   durante una toma desalinea lo grabado después del salto (la toma se alinea por su inicio).
@@ -926,6 +1001,18 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.6.0 (armar mix antes de separar)**: `MixProject` (fuentes, tramos, `mix.json`, `layout`
+  con razón constante por tramo y uniones en la rejilla, fundidos seno/coseno, `render`,
+  `describeSong`, `readRange`, `refineToOnset`, `computePeaks`), `MixEditor` (sección con
+  fuentes, vista de la fuente, línea del mix y panel del tramo), integración en `MainComponent`
+  (botón "Armar mix", análisis en cola con `mixAnalyzer`, render y escucha con click, deshacer,
+  crear la canción separando o sin separar con sus tiempos, secciones y marcadores),
+  `Library::analysisToVar/FromVar` e `isReservedFolder`, `music::transposeChord/transposeKey`,
+  `startSeparation (archivo, nombre)`, `--captura --mix`. Revisión: estado del analizador del mix
+  por fuente (`mixAnalyzerFile`), `mixPool`, `mixReturnFolder`, `mixPlayRequest`, fuentes
+  arrastradas al mix, sin saturar el render, tiempos pegados a la unión (el "1" que queda justo
+  antes de un corte ajustado a la transiente) y deduplicación en uniones a medio tiempo.
+  Arreglado de paso: el analizador escribía su script de Python sin convertirlo desde UTF-8.
 - **v0.5.1**: el diálogo "Grabar" ofrece los dos destinos (pista nueva o banco de muestras);
   `SampleBankData::preRoll` y `trimHit` uniforme para que el ataque de cada muestra caiga
   exacto sobre el golpe detectado (el motor adelanta las voces el pre-roll).

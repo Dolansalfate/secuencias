@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Secuencias VERSION 0.5.1 LANGUAGES C CXX)
+project(Secuencias VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +45,7 @@ set(SECUENCIAS_CORE_SOURCES
     Source/Arrangement.cpp
     Source/Triggers.cpp
     Source/Recorder.cpp
+    Source/MixProject.cpp
     Source/Stretcher.cpp)
 
 set(SECUENCIAS_COMMON_DEFINITIONS
@@ -85,6 +86,7 @@ target_sources(Secuencias PRIVATE
     Source/FilePicker.cpp
     Source/StageView.cpp
     Source/Instruments.cpp
+    Source/MixEditor.cpp
     Source/Separator.cpp)
 
 target_compile_definitions(Secuencias PRIVATE

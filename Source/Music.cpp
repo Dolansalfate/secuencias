@@ -96,4 +96,38 @@ namespace music
         const juce::String probe = noteName (pc, false, false) + (minor ? " minor" : " major");
         return noteName (pc, keyPrefersFlats (probe), false) + (minor ? " minor" : " major");
     }
+
+    juce::String transposeChord (const juce::String& chord, int semitones)
+    {
+        const auto c = chord.trim();
+        if (semitones % 12 == 0 || c.isEmpty() || c == "N")
+            return chord;
+        auto shift = [semitones] (int pc) { return ((pc + semitones) % 12 + 12) % 12; };
+        const auto main = c.upToFirstOccurrenceOf ("/", false, false);
+        const auto bass = c.containsChar ('/') ? c.fromFirstOccurrenceOf ("/", false, false) : juce::String();
+        juce::String rest;
+        const int pc = pitchClass (main, &rest);
+        if (pc < 0)
+            return chord;
+        auto out = noteName (shift (pc), false, false) + rest;
+        if (bass.isNotEmpty())
+        {
+            juce::String bassRest;
+            const int bpc = pitchClass (bass, &bassRest);
+            out += "/" + (bpc < 0 ? bass : noteName (shift (bpc), false, false) + bassRest);
+        }
+        return out;
+    }
+
+    juce::String transposeKey (const juce::String& key, int semitones)
+    {
+        if (semitones % 12 == 0 || key.trim().isEmpty())
+            return key;
+        const int pc = pitchClass (key.trim());
+        if (pc < 0)
+            return key;
+        const auto canonical = canonicalKey (((pc + semitones) % 12 + 12) % 12, isMinorKey (key));
+        const auto spelled = spellKey (canonical, keyPrefersFlats (canonical));
+        return spelled.isNotEmpty() ? spelled : key;
+    }
 }

@@ -36,6 +36,15 @@ public:
                 captureTriggerBank = commandLine.fromFirstOccurrenceOf ("--trigger=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
             if (commandLine.contains ("--instrumento="))
                 captureInstrument = commandLine.fromFirstOccurrenceOf ("--instrumento=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
+            // Armar mix: --mix=<nombre> [--mixfuentes=/a.wav,/b.wav] [--mixtramos] [--mixcancion=1|2]
+            if (commandLine.contains ("--mix="))
+                captureMix = commandLine.fromFirstOccurrenceOf ("--mix=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
+            if (commandLine.contains ("--mixfuentes="))
+                captureMixSources.addTokens (commandLine.fromFirstOccurrenceOf ("--mixfuentes=", false, false)
+                                                        .upToFirstOccurrenceOf (" ", false, false).unquoted(), ",", "");
+            captureMixSegments = hasFlag ("--mixtramos");
+            if (commandLine.contains ("--mixcancion="))
+                captureMixCreate = commandLine.fromFirstOccurrenceOf ("--mixcancion=", false, false).getIntValue();
             if (commandLine.contains ("--posicion="))
                 capturePosition = commandLine.fromFirstOccurrenceOf ("--posicion=", false, false).getDoubleValue();
             if (commandLine.contains ("--escenario="))
@@ -83,6 +92,7 @@ public:
             if (captureDrumParts) mc->setDrumPartsForCapture (true);
             if (captureTriggerBank.isNotEmpty()) mc->setTriggerForCapture (captureTriggerBank);
             if (captureInstrument.isNotEmpty()) mc->setInstrumentForCapture (captureInstrument);
+            if (captureMix.isNotEmpty()) mc->openMixForCapture (captureMix, captureMixSources, captureMixSegments, captureMixCreate);
             if (captureSeparate) mc->separateCurrentSong();
             if (captureSeparateDrums) mc->separateDrumsOfCurrentSong();
             if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
@@ -94,7 +104,8 @@ public:
             if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
         }
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
-                                             && ! mc->isRendering() && ! mc->isSeparating() && ! mc->isLoadingInstruments());
+                                             && ! mc->isRendering() && ! mc->isSeparating() && ! mc->isLoadingInstruments()
+                                             && ! mc->isMixBusy());
         if ((ready && ++captureTicks >= 4) || captureTicks++ > 2400)   // tope: 10 min (los renders largos)
         {
             captureTimer.stopTimer();
@@ -170,7 +181,10 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     CaptureTimer captureTimer { *this };
     juce::File captureFile, captureStageFile;
-    juce::String captureTriggerBank, captureInstrument;
+    juce::String captureTriggerBank, captureInstrument, captureMix;
+    juce::StringArray captureMixSources;
+    bool captureMixSegments = false;
+    int captureMixCreate = 0;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
     bool captureDrumParts = false, captureSeparateDrums = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;

@@ -14,6 +14,8 @@
 #include "StageView.h"
 #include "Recorder.h"
 #include "Instruments.h"
+#include "MixProject.h"
+#include "MixEditor.h"
 #include <map>
 
 class MarkerButton;
@@ -56,6 +58,11 @@ public:
     void setTriggerForCapture (const juce::String& bank);     // activa el trigger de la batería con ese banco (herramienta de captura)
     void setInstrumentForCapture (const juce::String& path);  // carga ese plugin en el rack y lo pone como trigger de la batería (captura)
     bool isLoadingInstruments() const { return rack != nullptr && rack->isLoading(); }
+    // Herramienta de captura: abre (o crea) el mix `name` en _mixes, le agrega esas fuentes si no las
+    // tiene, y opcionalmente arma tramos de prueba (8 compases de cada fuente desde su 3.er compás) y
+    // crea la canción (createMode 1 = separar con IA, 2 = sin separar)
+    void openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode);
+    bool isMixBusy() const;   // la captura espera a que termine lo que pidió del mix
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
@@ -195,6 +202,42 @@ private:
     void recordingFinished (bool ok, const juce::String& message, const juce::String& fileName, const juce::String& name,
                             bool toBank, int bankTrack, const juce::String& bankName, const juce::File& songFolder);
 
+    // Armar mix (antes de separar): sección que reemplaza la vista de la canción mientras está abierta
+    void mixMenu();                                   // botón "Armar mix": nuevo, abrir, borrar, cerrar
+    void openMix (const juce::File& folder);
+    void closeMix (bool reloadSong);                  // reloadSong: vuelve a cargar la canción que estaba
+    void mixEdited();                                 // el editor cambió el proyecto: guardar, deshacer, render viejo
+    void undoMixEdit();
+    void addMixSources();
+    void addMixSourceFiles (const juce::Array<juce::File>&);   // copia en segundo plano y agrega (también al arrastrar)
+    void removeMixSource (int source);
+    int mixSourceIndex (const juce::String& fileName) const;
+    void queueMixAnalysis (const juce::String& fileName);
+    void startNextMixAnalysis();
+    void mixSourceLoadedForAnalysis (std::shared_ptr<LoadedSong>, const juce::String& fileName);
+    void loadMixPeaks (const juce::String& fileName);
+    void playMixSource (int source, double from);
+    void playMix (double from);
+    void setMixPreview (std::shared_ptr<LoadedSong>, int kind, const juce::String& sourceFile, const Analysis& grid, double from, int request);
+    void dropMixPreview();                            // descarta lo que había para escuchar (p. ej. cambió la frecuencia)
+    void applyMixPreviewGrid (const Analysis&);
+    void renderMix (std::function<void (bool ok)> then);   // renderiza si el render quedó viejo
+    void stopMixPreview();
+    void createSongFromMix();
+    void startMixSong (bool separate, const juce::String& name);
+    void applyMixSongInfo (int songIndex, const SongInfo& meta);
+    void clearPendingMixSong();
+    void updateMixTimer();
+    void mixCaptureStep();
+    struct MixSnapshot
+    {
+        double bpm = 0.0;
+        bool keepTempos = false;
+        std::vector<MixSegment> segments;
+        std::vector<Analysis> analyses;   // una por fuente (el editor puede editar los tiempos)
+    };
+    MixSnapshot mixSnapshot() const;
+
     // Instrumentos VST3/AU (punto 3): rack global; menú del botón "Instrumentos" y búsqueda de plugins
     void instrumentsMenu();
     void scanInstruments (const juce::FileSearchPath& extraFolders);
@@ -249,6 +292,7 @@ private:
     void chooseStems();
     void chooseSongToSeparate();
     // Selector de archivos: nativo en macOS; en Linux y Windows, un panel dentro de la ventana (FilePicker)
+    bool startSeparation (const juce::File&, const juce::String& songName);   // false si no pudo empezar (avisa)
     void pickFiles (const juce::String& title, int browserFlags, const juce::File& startDir, const juce::String& patterns,
                     std::function<void (const juce::Array<juce::File>&)> onDone);
     void importStems (const juce::Array<juce::File>&);
@@ -279,6 +323,35 @@ private:
     BankCache bankCache;
     Recording recording;
     std::unique_ptr<InstrumentRack> rack;      // se crea tras abrir el dispositivo (necesita la frecuencia)
+
+    // Armar mix
+    std::unique_ptr<MixProject> mixProject;
+    std::unique_ptr<MixEditor> mixEditor;
+    Analyzer mixAnalyzer;                          // tiempos y compases de las fuentes (aparte del de la canción)
+    std::vector<juce::String> mixAnalysisQueue;    // archivos de fuentes por analizar
+    juce::String mixAnalyzingFile;                 // la que se está leyendo o analizando
+    juce::String mixAnalyzerFile;                  // para la que se arrancó mixAnalyzer (vacío mientras solo se lee): sus estados finales son de ella
+    std::atomic<int> mixGeneration { 0 };          // cambia al abrir o cerrar un mix: invalida los trabajos viejos
+    int mixVersion = 0, mixRenderedVersion = -1;   // ediciones del proyecto y versión del último render
+    bool mixRendering = false;
+    int mixCopyJobs = 0;                           // copias de fuentes en curso (la captura las espera)
+    SongInfo mixRenderedInfo;                      // describeSong del último render (tiempos para el click)
+    std::shared_ptr<LoadedSong> mixPreviewSong;    // lo que suena en el motor mientras el mix está abierto
+    int mixPreviewKind = 0, mixPreviewVersion = -1;   // 0 nada, 1 una fuente, 2 el mix
+    juce::String mixPreviewSourceFile;             // la fuente que suena (por archivo: los índices cambian al quitar)
+    int mixPlayRequest = 0;                        // cada pedido de escucha y cada Stop lo cambian: una carga vieja no arranca sola
+    bool mixClick = false;
+    juce::File mixReturnFolder;                    // canción que estaba cargada al abrir el mix (por carpeta: el setlist puede cambiar)
+    std::vector<MixSnapshot> mixUndo;
+    MixSnapshot mixLastSnapshot;
+    std::unique_ptr<SongInfo> pendingMixSong;      // tiempos, secciones y marcadores para la canción que sale de la separación
+    juce::String pendingMixSongName;
+    juce::File pendingMixInput;                    // copia temporal del render que se está separando
+    struct MixCapture
+    {
+        bool active = false, autoSegments = false, segmentsDone = false, createStarted = false;
+        int createMode = 0;
+    } mixCapture;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)
@@ -297,7 +370,7 @@ private:
     juce::Array<int> heldKeys;           // teclas pulsadas, para ignorar la autorrepetición
 
     // --- UI ---
-    juce::TextButton importBtn, separateBtn, audioBtn, aiBtn, instrumentsBtn, cancelSepBtn;
+    juce::TextButton importBtn, separateBtn, mixBtn, audioBtn, aiBtn, instrumentsBtn, cancelSepBtn;
     juce::ComboBox stemsBox, qualityBox;
     juce::ToggleButton drumPartsBtn;           // "Batería en partes" al separar
     juce::ProgressBar sepBar { sepProgress };
@@ -342,6 +415,7 @@ private:
     std::atomic<bool> abortJobs { false };
     juce::ThreadPool loaderPool { 1 };   // último: se destruye primero
     juce::ThreadPool levelPool { 1 };    // mediciones de sonoridad (no bloquean la carga de canciones)
+    juce::ThreadPool mixPool { 1 };      // mix: copias de fuentes, formas de onda y lecturas para analizar (no demoran la escucha)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

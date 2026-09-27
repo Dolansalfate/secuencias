@@ -30,4 +30,13 @@ namespace music
 
     // true si la tonalidad es menor ("menor" o "minor")
     bool isMinorKey (const juce::String& key);
+
+    // Acorde transpuesto `semitones` (con su bajo si es "C/E"): "A#m7" +1 -> "Bm7". Se escribe con
+    // sostenidos, como madmom (la escritura final la decide spellChord al mostrar). "N" y lo que no
+    // se reconoce quedan igual.
+    juce::String transposeChord (const juce::String& chord, int semitones);
+
+    // Tonalidad transpuesta ("La menor" +2 -> "Si menor", "Mib mayor" -1 -> "Re mayor"), en solfeo con
+    // la armadura habitual; igual si no se reconoce
+    juce::String transposeKey (const juce::String& key, int semitones);
 }

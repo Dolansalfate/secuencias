@@ -12,6 +12,7 @@
 #include "Triggers.h"
 #include "Recorder.h"
 #include "Stretcher.h"
+#include "MixProject.h"
 #include <cmath>
 #include <iostream>
 
@@ -1521,6 +1522,835 @@ int main()
         CHECK (maxJump (e2, o2, 200, &playing) < 0.06f);
         CHECK (! e2.isPlaying());
         e2.setSong (nullptr);
+    }
+
+    std::cout << "[Mix] armar mixes: tiempos, ubicación, render, canción y disco\n";
+    {
+        // Clicks de 1 ms (rampa que cae) en tiempos conocidos
+        auto clickTrack = [] (double rate, double seconds, int channels, const std::vector<double>& times, float amp)
+        {
+            juce::AudioBuffer<float> b (channels, (int) std::llround (rate * seconds));
+            b.clear();
+            const int len = (int) std::llround (rate * 0.001);
+            for (double t : times)
+            {
+                const int at = (int) std::llround (t * rate);
+                for (int i = 0; i < len && at + i < b.getNumSamples(); ++i)
+                    for (int ch = 0; ch < channels; ++ch)
+                        b.setSample (ch, at + i, amp * (1.0f - (float) i / (float) len));
+            }
+            return b;
+        };
+        // Tiempos regulares: n tiempos desde `first` cada `step` s; `downbeatAt` = índice del primer 1
+        auto regularBeats = [] (double first, double step, int n, int downbeatAt)
+        {
+            std::vector<Beat> beats;
+            for (int k = 0; k < n; ++k)
+                beats.push_back ({ first + step * k, ((k - downbeatAt) % 4 + 4) % 4 + 1 });
+            return beats;
+        };
+        auto beatTimes = [] (const std::vector<Beat>& beats)
+        {
+            std::vector<double> times;
+            for (auto& bt : beats)
+                times.push_back (bt.seconds);
+            return times;
+        };
+        // Posición (s) del máximo absoluto del canal 0 en [around - window, around + window]
+        auto peakNear = [] (const juce::AudioBuffer<float>& b, double rate, double around, double window)
+        {
+            const int from = juce::jmax (0, (int) ((around - window) * rate));
+            const int to = juce::jmin (b.getNumSamples(), (int) ((around + window) * rate));
+            int best = from;
+            float bestValue = -1.0f;
+            for (int i = from; i < to; ++i)
+                if (std::abs (b.getSample (0, i)) > bestValue)
+                {
+                    bestValue = std::abs (b.getSample (0, i));
+                    best = i;
+                }
+            return (double) best / rate;
+        };
+        auto approx = [] (double x, double y, double tol = 1.0e-9) { return std::abs (x - y) < tol; };
+
+        // Fuente A: 44,1 kHz estéreo, 120 BPM (tiempos en 0,25 + 0,5 k; 1 en 0,25 y 2,25)
+        // Fuente B: 48 kHz mono, 100 BPM (tiempos en 0,3 + 0,6 k; 1 en 0,9 y 3,3)
+        // Fuente C: 44,1 kHz estéreo, nivel constante 0,5 (sin analizar)
+        const auto mixFiles = tmp.getChildFile ("mix-originales");
+        mixFiles.createDirectory();
+        Analysis anA, anB;
+        anA.beats = regularBeats (0.25, 0.5, 8, 0);
+        anA.chords = { { 0.0, 1.25, "Am" }, { 1.25, 4.0, "C" } };
+        anA.key = "La menor";
+        anA.meter = 4;
+        anA.bpm = 120.0;
+        anB.beats = regularBeats (0.3, 0.6, 7, 1);
+        anB.chords = { { 0.0, 2.1, "A#" }, { 2.1, 4.0, "Dm" } };
+        anB.key = "Sol mayor";
+        anB.meter = 4;
+        anB.bpm = 100.0;
+        const auto fileA = mixFiles.getChildFile ("fuente-a.wav");
+        const auto fileB = mixFiles.getChildFile ("fuente-b.wav");
+        const auto fileC = mixFiles.getChildFile ("fuente-c.wav");
+        const auto bufA = clickTrack (44100.0, 4.0, 2, beatTimes (anA.beats), 0.8f);
+        writeWav (fileA, bufA, 44100.0);
+        writeWav (fileB, clickTrack (48000.0, 4.0, 1, beatTimes (anB.beats), 0.8f), 48000.0);
+        {
+            juce::AudioBuffer<float> dc (2, (int) (44100.0 * 4.0));
+            for (int ch = 0; ch < 2; ++ch)
+                juce::FloatVectorOperations::fill (dc.getWritePointer (ch), 0.5f, dc.getNumSamples());
+            writeWav (fileC, dc, 44100.0);
+        }
+
+        std::cout << "  tiempos: tempo de un tramo, ajuste a tiempos y compases\n";
+        CHECK (approx (mix::segmentBpm (anA, 0.25, 2.25), 120.0));
+        CHECK (approx (mix::segmentBpm (anB, 0.9, 3.3), 100.0));
+        CHECK (approx (mix::segmentBpm (anA, 0.24, 2.24), 120.0));     // cortes un poco antes del golpe
+        CHECK (approx (mix::segmentBpm (anA, 0.25, 0.26), 0.0));             // un solo tiempo
+        CHECK (approx (mix::segmentBpm (Analysis(), 0.0, 10.0), 0.0));
+        {
+            Analysis jitter;
+            jitter.beats = { { 0.0, 1 }, { 0.51, 2 }, { 0.99, 3 }, { 1.52, 4 } };
+            CHECK (approx (mix::segmentBpm (jitter, 0.0, 1.52), 60.0 * 3.0 / 1.52));
+        }
+        CHECK (approx (mix::snapToBeat (anA, 1.1, false), 1.25));
+        CHECK (approx (mix::snapToBeat (anA, 1.1, true), 0.25));
+        CHECK (approx (mix::snapToBeat (Analysis(), 1.1, true), 1.1));
+        CHECK (approx (mix::previousDownbeat (anA, 2.25), 0.25));
+        CHECK (approx (mix::previousDownbeat (anA, 2.26), 0.25));      // a menos de 0,05 s no cuenta
+        CHECK (approx (mix::previousDownbeat (anA, 2.4), 2.25));
+        CHECK (approx (mix::previousDownbeat (anA, 0.2), 0.2));        // no hay
+        CHECK (approx (mix::nextDownbeat (anA, 0.25), 2.25));
+        CHECK (approx (mix::nextDownbeat (anA, 2.25), 2.25));          // no hay otro
+        CHECK (mix::barNumberAt (anA, 0.1) == 0);
+        CHECK (mix::barNumberAt (anA, 0.22) == 1);
+        CHECK (mix::barNumberAt (anA, 2.3) == 2);
+        CHECK (mix::barNumberAt (Analysis(), 2.3) == 0);
+        CHECK (mix::barsBetween (anA, 0.25, 4.25) == 2);
+        CHECK (mix::barsBetween (anA, 0.24, 2.24) == 1);
+        CHECK (mix::barsBetween (anB, 0.89, 3.29) == 1);
+
+        std::cout << "  proyecto: crear, fuentes copiadas, quitar\n";
+        const auto mixRoot = tmp.getChildFile ("lib-mixes").getChildFile (Library::mixesFolderName());
+        const auto projFolder = MixProject::create (mixRoot, "Mix de prueba");
+        CHECK (projFolder.isDirectory() && projFolder.getChildFile ("mix.json").existsAsFile());
+        MixProject proj;
+        CHECK (MixProject::load (projFolder, proj));
+        CHECK (proj.name == "Mix de prueba" && proj.sources.empty() && proj.segments.empty() && proj.folder == projFolder);
+        CHECK (proj.addSource (fileA, formats) == 0);
+        CHECK (proj.addSource (fileB, formats) == 1);
+        CHECK (proj.addSource (fileC, formats) == 2);
+        CHECK (proj.sources.size() == 3 && proj.sources[0].name == "fuente-a" && proj.sources[0].fileName == "fuente-a.wav");
+        CHECK (proj.sourceFile (0).existsAsFile() && proj.sourceFile (0).isAChildOf (proj.sourcesFolder()));
+        CHECK (std::abs (proj.sources[0].length - 4.0) < 1.0e-6 && std::abs (proj.sources[1].length - 4.0) < 1.0e-6);
+        CHECK (proj.sourceFile (7) == juce::File() && proj.sourceFile (-1) == juce::File());
+        {
+            const auto notAudio = mixFiles.getChildFile ("texto.wav");
+            notAudio.replaceWithText ("no es audio");
+            CHECK (proj.addSource (notAudio, formats) == -1);
+            CHECK (proj.addSource (mixFiles.getChildFile ("no-existe.wav"), formats) == -1);
+            CHECK (proj.sources.size() == 3);
+        }
+        proj.sources[0].analysis = anA;
+        proj.sources[1].analysis = anB;
+
+        std::cout << "  ubicación: uniones en la rejilla, razón por tramo, fundidos\n";
+        proj.bpm = 100.0;
+        MixSegment segA;
+        segA.source = 0;
+        segA.start = 0.25;
+        segA.end = 2.25;
+        MixSegment segB;
+        segB.source = 1;
+        segB.start = 0.9;
+        segB.end = 3.3;
+        proj.segments = { segA, segB };
+        {
+            auto pl = mix::layout (proj);
+            CHECK (pl.size() == 2);
+            CHECK (approx (pl[0].outStart, 0.0) && approx (pl[0].outEnd, 2.4) && approx (pl[0].ratio, 1.2));
+            CHECK (approx (pl[0].srcBpm, 120.0) && approx (pl[0].playBpm, 100.0) && approx (pl[0].srcStart, 0.25) && approx (pl[0].srcEnd, 2.25));
+            CHECK (approx (pl[1].outStart, 2.4) && approx (pl[1].outEnd, 4.8) && approx (pl[1].ratio, 1.0));
+            CHECK (approx (pl[0].fadeIn, 0.0) && approx (pl[0].fadeOut, mix::cutFadeSeconds));
+            CHECK (approx (pl[1].fadeIn, mix::cutFadeSeconds) && approx (pl[1].fadeOut, mix::cutFadeSeconds));
+            CHECK (approx (mix::length (proj), 4.8));
+            // La unión cae un tiempo (al tempo del mix) después del último tiempo del tramo anterior
+            CHECK (approx (pl[1].outStart - mix::toMix (pl[0], 1.75), 0.6));
+            CHECK (approx (mix::toMix (pl[1], 1.5), 3.0));
+        }
+        {
+            // Fundido musical de un tiempo; acotado al audio previo en la fuente
+            auto p2 = proj;
+            p2.segments[1].fadeBeats = 1.0;
+            auto pl = mix::layout (p2);
+            CHECK (approx (pl[1].fadeIn, 0.6) && approx (pl[0].fadeOut, 0.6));
+            p2.segments[1].start = 0.3;   // solo hay 0,3 s antes
+            pl = mix::layout (p2);
+            CHECK (approx (pl[1].fadeIn, 0.3) && approx (pl[0].fadeOut, 0.3) && approx (pl[1].outEnd, 2.4 + 3.0));
+            p2.segments[1].start = 0.0;   // nada antes: sin fundido cruzado
+            pl = mix::layout (p2);
+            CHECK (approx (pl[1].fadeIn, 0.0) && approx (pl[0].fadeOut, 0.0));
+            // Acotado a la mitad del tramo más corto
+            p2.segments[1] = segB;
+            p2.segments[1].start = 2.1;   // dura 1,2 s: el fundido no pasa de 0,6 s
+            p2.segments[1].fadeBeats = 16.0;
+            pl = mix::layout (p2);
+            CHECK (approx (pl[1].fadeIn, 0.6) && approx (pl[0].fadeOut, 0.6));
+        }
+        {
+            // Tempo propio, cada tramo a su tempo, tempo del mix sin fijar, tramo sin analizar, fuente inexistente
+            auto p2 = proj;
+            p2.segments[0].playBpm = 60.0;
+            auto pl = mix::layout (p2);
+            CHECK (approx (pl[0].ratio, 2.0) && approx (pl[0].outEnd, 4.0) && approx (pl[1].outStart, 4.0) && approx (pl[1].ratio, 1.0));
+            p2.segments[0].playBpm = 0.0;
+            p2.keepTempos = true;
+            pl = mix::layout (p2);
+            CHECK (approx (pl[0].ratio, 1.0) && approx (pl[0].playBpm, 120.0) && approx (pl[1].ratio, 1.0) && approx (pl[1].playBpm, 100.0));
+            CHECK (approx (pl[0].outEnd, 2.0) && approx (pl[1].outEnd, 4.4));
+            p2.keepTempos = false;
+            p2.bpm = 0.0;
+            CHECK (approx (p2.effectiveBpm(), 120.0));   // el del primer tramo
+            pl = mix::layout (p2);
+            CHECK (approx (pl[0].ratio, 1.0) && approx (pl[1].ratio, 100.0 / 120.0) && approx (pl[1].playBpm, 120.0));
+            MixSegment segC;
+            segC.source = 2;
+            segC.start = 1.0;
+            segC.end = 2.0;
+            p2.segments = { segC };
+            CHECK (approx (p2.effectiveBpm(), 120.0));   // sin análisis: 120
+            p2.bpm = 90.0;
+            pl = mix::layout (p2);
+            CHECK (approx (pl[0].ratio, 1.0) && approx (pl[0].srcBpm, 90.0) && approx (pl[0].playBpm, 90.0) && approx (pl[0].outEnd, 1.0));
+            MixSegment missing;
+            missing.source = 9;
+            missing.start = 0.0;
+            missing.end = 1.0;
+            MixSegment beyond = segC;
+            beyond.start = 3.5;
+            beyond.end = 9.0;   // se acota al largo de la fuente
+            p2.segments = { segC, missing, beyond };
+            pl = mix::layout (p2);
+            CHECK (pl.size() == 3 && approx (pl[1].outStart, 1.0) && approx (pl[1].outEnd, 1.0));
+            CHECK (approx (pl[2].outStart, 1.0) && approx (pl[2].srcEnd, 4.0) && approx (pl[2].outEnd, 1.5));
+            CHECK (approx (pl[2].fadeIn, mix::cutFadeSeconds) && approx (pl[0].fadeOut, mix::cutFadeSeconds));
+            CHECK (approx (mix::length (p2), 1.5));
+            CHECK (approx (mix::length (MixProject()), 0.0) && mix::layout (MixProject()).empty());
+        }
+
+        std::cout << "  render: clicks donde dice la ubicación, unión exacta, copia directa, fundidos\n";
+        {
+            float lastProgress = 0.0f;
+            juce::String err;
+            auto rendered = mix::render (proj, mix::renderSampleRate, formats, {}, [&] (float p) { lastProgress = p; }, err);
+            CHECK (err.isEmpty() && rendered.getNumChannels() == 2);
+            CHECK (rendered.getNumSamples() == (int) std::ceil (4.8 * mix::renderSampleRate));
+            CHECK (lastProgress > 0.99f);
+            const auto pl = mix::layout (proj);
+            double lastA = 0.0, firstB = 0.0;
+            for (auto& bt : anA.beats)
+                if (bt.seconds >= 0.25 - 0.05 && bt.seconds < 2.25 - 0.05)
+                {
+                    const double expected = mix::toMix (pl[0], bt.seconds);
+                    const double found = peakNear (rendered, mix::renderSampleRate, expected, 0.03);
+                    CHECK (std::abs (found - expected) < 0.002);
+                    lastA = found;
+                }
+            for (auto& bt : anB.beats)
+                if (bt.seconds >= 0.9 - 0.05 && bt.seconds < 3.3 - 0.05)
+                {
+                    const double expected = mix::toMix (pl[1], bt.seconds);
+                    const double found = peakNear (rendered, mix::renderSampleRate, expected, 0.03);
+                    CHECK (std::abs (found - expected) < 0.002);
+                    if (firstB <= 0.0)
+                        firstB = found;
+                }
+            CHECK (std::abs ((firstB - lastA) - 0.6) < 0.002);   // la unión queda a un tiempo exacto
+            CHECK (rendered.getMagnitude (0, (int) (4.25 * mix::renderSampleRate), (int) (0.5 * mix::renderSampleRate)) < 1.0e-3f);
+        }
+        {
+            // Sin estirar (tempo del mix = el del primer tramo): copia exacta de las muestras, también en
+            // la unión (dos tramos seguidos de la misma fuente: el fundido suma 1)
+            auto p2 = proj;
+            p2.bpm = 0.0;
+            MixSegment second = segA;
+            second.start = 2.25;
+            second.end = 3.75;
+            p2.segments = { segA, second };
+            juce::String err;
+            auto rendered = mix::render (p2, mix::renderSampleRate, formats, {}, {}, err);
+            CHECK (rendered.getNumSamples() == (int) std::ceil (3.5 * mix::renderSampleRate));
+            float worst = 0.0f;
+            const int offsetA = 11025;   // 0,25 s
+            for (int m = 100; m < (int) (3.49 * mix::renderSampleRate); ++m)
+                for (int ch = 0; ch < 2; ++ch)
+                    worst = juce::jmax (worst, std::abs (rendered.getSample (ch, m) - bufA.getSample (ch, m + offsetA)));
+            CHECK (worst < 1.0e-6f);
+        }
+        {
+            // Dos tramos seguidos de la misma fuente (el mismo audio a los dos lados de la unión): el
+            // fundido no sube el nivel (con seno y coseno subiría hasta 3 dB), con corte o fundido musical.
+            // Con un salto en la fuente ya no es el mismo audio: igual potencia.
+            MixProject p2 = proj;
+            p2.bpm = 0.0;
+            MixSegment first;
+            first.source = 2;
+            first.start = 1.0;
+            first.end = 2.0;
+            MixSegment next = first;
+            next.start = 2.0;
+            next.end = 2.5;
+            const double rate = mix::renderSampleRate;
+            for (double fadeBeats : { 0.0, 1.0 })
+            {
+                next.fadeBeats = fadeBeats;
+                p2.segments = { first, next };
+                const auto pl = mix::layout (p2);
+                CHECK (approx (pl[1].fadeIn, fadeBeats > 0.0 ? 0.25 : mix::cutFadeSeconds));
+                juce::String err;
+                const auto rendered = mix::render (p2, rate, formats, {}, {}, err);
+                CHECK (err.isEmpty() && rendered.getNumSamples() == (int) std::ceil (1.5 * rate));
+                float worst = 0.0f;
+                for (int m = (int) (0.01 * rate); m < (int) (1.48 * rate); ++m)
+                    for (int ch = 0; ch < 2; ++ch)
+                        worst = juce::jmax (worst, std::abs (rendered.getSample (ch, m) - 0.5f));
+                CHECK (worst < 1.0e-5f);
+            }
+            next.fadeBeats = 0.0;
+            next.start = 2.01;
+            p2.segments = { first, next };
+            juce::String err;
+            const auto rendered = mix::render (p2, rate, formats, {}, {}, err);
+            const int mid = (int) std::llround (0.995 * rate);
+            const double x = ((double) mid / rate - 0.99) / 0.01;
+            const double expected = 0.5 * (std::cos (x * juce::MathConstants<double>::halfPi) + std::sin (x * juce::MathConstants<double>::halfPi));
+            CHECK (std::abs (rendered.getSample (0, mid) - (float) expected) < 1.0e-4f && expected > 0.7);
+        }
+        {
+            // Fundidos con una fuente de nivel constante
+            MixProject p2 = proj;
+            p2.bpm = 0.0;
+            MixSegment first;
+            first.source = 2;
+            first.start = 1.0;
+            first.end = 2.0;
+            MixSegment second = first;
+            second.start = 3.0;
+            second.end = 3.5;
+            second.gainDb = juce::Decibels::gainToDecibels (0.5f);
+            p2.segments = { first, second };
+            juce::String err;
+            auto rendered = mix::render (p2, mix::renderSampleRate, formats, {}, {}, err);
+            const double rate = mix::renderSampleRate;
+            auto at = [&] (double t) { return rendered.getSample (0, (int) std::llround (t * rate)); };
+            auto timeOf = [&] (double t) { return (double) std::llround (t * rate) / rate; };
+            CHECK (rendered.getNumSamples() == (int) std::ceil (1.5 * rate));
+            CHECK (std::abs (rendered.getSample (0, 0)) < 1.0e-9f);                                   // silencio antes del primer tramo
+            CHECK (std::abs (at (0.001) - 0.5f * (float) (timeOf (0.001) / 0.002)) < 1.0e-3f);   // entra con 2 ms lineales
+            CHECK (std::abs (at (0.5) - 0.5f) < 1.0e-4f);
+            const double xt = timeOf (0.995);   // mitad del fundido cruzado de 10 ms antes de la unión
+            const double x = (xt - 0.99) / 0.01;
+            const double expected = 0.5 * std::cos (x * juce::MathConstants<double>::halfPi) + 0.25 * std::sin (x * juce::MathConstants<double>::halfPi);
+            CHECK (std::abs (at (0.995) - (float) expected) < 2.0e-3f);
+            CHECK (std::abs (at (0.985) - 0.5f) < 1.0e-4f);
+            CHECK (std::abs (at (1.2) - 0.25f) < 1.0e-4f);                               // ganancia del segundo tramo
+            CHECK (std::abs (rendered.getSample (1, (int) (1.2 * rate)) - 0.25f) < 1.0e-4f);
+            CHECK (std::abs (rendered.getSample (0, rendered.getNumSamples() - 1)) < 0.01f);   // termina en silencio
+            const double yt = timeOf (1.495);
+            CHECK (std::abs (at (1.495) - 0.25f * (float) std::cos ((yt - 1.49) / 0.01 * juce::MathConstants<double>::halfPi)) < 2.0e-3f);
+            // Sin audio previo en la fuente: el que entra lo hace con 2 ms lineales desde la unión
+            p2.segments[1].start = 0.0;
+            p2.segments[1].end = 0.5;
+            p2.segments[1].fadeBeats = 1.0;
+            rendered = mix::render (p2, rate, formats, {}, {}, err);
+            CHECK (std::abs (at (0.985) - 0.5f) < 1.0e-4f);
+            CHECK (std::abs (at (1.001) - 0.25f * (float) ((timeOf (1.001) - 1.0) / 0.002)) < 2.0e-3f);
+            CHECK (std::abs (at (0.9995) - 0.5f * (float) std::cos ((timeOf (0.9995) - 0.998) / 0.002 * juce::MathConstants<double>::halfPi)) < 2.0e-3f);
+            CHECK (std::abs (at (1.1) - 0.25f) < 1.0e-4f);
+        }
+        {
+            // Transponer (sin estirar) pasa por el estirador y conserva el largo
+            auto p2 = proj;
+            p2.bpm = 0.0;
+            MixSegment up = segA;
+            up.end = 1.25;
+            up.transpose = 2;
+            p2.segments = { up };
+            juce::String err;
+            auto rendered = mix::render (p2, mix::renderSampleRate, formats, {}, {}, err);
+            CHECK (err.isEmpty() && rendered.getNumSamples() == (int) std::ceil (1.0 * mix::renderSampleRate));
+            CHECK (rendered.getMagnitude (0, rendered.getNumSamples()) > 0.1f);
+            // Abortar vacía el resultado sin error: antes del primer tramo y dentro del estirador (la
+            // primera consulta es la del tramo; las siguientes, las del estirador, una por bloque)
+            err = "x";
+            auto aborted = mix::render (p2, mix::renderSampleRate, formats, [] { return true; }, {}, err);
+            CHECK (aborted.getNumSamples() == 0 && err.isEmpty());
+            int abortCalls = 0;
+            err = "x";
+            aborted = mix::render (p2, mix::renderSampleRate, formats, [&abortCalls] { return ++abortCalls >= 3; }, {}, err);
+            CHECK (aborted.getNumSamples() == 0 && err.isEmpty() && abortCalls == 3);
+            // Una fuente que falta es un error
+            p2.sources[0].fileName = "no-existe.wav";
+            auto failed = mix::render (p2, mix::renderSampleRate, formats, {}, {}, err);
+            CHECK (failed.getNumSamples() == 0 && err.contains ("fuente-a"));
+            p2.segments.clear();
+            CHECK (mix::render (p2, mix::renderSampleRate, formats, {}, {}, err).getNumSamples() == 0 && err.isNotEmpty());
+        }
+
+        {
+            // Fundido cruzado hacia un tramo ESTIRADO: primero la fuente de nivel constante (sin estirar)
+            // y después A (120 BPM) a 100 BPM con 1,5 tiempos de fundido (0,9 s). En [J - F, J] ya suena
+            // el audio de A que precede a su inicio (con el seno) sobre el anterior que se apaga (coseno)
+            auto p2 = proj;   // 100 BPM
+            MixSegment level;
+            level.source = 2;
+            level.start = 1.0;
+            level.end = 3.0;
+            MixSegment stretched = segA;
+            stretched.start = 1.25;
+            stretched.end = 3.25;
+            stretched.fadeBeats = 1.5;
+            p2.segments = { level, stretched };
+            const auto pl = mix::layout (p2);
+            CHECK (approx (pl[0].outEnd, 2.0) && approx (pl[1].ratio, 1.2) && approx (pl[1].fadeIn, 0.9)
+                   && approx (pl[0].fadeOut, 0.9) && approx (pl[1].outEnd, 4.4));
+            const double rate = mix::renderSampleRate;
+            const double halfPi = juce::MathConstants<double>::halfPi;
+            juce::String err;
+            const auto rendered = mix::render (p2, rate, formats, {}, {}, err);
+            CHECK (err.isEmpty() && rendered.getNumSamples() == (int) std::ceil (4.4 * rate));
+            // Lo que aporta A = el mix menos el tramo constante (0,5 con 2 ms de entrada y el coseno de salida)
+            juce::AudioBuffer<float> incoming (1, rendered.getNumSamples());
+            for (int m = 0; m < rendered.getNumSamples(); ++m)
+            {
+                const double t = (double) m / rate;
+                double g = 0.0;
+                if (m < (int) std::ceil (2.0 * rate))
+                    g = juce::jlimit (0.0, 1.0, t / mix::edgeFadeSeconds) * (t > 1.1 ? std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - 1.1) / 0.9)) : 1.0);
+                incoming.setSample (0, m, rendered.getSample (0, m) - (float) (0.5 * g));
+            }
+            CHECK (incoming.getMagnitude (0, 0, (int) (1.09 * rate)) < 1.0e-5f);   // A no entra antes de J - F
+            // El click de 0,75 s de A (medio tiempo antes de su inicio) cae en J - 0,6 con ganancia seno(30°) = 0,5
+            const double pre = mix::toMix (pl[1], 0.75);
+            CHECK (approx (pre, 1.4, 1.0e-9));
+            const double foundPre = peakNear (incoming, rate, pre, 0.03);
+            CHECK (std::abs (foundPre - pre) < 0.002);
+            const float preLevel = std::abs (incoming.getSample (0, (int) std::llround (foundPre * rate)));
+            // Y los clicks de A desde la unión, donde dice toMix (la unión cae en su tiempo de 1,25 s)
+            float meanLevel = 0.0f;
+            for (double beat : { 1.25, 1.75, 2.25, 2.75 })
+            {
+                const double expected = mix::toMix (pl[1], beat);
+                const double found = peakNear (incoming, rate, expected, 0.03);
+                CHECK (std::abs (found - expected) < 0.002);
+                meanLevel += 0.25f * std::abs (incoming.getSample (0, (int) std::llround (found * rate)));
+            }
+            CHECK (approx (mix::toMix (pl[1], 1.25), 2.0, 1.0e-9));
+            CHECK (preLevel > 0.2f * meanLevel && preLevel < 0.8f * meanLevel);   // suena, con la ganancia reducida (0,38 aquí)
+        }
+
+        std::cout << "  canción del mix: tiempos, acordes, tonalidad, secciones de tempo, marcadores\n";
+        {
+            auto p2 = proj;
+            p2.segments[0].start = 0.24;   // cortes un poco antes del golpe, como con la transiente
+            p2.segments[0].end = 2.24;
+            p2.segments[1].start = 0.89;
+            p2.segments[1].end = 3.29;
+            p2.segments[1].transpose = 2;
+            p2.segments[1].label = "Coro";
+            SongInfo described;
+            described.clips = { Clip { 0.0, 1.0, 0.0 } };
+            described.notes = { SongNote { 1.0, 2.0, "nota" } };
+            described.playBpm = 90.0;
+            described.transpose = 3;
+            described.levelingEnabled = true;
+            mix::describeSong (p2, described);
+            const auto& an = described.analysis;
+            CHECK (described.name == "Mix de prueba");
+            CHECK (an.beats.size() == 8);
+            if (an.beats.size() == 8)
+            {
+                CHECK (approx (an.beats[0].seconds, 0.012, 1.0e-6) && an.beats[0].beatInBar == 1);
+                CHECK (approx (an.beats[3].seconds, 1.812, 1.0e-6) && an.beats[3].beatInBar == 4);
+                CHECK (approx (an.beats[4].seconds, 2.41, 1.0e-6) && an.beats[4].beatInBar == 1);
+                CHECK (approx (an.beats[7].seconds, 4.21, 1.0e-6) && an.beats[7].beatInBar == 4);
+            }
+            CHECK (an.chords.size() == 3);
+            if (an.chords.size() == 3)
+            {
+                CHECK (an.chords[0].name == "Am" && approx (an.chords[0].start, 0.0));
+                CHECK (approx (an.chords[0].end, (1.25 - 0.24) * 1.2, 1.0e-6));
+                CHECK (an.chords[1].name == "C" && approx (an.chords[1].start, (1.25 - 0.24) * 1.2, 1.0e-6) && approx (an.chords[1].end, 2.4 + (2.1 - 0.89), 1.0e-6));
+                CHECK (an.chords[2].name == "Em" && approx (an.chords[2].end, 4.8, 1.0e-6));
+            }
+            CHECK (an.key == "La menor" && an.meter == 4 && approx (an.bpm, 100.0));
+            CHECK (described.tempoRegions.size() == 1 && approx (described.tempoRegions[0].start, 0.0)
+                   && approx (described.tempoRegions[0].origBpm, 100.0) && approx (described.tempoRegions[0].playBpm, 0.0));
+            CHECK (described.markers.size() == 2);
+            if (described.markers.size() == 2)
+            {
+                CHECK (described.markers[0].name == "fuente-a" && approx (described.markers[0].seconds, 0.0));
+                CHECK (described.markers[1].name == "Coro" && approx (described.markers[1].seconds, 2.4));
+            }
+            CHECK (approx (described.bpm, 100.0) && approx (described.clickOffset, 0.012, 1.0e-6));
+            CHECK (described.clips.empty() && described.notes.empty() && approx (described.playBpm, 0.0) && described.transpose == 0);
+            CHECK (! described.levelingEnabled && approx (described.loudnessLufs, unmeasuredDb));
+            // Primer tramo transpuesto: tonalidad transpuesta; tempos distintos: dos secciones
+            p2.segments[0].transpose = 2;
+            p2.segments[1].playBpm = 90.0;
+            SongInfo other;
+            mix::describeSong (p2, other);
+            CHECK (other.analysis.key == "Si menor" && other.analysis.chords.size() == 4 && other.analysis.chords[0].name == "Bm");
+            CHECK (other.tempoRegions.size() == 2 && approx (other.tempoRegions[1].start, 2.4) && approx (other.tempoRegions[1].origBpm, 90.0));
+            CHECK (other.markers.size() == 2 && approx (other.markers[1].seconds, 2.4));
+        }
+        {
+            // Dos tiempos a menos de 30 ms en una unión (cortes libres): queda el del tramo que entra,
+            // cuyo número en el compás es el que siguen los tiempos que vienen
+            auto p3 = proj;
+            p3.bpm = 120.0;
+            p3.segments = { segA, segB };
+            p3.segments[0].end = 2.801;     // su 2 de 2,75 cae 51 ms antes de la unión
+            p3.segments[1].start = 0.949;   // su 1 de 0,9 cae 41 ms antes (razón 100/120): después del 2
+            SongInfo joined;
+            mix::describeSong (p3, joined);
+            const auto& bts = joined.analysis.beats;
+            CHECK (bts.size() == 9);
+            if (bts.size() == 9)
+            {
+                CHECK (approx (bts[4].seconds, 2.0, 1.0e-6) && bts[4].beatInBar == 1);
+                CHECK (approx (bts[5].seconds, 2.551, 1.0e-6) && bts[5].beatInBar == 1);   // pegado a la unión
+                CHECK (bts[6].beatInBar == 2 && bts[7].beatInBar == 3 && bts[8].beatInBar == 4);
+            }
+            // Al revés: el del tramo que entra cae antes que el del que sale
+            p3.bpm = 100.0;
+            p3.segments = { segB, segA };
+            p3.segments[0].start = 0.3;
+            p3.segments[0].end = 2.151;     // su 3 de 2,1 cae 51 ms antes de la unión
+            p3.segments[1].start = 0.299;   // su 1 de 0,25 cae 59 ms antes (razón 1,2): antes del 3
+            SongInfo reversed;
+            mix::describeSong (p3, reversed);
+            const auto& rb = reversed.analysis.beats;
+            CHECK (rb.size() == 7);
+            if (rb.size() == 7)
+            {
+                CHECK (approx (rb[2].seconds, 1.2, 1.0e-6) && rb[2].beatInBar == 2);
+                CHECK (approx (rb[3].seconds, 1.851, 1.0e-6) && rb[3].beatInBar == 1);   // pegado a la unión
+                CHECK (rb[4].beatInBar == 2);
+            }
+            // Primer tramo cortado poco después de un tiempo (el corte ajustado a la transiente): ese tiempo
+            // es el primero del tramo y va en 0, con su número en el compás
+            p3 = proj;
+            p3.segments[0].start = 0.26;
+            p3.segments[0].end = 2.26;
+            SongInfo early;
+            mix::describeSong (p3, early);
+            CHECK (early.analysis.beats.size() == 8);
+            if (! early.analysis.beats.empty())
+                CHECK (approx (early.analysis.beats.front().seconds, 0.0, 1.0e-9) && early.analysis.beats.front().beatInBar == 1);
+            CHECK (approx (early.clickOffset, 0.0, 1.0e-9));
+        }
+
+        std::cout << "  disco: guardar y leer, valores fuera de rango\n";
+        {
+            proj.keepTempos = true;
+            proj.segments[1].label = tr ("Canción ñandú");
+            proj.segments[1].playBpm = 98.5;
+            proj.segments[1].transpose = -3;
+            proj.segments[1].gainDb = -4.5f;
+            proj.segments[1].fadeBeats = 2.0;
+            CHECK (proj.save());
+            MixProject back;
+            CHECK (MixProject::load (projFolder, back));
+            CHECK (back.name == proj.name && approx (back.bpm, 100.0) && back.keepTempos && back.folder == projFolder);
+            CHECK (back.sources.size() == 3 && back.sources[1].name == "fuente-b" && back.sources[1].fileName == "fuente-b.wav"
+                   && approx (back.sources[1].length, proj.sources[1].length));
+            CHECK (back.sources[1].analysis.beats.size() == anB.beats.size() && back.sources[1].analysis.key == "Sol mayor"
+                   && back.sources[1].analysis.chords.size() == 2 && back.sources[2].analysis.isEmpty());
+            CHECK (back.segments.size() == 2);
+            if (back.segments.size() == 2)
+            {
+                const auto& s1 = back.segments[1];
+                CHECK (s1.source == 1 && approx (s1.start, 0.9) && approx (s1.end, 3.3) && s1.label == tr ("Canción ñandú"));
+                CHECK (approx (s1.playBpm, 98.5) && s1.transpose == -3 && std::abs (s1.gainDb + 4.5f) < 1.0e-6f && approx (s1.fadeBeats, 2.0));
+            }
+            CHECK (! MixProject::load (tmp.getChildFile ("no-hay-mix"), back));
+
+            const auto bad = mixRoot.getChildFile ("fuera-de-rango");
+            bad.createDirectory();
+            bad.getChildFile ("mix.json").replaceWithText (R"({ "name": "X", "bpm": 5, "sources": [ { "name": "a", "file": "../../a.wav", "length": -3 } ],
+                "segments": [ { "source": 0, "start": 1, "end": 2, "transpose": 30, "gainDb": -100, "fadeBeats": 99, "playBpm": 900 },
+                              { "source": 3, "start": 1, "end": 2 },
+                              { "source": 0, "start": 2, "end": 1 },
+                              { "source": 0, "start": -1, "end": 2, "playBpm": -4 },
+                              { "source": 0, "start": 0, "end": 1e6 } ] })");
+            MixProject clamped;
+            CHECK (MixProject::load (bad, clamped));
+            CHECK (approx (clamped.bpm, 20.0) && clamped.sources.size() == 1 && approx (clamped.sources[0].length, 0.0));
+            CHECK (! clamped.sources[0].fileName.containsChar ('/') && clamped.sourceFile (0).isAChildOf (clamped.sourcesFolder()));
+            CHECK (clamped.segments.size() == 3);
+            if (clamped.segments.size() == 3)
+            {
+                CHECK (clamped.segments[0].transpose == 12 && approx (clamped.segments[0].gainDb, -24.0) && approx (clamped.segments[0].fadeBeats, 16.0)
+                       && approx (clamped.segments[0].playBpm, 400.0));
+                CHECK (approx (clamped.segments[1].start, 0.0) && approx (clamped.segments[1].playBpm, 0.0));
+                // Largo de la fuente desconocido (no hay archivo): el tramo se acota a 4 horas
+                CHECK (approx (clamped.segments[2].end, 4.0 * 3600.0));
+            }
+            // Y un mix de más de 4 horas no se renderiza (ni reserva la memoria)
+            {
+                juce::String err;
+                const auto huge = mix::render (clamped, mix::renderSampleRate, formats, {}, {}, err);
+                CHECK (huge.getNumSamples() == 0 && err.contains ("4 horas"));
+            }
+            // Sin largo en mix.json se mide el archivo; los tramos se acotan a la fuente
+            {
+                const auto noLength = mixRoot.getChildFile ("sin-largo");
+                noLength.getChildFile ("fuentes").createDirectory();
+                CHECK (fileA.copyFileTo (noLength.getChildFile ("fuentes").getChildFile ("fuente-a.wav")));
+                noLength.getChildFile ("mix.json").replaceWithText (R"({ "name": "Y", "sources": [ { "name": "a", "file": "fuente-a.wav" } ],
+                    "segments": [ { "source": 0, "start": 3.5, "end": 9 }, { "source": 0, "start": 5, "end": 9 } ] })");
+                MixProject measured;
+                CHECK (MixProject::load (noLength, measured));
+                CHECK (measured.sources.size() == 1 && approx (measured.sources[0].length, 4.0, 1.0e-6));
+                CHECK (measured.segments.size() == 1);
+                if (measured.segments.size() == 1)
+                    CHECK (approx (measured.segments[0].start, 3.5) && approx (measured.segments[0].end, 4.0, 1.0e-6));
+                noLength.deleteRecursively();
+            }
+            bad.getChildFile ("mix.json").replaceWithText ("esto no es json");
+            CHECK (! MixProject::load (bad, clamped));
+            bad.deleteRecursively();
+        }
+
+        std::cout << "  quitar una fuente: sus tramos se van, los demás se reindexan, se borra su archivo\n";
+        {
+            auto p2 = proj;
+            CHECK (p2.addSource (fileA, formats) == 3);
+            CHECK (p2.sources[3].fileName != p2.sources[0].fileName && p2.sourceFile (3).existsAsFile());   // no pisa la otra copia
+            MixSegment s3 = segA;
+            s3.source = 3;
+            MixSegment s2 = segA;
+            s2.source = 2;
+            p2.segments = { segA, segB, s3, s2, segB };
+            const auto removedFile = p2.sourceFile (0);
+            p2.removeSource (0);
+            CHECK (p2.sources.size() == 3 && p2.sources[0].name == "fuente-b");
+            CHECK (p2.segments.size() == 4);
+            if (p2.segments.size() == 4)
+                CHECK (p2.segments[0].source == 0 && p2.segments[1].source == 2 && p2.segments[2].source == 1 && p2.segments[3].source == 0);
+            CHECK (! removedFile.exists() && p2.sourceFile (0).existsAsFile() && p2.sourceFile (2).existsAsFile());
+            p2.removeSource (7);   // no existe: nada
+            CHECK (p2.sources.size() == 3);
+        }
+
+        std::cout << "  lista de mixes\n";
+        {
+            const auto root2 = tmp.getChildFile ("lista-mixes");
+            const auto beta = MixProject::create (root2, "beta");
+            const auto alfa = MixProject::create (root2, "Alfa");
+            const auto alfa2 = MixProject::create (root2, "Alfa");
+            const auto odd = MixProject::create (root2, "../a:b");
+            CHECK (beta.isDirectory() && alfa.isDirectory() && alfa2.isDirectory() && alfa2 != alfa);
+            CHECK (odd.isDirectory() && odd.getParentDirectory() == root2);
+            root2.getChildFile ("sin-mix").createDirectory();
+            const auto names = MixProject::list (root2);
+            CHECK (odd.getFileName() == "ab" && alfa2.getFileName() == "Alfa2");
+            CHECK (names == juce::StringArray ({ "ab", "Alfa", "Alfa2", "beta" }));   // sin distinguir mayúsculas
+            MixProject loaded;
+            CHECK (MixProject::load (alfa2, loaded) && loaded.name == "Alfa");
+            CHECK (MixProject::list (tmp.getChildFile ("no-existe")).isEmpty());
+        }
+
+        std::cout << "  lectura de un rango: remuestreo sin corrimiento, ceros fuera del audio\n";
+        {
+            juce::AudioBuffer<float> part;
+            CHECK (mix::readRange (fileB, 1.2, 2.4, 44100.0, formats, part));
+            CHECK (part.getNumChannels() == 2 && part.getNumSamples() == (int) std::llround (1.2 * 44100.0));
+            CHECK (std::abs (peakNear (part, 44100.0, 0.3, 0.05) - 0.3) < 0.001);      // click de 1,5 s
+            CHECK (std::abs (peakNear (part, 44100.0, 0.9, 0.05) - 0.9) < 0.001);      // click de 2,1 s
+            CHECK (part.getMagnitude (0, (int) (0.6 * 44100.0), (int) (0.25 * 44100.0)) < 0.05f);   // entre los dos, casi nada
+            CHECK (mix::readRange (fileB, 0.5, 1.6, 44100.0, formats, part));
+            CHECK (part.getNumChannels() == 2 && part.getNumSamples() == (int) std::llround (1.1 * 44100.0));
+            CHECK (std::abs (peakNear (part, 44100.0, 0.4, 0.05) - 0.4) < 0.001);      // click de 0,9 s
+            CHECK (std::abs (peakNear (part, 44100.0, 1.0, 0.05) - 1.0) < 0.001);      // click de 1,5 s
+            bool same = true;
+            for (int i = 0; i < part.getNumSamples(); ++i)
+                same = same && std::abs (part.getSample (0, i) - part.getSample (1, i)) < 1.0e-9f;
+            CHECK (same);   // mono duplicado
+            CHECK (mix::readRange (fileB, -1.0, 0.5, 44100.0, formats, part));
+            CHECK (part.getNumSamples() == (int) std::llround (1.5 * 44100.0));
+            CHECK (part.getMagnitude (0, (int) (0.95 * 44100.0)) < 1.0e-6f);
+            CHECK (std::abs (peakNear (part, 44100.0, 1.3, 0.05) - 1.3) < 0.001);
+            CHECK (mix::readRange (fileB, 3.95, 5.0, 44100.0, formats, part));
+            CHECK (part.getMagnitude (0, (int) (0.06 * 44100.0), part.getNumSamples() - (int) (0.06 * 44100.0)) < 1.0e-6f);
+            // Misma frecuencia: muestras exactas
+            CHECK (mix::readRange (fileA, 0.25, 0.35, 44100.0, formats, part));
+            CHECK (part.getNumSamples() == 4410 && std::abs (part.getSample (0, 0) - bufA.getSample (0, 11025)) < 1.0e-6f
+                   && std::abs (part.getSample (1, 20) - bufA.getSample (1, 11045)) < 1.0e-6f && part.getSample (0, 0) > 0.7f);
+            CHECK (! mix::readRange (mixFiles.getChildFile ("no-existe.wav"), 0.0, 1.0, 44100.0, formats, part));
+        }
+
+        std::cout << "  lectura que falla en la cola (MP3 con el largo estimado de más): silencio, sin error\n";
+        {
+            // Imita a MP3Reader: dice durar 2 s, pero después de 1,5 s no puede decodificar más y
+            // la lectura devuelve false (con ceros en lo que falta)
+            struct TailReader : juce::AudioFormatReader
+            {
+                explicit TailReader (juce::InputStream* sourceStream) : juce::AudioFormatReader (sourceStream, "Cola")
+                {
+                    sampleRate = 44100.0;
+                    bitsPerSample = 32;
+                    lengthInSamples = 88200;
+                    numChannels = 1;
+                    usesFloatingPointData = true;
+                }
+                bool readSamples (int* const* destChannels, int numDestChannels, int destOffset,
+                                  juce::int64 firstSample, int sampleCount) override
+                {
+                    constexpr juce::int64 decodable = 66150;
+                    for (int chIndex = 0; chIndex < numDestChannels; ++chIndex)
+                        if (destChannels[chIndex] != nullptr)
+                        {
+                            float* dest = reinterpret_cast<float*> (destChannels[chIndex]) + destOffset;
+                            for (int n = 0; n < sampleCount; ++n)
+                                dest[n] = firstSample + n < decodable ? 0.5f : 0.0f;
+                        }
+                    return firstSample + sampleCount <= decodable;
+                }
+            };
+            struct TailFormat : juce::AudioFormat
+            {
+                TailFormat() : juce::AudioFormat (juce::String ("Cola"), juce::StringArray { ".cola" }) {}
+                juce::Array<int> getPossibleSampleRates() override { return { 44100 }; }
+                juce::Array<int> getPossibleBitDepths() override { return { 32 }; }
+                bool canDoStereo() override { return false; }
+                bool canDoMono() override { return true; }
+                juce::AudioFormatReader* createReaderFor (juce::InputStream* sourceStream, bool) override { return new TailReader (sourceStream); }
+                using juce::AudioFormat::createWriterFor;
+                juce::AudioFormatWriter* createWriterFor (juce::OutputStream*, double, unsigned int, int,
+                                                          const juce::StringPairArray&, int) override { return nullptr; }
+            };
+            juce::AudioFormatManager tailFormats;
+            tailFormats.registerFormat (new TailFormat(), true);
+            const auto tailFile = mixFiles.getChildFile ("con-cola.cola");
+            tailFile.replaceWithText ("x");
+
+            juce::AudioBuffer<float> part;
+            CHECK (mix::readRange (tailFile, 1.0, 2.0, 44100.0, tailFormats, part) && part.getNumSamples() == 44100);
+            if (part.getNumSamples() == 44100)
+            {
+                CHECK (std::abs (part.getSample (0, 100) - 0.5f) < 1.0e-6f && std::abs (part.getSample (1, 100) - 0.5f) < 1.0e-6f);   // mono duplicado
+                CHECK (part.getMagnitude (0, 22050, 22050) < 1.0e-9f && part.getMagnitude (1, 22050, 22050) < 1.0e-9f);
+            }
+            CHECK (mix::readRange (tailFile, 1.0, 2.0, 48000.0, tailFormats, part) && part.getNumSamples() == 48000);   // remuestreado
+            double len = 0.0;
+            const auto peaks = mix::computePeaks (tailFile, tailFormats, 10, len);
+            CHECK (approx (len, 2.0) && peaks.size() == 40);
+            if (peaks.size() == 40)
+                CHECK (std::abs (peaks[14 * 2 + 1] - 0.5f) < 1.0e-6f && std::abs (peaks[15 * 2 + 1]) < 1.0e-9f && std::abs (peaks[19 * 2 + 1]) < 1.0e-9f);
+
+            // Un tramo que llega a la cola se renderiza (la cola es silencio)
+            MixProject tailMix;
+            tailMix.folder = tmp.getChildFile ("mix-cola");
+            CHECK (tailMix.addSource (tailFile, tailFormats) == 0);
+            MixSegment tail;
+            tail.source = 0;
+            tail.start = 1.0;
+            tail.end = 2.0;
+            tailMix.segments = { tail };
+            juce::String err;
+            const auto rendered = mix::render (tailMix, mix::renderSampleRate, tailFormats, {}, {}, err);
+            CHECK (err.isEmpty() && rendered.getNumSamples() == 44100);
+            if (rendered.getNumSamples() == 44100)
+                CHECK (std::abs (rendered.getSample (1, 11025) - 0.5f) < 1.0e-6f && rendered.getMagnitude (0, 23000, 20000) < 1.0e-9f);
+        }
+
+        std::cout << "  transiente, forma de onda\n";
+        {
+            const double r1 = mix::refineToOnset (fileA, 0.78, formats);
+            const double r2 = mix::refineToOnset (fileA, 0.72, formats);
+            CHECK (r1 <= 0.7502 && r1 > 0.745);
+            CHECK (r2 <= 0.7502 && r2 > 0.745);
+            CHECK (approx (mix::refineToOnset (fileA, 1.0, formats), 1.0));   // nada a ±60 ms
+            CHECK (approx (mix::refineToOnset (mixFiles.getChildFile ("no-existe.wav"), 1.0, formats), 1.0));
+            double len = 0.0;
+            const auto peaks = mix::computePeaks (fileA, formats, 100, len);
+            CHECK (std::abs (len - 4.0) < 1.0e-6 && peaks.size() == 800);
+            if (peaks.size() == 800)
+            {
+                const float top = *std::max_element (peaks.begin(), peaks.end());
+                CHECK (std::abs (top - 0.8f) < 1.0e-3f);
+                CHECK (std::abs (peaks[25 * 2 + 1] - 0.8f) < 1.0e-3f && std::abs (peaks[30 * 2 + 1]) < 1.0e-9f && std::abs (peaks[30 * 2]) < 1.0e-9f);
+            }
+            const auto peaksB = mix::computePeaks (fileB, formats, 50, len);
+            CHECK (std::abs (len - 4.0) < 1.0e-6 && peaksB.size() == 400);
+            CHECK (mix::computePeaks (mixFiles.getChildFile ("no-existe.wav"), formats, 100, len).empty() && approx (len, 0.0));
+        }
+
+        std::cout << "  transponer acordes y tonalidades, análisis en JSON, la biblioteca ignora _mixes\n";
+        {
+            CHECK (music::transposeChord ("A#m7", 1) == "Bm7");
+            CHECK (music::transposeChord ("C/E", 2) == "D/F#");
+            CHECK (music::transposeChord ("N", 5) == "N");
+            CHECK (music::transposeChord ("B", -1) == "A#");
+            CHECK (music::transposeKey (tr ("La menor"), 2) == "Si menor");
+            CHECK (music::transposeKey ("Mib mayor", -1) == "Re mayor");
+            CHECK (music::transposeKey ("Mib mayor", 0) == "Mib mayor");
+
+            Analysis an;
+            an.beats = { { 0.5, 1 }, { 1.0, 2 }, { 1.5, 3 } };
+            an.chords = { { 0.0, 1.2, "Am" }, { 1.2, 2.0, "G7" } };
+            an.key = "Mib mayor";
+            an.meter = 3;
+            an.bpm = 97.5;
+            const auto back = Library::analysisFromVar (juce::JSON::parse (juce::JSON::toString (Library::analysisToVar (an))));
+            CHECK (back.beats.size() == 3 && approx (back.beats[1].seconds, 1.0) && back.beats[1].beatInBar == 2);
+            CHECK (back.chords.size() == 2 && back.chords[1].name == "G7" && approx (back.chords[1].start, 1.2) && approx (back.chords[1].end, 2.0));
+            CHECK (back.key == "Mib mayor" && back.meter == 3 && approx (back.bpm, 97.5));
+            CHECK (Library::analysisFromVar (juce::var()).isEmpty());
+
+            const auto libRoot = tmp.getChildFile ("lib-con-mixes");
+            Library withMixes (libRoot);
+            libRoot.getChildFile ("Cancion").createDirectory();
+            withMixes.mixesFolder().createDirectory();
+            writeSine (libRoot.getChildFile ("Cancion").getChildFile ("a.wav"), 44100.0, 0.5, 1);
+            writeSine (withMixes.mixesFolder().getChildFile ("suelto.wav"), 44100.0, 0.5, 1);   // audio directo en _mixes
+            MixProject::create (withMixes.mixesFolder(), "Un mix");
+            withMixes.load();
+            CHECK (withMixes.songs.size() == 1 && withMixes.songs[0].folder.getFileName() == "Cancion");
+        }
+    }
+
+    std::cout << "[Mix] un corte ajustado a la transiente justo después del tiempo conserva el 1 del compás\n";
+    {
+        MixProject late;
+        late.folder = tmp.getChildFile ("mix-corte-tarde");
+        MixSource lateSrc;
+        lateSrc.name = "A";
+        lateSrc.fileName = "a.wav";
+        lateSrc.length = 10.0;
+        for (int k = 0; k < 16; ++k)
+            lateSrc.analysis.beats.push_back ({ 1.0 + 0.5 * k, k % 4 + 1 });
+        lateSrc.analysis.bpm = 120.0;
+        late.sources.push_back (lateSrc);
+        MixSegment lateSeg;
+        lateSeg.source = 0;
+        lateSeg.start = 1.002;   // 2 ms después del tiempo 1 (lo que deja refineToOnset)
+        lateSeg.end = 5.0;
+        late.segments.push_back (lateSeg);
+        late.segments.push_back (lateSeg);   // el mismo tramo dos veces: la unión no duplica el 1
+        SongInfo lateSong;
+        mix::describeSong (late, lateSong);
+        const auto& lb = lateSong.analysis.beats;
+        CHECK (! lb.empty() && std::abs (lb.front().seconds) < 1.0e-9 && lb.front().beatInBar == 1);
+        CHECK (std::abs (lateSong.clickOffset) < 1.0e-9);
+        CHECK (lb.size() == 16);
+        bool evenSpacing = lb.size() == 16;
+        for (size_t k = 1; k < lb.size(); ++k)
+            evenSpacing = evenSpacing && std::abs (lb[k].seconds - lb[k - 1].seconds - 0.5) < 0.003;
+        CHECK (evenSpacing);
+        CHECK (lb.size() == 16 && lb[8].beatInBar == 1 && lb[7].beatInBar == 4);
     }
 
     engine.setSong (nullptr);

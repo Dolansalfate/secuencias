@@ -198,6 +198,19 @@ public:
 
     juce::File getRoot() const { return root; }
 
+    // Análisis en JSON (el mismo formato que "analysis" en song.json); lo usan también los mixes
+    static juce::var analysisToVar (const Analysis&);
+    static Analysis analysisFromVar (const juce::var&);
+
+    // Mixes en preparación (canciones originales + tramos): carpetas dentro de <raíz>/_mixes (MixProject)
+    static const char* mixesFolderName() { return "_mixes"; }
+    juce::File mixesFolder() const { return root.getChildFile (mixesFolderName()); }
+    // Carpetas de la raíz que no son canciones (bancos de golpes y mixes)
+    static bool isReservedFolder (const juce::File& f)
+    {
+        return f.getFileName() == banksFolderName() || f.getFileName() == mixesFolderName();
+    }
+
     // Bancos de golpes (sampler): carpetas con wav dentro de <raíz>/_bancos, compartidos por todas las canciones
     static const char* banksFolderName() { return "_bancos"; }
     juce::File banksFolder() const { return root.getChildFile (banksFolderName()); }

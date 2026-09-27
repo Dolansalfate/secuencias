@@ -206,6 +206,43 @@ void Analysis::replaceBeatsWithGrid (double fromSeconds, double toSeconds, doubl
     renumberBeats (from, meterIn, from + (int) grid.size());
 }
 
+juce::var Library::analysisToVar (const Analysis& a)
+{
+    auto* an = new juce::DynamicObject();
+    an->setProperty ("bpm", a.bpm);
+    an->setProperty ("meter", a.meter);
+    an->setProperty ("key", a.key);
+    juce::Array<juce::var> beats, chords;
+    for (auto& b : a.beats)
+        beats.add (juce::Array<juce::var> { b.seconds, b.beatInBar });
+    for (auto& c : a.chords)
+        chords.add (juce::Array<juce::var> { c.start, c.end, c.name });
+    an->setProperty ("beats", beats);
+    an->setProperty ("chords", chords);
+    return juce::var (an);
+}
+
+Analysis Library::analysisFromVar (const juce::var& v)
+{
+    Analysis a;
+    if (! v.isObject())
+        return a;
+    a.bpm   = juce::jmax (0.0, (double) v.getProperty ("bpm", 0.0));
+    a.meter = juce::jlimit (2, 7, (int) v.getProperty ("meter", 4));
+    a.key   = v.getProperty ("key", "").toString();
+    if (auto* arr = v.getProperty ("beats", juce::var()).getArray())
+        for (auto& b : *arr)
+            if (auto* pair = b.getArray(); pair != nullptr && pair->size() >= 2)
+                a.beats.push_back ({ juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, 7, (int) (*pair)[1]) });
+    if (auto* arr = v.getProperty ("chords", juce::var()).getArray())
+        for (auto& c : *arr)
+            if (auto* t = c.getArray(); t != nullptr && t->size() >= 3)
+                a.chords.push_back ({ juce::jmax (0.0, (double) (*t)[0]), juce::jmax (0.0, (double) (*t)[1]), (*t)[2].toString() });
+    std::sort (a.beats.begin(), a.beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
+    std::sort (a.chords.begin(), a.chords.end(), [] (const Chord& x, const Chord& y) { return x.start < y.start; });
+    return a;
+}
+
 static juce::String displayNameFor (const juce::String& base)
 {
     const auto b = base.toLowerCase();
@@ -221,6 +258,7 @@ static juce::String displayNameFor (const juce::String& base)
     if (b == "drums_hh")    return "Hi-hat";
     if (b == "drums_ride")  return "Ride";
     if (b == "drums_crash") return "Crash";
+    if (b == "mezcla")      return "Mezcla";
     return base;
 }
 
@@ -303,22 +341,7 @@ SongInfo Library::readSong (const juce::File& folder) const
 
         const auto analysis = json.getProperty ("analysis", juce::var());
         if (analysis.isObject())
-        {
-            auto& a = s.analysis;
-            a.bpm   = juce::jmax (0.0, (double) analysis.getProperty ("bpm", 0.0));
-            a.meter = juce::jlimit (2, 7, (int) analysis.getProperty ("meter", 4));
-            a.key   = analysis.getProperty ("key", "").toString();
-            if (auto* arr = analysis.getProperty ("beats", juce::var()).getArray())
-                for (auto& b : *arr)
-                    if (auto* pair = b.getArray(); pair != nullptr && pair->size() >= 2)
-                        a.beats.push_back ({ juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, 7, (int) (*pair)[1]) });
-            if (auto* arr = analysis.getProperty ("chords", juce::var()).getArray())
-                for (auto& c : *arr)
-                    if (auto* t = c.getArray(); t != nullptr && t->size() >= 3)
-                        a.chords.push_back ({ juce::jmax (0.0, (double) (*t)[0]), juce::jmax (0.0, (double) (*t)[1]), (*t)[2].toString() });
-            std::sort (a.beats.begin(), a.beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
-            std::sort (a.chords.begin(), a.chords.end(), [] (const Chord& x, const Chord& y) { return x.start < y.start; });
-        }
+            s.analysis = analysisFromVar (analysis);
 
         const auto markers = json.getProperty ("markers", juce::var());
         if (auto* arr = markers.getArray())
@@ -467,20 +490,7 @@ bool Library::saveSong (const SongInfo& s) const
     obj->setProperty ("keyOverride", s.keyOverride);
 
     if (! s.analysis.isEmpty())
-    {
-        auto* an = new juce::DynamicObject();
-        an->setProperty ("bpm", s.analysis.bpm);
-        an->setProperty ("meter", s.analysis.meter);
-        an->setProperty ("key", s.analysis.key);
-        juce::Array<juce::var> beats, chords;
-        for (auto& b : s.analysis.beats)
-            beats.add (juce::Array<juce::var> { b.seconds, b.beatInBar });
-        for (auto& c : s.analysis.chords)
-            chords.add (juce::Array<juce::var> { c.start, c.end, c.name });
-        an->setProperty ("beats", beats);
-        an->setProperty ("chords", chords);
-        obj->setProperty ("analysis", juce::var (an));
-    }
+    obj->setProperty ("analysis", analysisToVar (s.analysis));
 
     juce::Array<juce::var> markers;
     for (auto& m : s.markers)
@@ -600,7 +610,7 @@ void Library::load()
         for (auto& v : *arr)
         {
             auto folder = root.getChildFile (v.toString());
-            if (folder.isDirectory() && ! added.contains (folder.getFileName()) && folder.getFileName() != banksFolderName() && ! audioFilesIn (folder).isEmpty())
+            if (folder.isDirectory() && ! added.contains (folder.getFileName()) && ! isReservedFolder (folder) && ! audioFilesIn (folder).isEmpty())
             {
                 songs.push_back (readSong (folder));
                 added.add (folder.getFileName());
@@ -610,7 +620,7 @@ void Library::load()
     auto dirs = root.findChildFiles (juce::File::findDirectories, false);
     dirs.sort();
     for (auto& d : dirs)
-        if (! added.contains (d.getFileName()) && d.getFileName() != banksFolderName() && ! audioFilesIn (d).isEmpty())
+        if (! added.contains (d.getFileName()) && ! isReservedFolder (d) && ! audioFilesIn (d).isEmpty())
             songs.push_back (readSong (d));
 
     saveSetlist();
