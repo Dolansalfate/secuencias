@@ -171,6 +171,8 @@ public:
     // y los stems de `resultFolder` (temporales propios) se mueven a la carpeta de la canción; el
     // resto (marcadores, análisis, tempo, cortes) se conserva. El nivelado por pista se reinicia.
     bool replaceStems (int index, const juce::File& resultFolder);
+    // Igual, pero solo una pista (por ejemplo la batería, que pasa a ser sus partes)
+    bool replaceStem (int index, int stemIndex, const juce::File& resultFolder);
     int importProject (const juce::File& folder);
     bool exportSong (int index, const juce::File& destinationFolder) const;
     bool exportAll (const juce::File& destinationFolder) const;
@@ -189,5 +191,6 @@ public:
 
 private:
     SongInfo readSong (const juce::File& folder) const;
+    bool replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder);
     juce::File root;
 };

@@ -80,6 +80,10 @@ MainComponent::MainComponent()
     }
     stemsBox.onChange = [this] { props.getUserSettings()->setValue ("stems", stemsBox.getSelectedId()); };
     qualityBox.onChange = [this] { props.getUserSettings()->setValue ("quality", qualityBox.getSelectedId()); };
+    drumPartsBtn.setButtonText (tr ("Batería en partes"));
+    drumPartsBtn.setToggleState (props.getUserSettings()->getBoolValue ("drumParts", false), juce::dontSendNotification);
+    drumPartsBtn.onClick = [this] { props.getUserSettings()->setValue ("drumParts", drumPartsBtn.getToggleState()); };
+    addAndMakeVisible (drumPartsBtn);
     audioBtn.setButtonText ("Audio");
     audioBtn.onClick = [this] { showAudioSettings(); };
     aiBtn.setButtonText ("Ajustes IA");
@@ -449,6 +453,8 @@ void MainComponent::resized()
     stemsBox.setBounds (top.removeFromLeft (200));
     top.removeFromLeft (8);
     qualityBox.setBounds (top.removeFromLeft (190));
+    top.removeFromLeft (8);
+    drumPartsBtn.setBounds (top.removeFromLeft (150));
     aiBtn.setBounds (top.removeFromRight (100));
     top.removeFromRight (8);
     audioBtn.setBounds (top.removeFromRight (90));
@@ -2581,15 +2587,19 @@ void MainComponent::timerCallback()
         for (int i = 0; i < (int) library.songs.size(); ++i)
             if (library.songs[(size_t) i].folder == separationTarget)
                 target = i;
-        const bool ok = target >= 0 && library.replaceStems (target, separator.getResultFolder());
+        const bool drumsOnly = separationStemIndex >= 0;
+        const bool ok = target >= 0 && (drumsOnly ? library.replaceStem (target, separationStemIndex, separator.getResultFolder())
+                                                  : library.replaceStems (target, separator.getResultFolder()));
         const auto name = target >= 0 ? library.songs[(size_t) target].name : juce::String();
         separator.reset();
         separationTarget = juce::File();
+        separationStemIndex = -1;
         if (! ok)
             sepLabel.setText (tr ("No se pudieron reemplazar las pistas"), juce::dontSendNotification);
         else
         {
-            sepLabel.setText (tr ("«") + name + tr ("» separada: ") + juce::String ((int) library.songs[(size_t) target].stems.size()) + tr (" pistas"), juce::dontSendNotification);
+            sepLabel.setText (tr ("«") + name + (drumsOnly ? tr ("»: batería en partes, ") : tr ("» separada: "))
+                              + juce::String ((int) library.songs[(size_t) target].stems.size()) + tr (" pistas"), juce::dontSendNotification);
             if (target == currentIndex)
                 loadSongAt (currentIndex);   // recarga con los stems nuevos (con fundido si estaba sonando)
         }
@@ -2617,6 +2627,7 @@ void MainComponent::timerCallback()
     {
         separator.reset();
         separationTarget = juce::File();
+        separationStemIndex = -1;
         sepLabel.setText (tr ("Separación cancelada."), juce::dontSendNotification);
     }
     else if (st == Separator::State::failed)
@@ -2624,6 +2635,7 @@ void MainComponent::timerCallback()
         const auto msg = separator.getMessage();
         separator.reset();
         separationTarget = juce::File();
+        separationStemIndex = -1;
         sepLabel.setText ({}, juce::dontSendNotification);
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
                                                 tr ("No se pudo separar la canción"), msg);
@@ -2658,6 +2670,7 @@ SeparationOptions MainComponent::selectedOptions() const
     o.quality = juce::jlimit (0, 2, qualityBox.getSelectedId() - 1);
     // Con calidad alta o máxima, las voces se sacan con BS-Roformer si audio-separator está instalado
     o.roformerVocals = o.quality >= 1 && Separator::isRoformerAvailable (pythonPath());
+    o.drumParts = drumPartsBtn.getToggleState() && Separator::isRoformerAvailable (pythonPath());
     return o;
 }
 
@@ -2798,12 +2811,19 @@ void MainComponent::chooseSongToSeparate()
                                                "y conserva marcadores, análisis, tempo y cortes.\n\nTambién puedes elegir otro archivo, que se agrega como canción nueva."),
                                      juce::MessageBoxIconType::QuestionIcon, this);
     w->addButton (tr ("Separar «") + info->name + tr ("»"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    bool hasDrums = false;
+    for (auto& st : info->stems)
+        hasDrums = hasDrums || Analyzer::isDrumsTrack (st.name, st.fileName);
+    if (hasDrums && Separator::isRoformerAvailable (pythonPath()))
+        w->addButton (tr ("Solo la batería en partes"), 3);
     w->addButton (tr ("Elegir un archivo..."), 2);
     w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
     w->enterModalState (true, juce::ModalCallbackFunction::create ([this, pickFile] (int result)
     {
         if (result == 1)
             separateCurrentSong();
+        else if (result == 3)
+            separateDrumsOfCurrentSong();
         else if (result == 2)
             pickFile();
     }), true);
@@ -2837,9 +2857,47 @@ void MainComponent::separateCurrentSong()
         }
     }
     separationTarget = info->folder;
+    separationStemIndex = -1;
     startSeparation (input);
     if (separator.getState() != Separator::State::running)
         separationTarget = juce::File();
+}
+
+void MainComponent::separateDrumsOfCurrentSong()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || loadedFolder != info->folder)
+        return;
+    if (separator.getState() == Separator::State::running)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Separar", tr ("Ya hay una separación en curso. Espera a que termine."));
+        return;
+    }
+    int drumsIndex = -1;
+    for (int i = 0; i < (int) info->stems.size(); ++i)
+        if (Analyzer::isDrumsTrack (info->stems[(size_t) i].name, info->stems[(size_t) i].fileName))
+            drumsIndex = i;
+    if (drumsIndex < 0)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Separar", tr ("Esta canción no tiene una pista de batería separada."));
+        return;
+    }
+    const auto py = pythonPath();
+    if (! Separator::isRoformerAvailable (py))
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Falta audio-separator"),
+            tr ("Partir la batería usa el modelo DrumSep de audio-separator, que no está instalado (o falta ffmpeg).\n\n"
+                "Instálalo desde «Ajustes IA» > «Instalar también Roformer y DrumSep»."));
+        return;
+    }
+    const auto file = info->folder.getChildFile (info->stems[(size_t) drumsIndex].fileName);
+    separationTarget = info->folder;
+    separationStemIndex = drumsIndex;
+    if (! separator.startDrumParts (file, py, info->name))
+    {
+        separationTarget = juce::File();
+        separationStemIndex = -1;
+    }
 }
 
 void MainComponent::startSeparation (const juce::File& file)
@@ -2860,6 +2918,8 @@ void MainComponent::startSeparation (const juce::File& file)
         return;
     }
 
+    if (drumPartsBtn.getToggleState() && ! Separator::isRoformerAvailable (py))
+        sepLabel.setText (tr ("«Batería en partes» necesita audio-separator y ffmpeg (Ajustes IA > Instalar también Roformer y DrumSep): se separa sin partir la batería"), juce::dontSendNotification);
     separator.start (file, py, selectedOptions(), file.getFileNameWithoutExtension());
 }
 
@@ -2897,15 +2957,18 @@ void MainComponent::showAiSettings()
     juce::String estado = tr ("Demucs (separar): ") + (demucsOk ? tr ("instalado") : tr ("no encontrado")) + "\n"
                         + tr ("madmom (tempo y acordes): ") + (madmomOk ? tr ("instalado") : tr ("no encontrado")) + "\n\n"
                         + tr ("«Instalar» abre una terminal que crea los entornos de Python en tu usuario (tarda unos minutos y descarga varios GB). Se puede repetir sin problema.");
+    const bool separatorOk = Separator::isRoformerAvailable (pythonPath());
+    estado += tr ("\n\nRoformer y DrumSep (voces de mejor calidad y batería en partes, con audio-separator y ffmpeg): ") + (separatorOk ? tr ("instalados") : tr ("no encontrados"));
     auto* w = new juce::AlertWindow (tr ("Ajustes IA"), estado, juce::MessageBoxIconType::NoIcon, this);
     w->addButton (tr ("Instalar motores de IA"), 1);
+    w->addButton (tr ("Instalar también Roformer y DrumSep"), 3);
     w->addButton (tr ("Rutas de Python..."), 2);
     w->addButton ("Cerrar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
     w->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int result)
     {
-        if (result == 1)
+        if (result == 1 || result == 3)
         {
-            launchInstaller();
+            launchInstaller (result == 3);
             return;
         }
         if (result != 2)
@@ -2945,7 +3008,7 @@ juce::File MainComponent::installerScript() const
     return {};
 }
 
-void MainComponent::launchInstaller()
+void MainComponent::launchInstaller (bool withRoformer)
 {
     const auto script = installerScript();
     if (! script.existsAsFile())
@@ -2956,22 +3019,28 @@ void MainComponent::launchInstaller()
     }
     bool launched = false;
     juce::ChildProcess proc;
+    const juce::String extra = withRoformer ? " --roformer" : "";
    #if JUCE_MAC
-    const auto cmd = "bash " + script.getFullPathName().quoted();
+    const auto cmd = "bash " + script.getFullPathName().quoted() + extra;
     launched = proc.start (juce::StringArray { "osascript", "-e", "tell application \"Terminal\" to activate",
                                                "-e", "tell application \"Terminal\" to do script " + cmd.quoted() });
    #elif JUCE_WINDOWS
-    launched = proc.start ("powershell -NoExit -ExecutionPolicy Bypass -File " + script.getFullPathName().quoted());
+    launched = proc.start ("powershell -NoExit -ExecutionPolicy Bypass -File " + script.getFullPathName().quoted() + (withRoformer ? " -Roformer" : ""));
    #else
-    for (auto& term : { juce::StringArray { "x-terminal-emulator", "-e", "bash", script.getFullPathName() },
-                        juce::StringArray { "gnome-terminal", "--", "bash", script.getFullPathName() },
-                        juce::StringArray { "konsole", "-e", "bash", script.getFullPathName() },
-                        juce::StringArray { "xterm", "-e", "bash", script.getFullPathName() } })
-        if (proc.start (term))
+    juce::StringArray runArgs { "bash", script.getFullPathName() };
+    if (withRoformer)
+        runArgs.add ("--roformer");
+    for (auto& term : { juce::StringArray ("x-terminal-emulator", "-e") , juce::StringArray ("gnome-terminal", "--"),
+                        juce::StringArray ("konsole", "-e"), juce::StringArray ("xterm", "-e") })
+    {
+        juce::StringArray full (term);
+        full.addArray (runArgs);
+        if (proc.start (full))
         {
             launched = true;
             break;
         }
+    }
    #endif
     if (! launched)
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Ajustes IA"),

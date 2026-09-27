@@ -45,6 +45,13 @@ modelo que usa Moises).
   La pista "otros" siempre es el residuo exacto (mezcla menos las demás), así la suma de los
   stems reproduce la mezcla original. Si al terminar hay una canción sonando, la nueva solo se
   agrega al final del setlist (no se cambia de canción). Cancelar no muestra error.
+  **Batería en partes**: la casilla junto a la calidad añade una etapa final con el modelo
+  MDX23C DrumSep de audio-separator sobre `drums.wav`, que se reemplaza por bombo, caja, toms,
+  hi-hat, ride y crash (`drums_kick.wav`… traducidos por `displayNameFor`); "otros" absorbe la
+  pequeña diferencia entre la batería y la suma de sus partes. Para canciones ya separadas, el
+  diálogo de "Separar canción (IA)" ofrece "Solo la batería en partes" (`startDrumParts`,
+  `Library::replaceStem`: la batería pasa a `original/` y entran las partes). Ambas requieren
+  audio-separator y ffmpeg ("Ajustes IA" > "Instalar también Roformer y DrumSep").
 - Importar stems: varios archivos o una carpeta (o arrastrar varios archivos a la ventana).
   Formatos: wav, aiff, flac, mp3, ogg (m4a solo en macOS: JUCE no decodifica AAC en Linux).
 - **Vista de arreglo** (`TimelineView`): regla con marcadores (clic = ir, arrastrar = mover,
@@ -417,6 +424,10 @@ una lista de `SeparationStage` (herramienta, modelo, shifts, overlap, barras esp
   del que solo se toman guitarra y piano. No existe versión afinada del modelo de 6 pistas.
 - máxima: lo mismo con `--shifts 3 --overlap 0.5` (3 pasadas promediadas; unas 4,5 veces más
   lento; mejora modesta, del orden de 0,2 dB).
+- `drumParts`: etapa final `drumsep` con `audio-separator` y `MDX23C-DrumSep-aufr33-jarredou.ckpt`
+  (partes kick, snare, toms, hh, ride, crash; peso 1,5) sobre la batería elegida, en `run()`
+  después de armar `resultado/` y antes del residuo (`splitDrums`); `drumPartFileName` traduce
+  los nombres de salida. `startDrumParts` corre solo esa etapa sobre un archivo de batería.
 - `roformerVocals`: etapa previa con `audio-separator` y el modelo `vocals_mel_band_roformer.ckpt`
   (SDR 12,6 de voces, el mejor de su lista). Demucs corre después sobre el instrumental.
   Solo se activa si `isRoformerAvailable()`: existe `<venv>/bin/audio-separator` y hay `ffmpeg`
@@ -735,6 +746,10 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.3.8**: batería en partes (etapa `drumsep` con MDX23C DrumSep, casilla "Batería en
+  partes", "Solo la batería en partes" para canciones ya separadas, `startDrumParts`,
+  `replaceStem`, nombres Bombo/Caja/Toms/Hi-hat/Ride/Crash, botón "Instalar también Roformer y
+  DrumSep" en Ajustes IA, `--captura --bateria --separarbateria`).
 - **v0.3.7**: notas de texto (`SongNote`, `notes` en `song.json`, fila de notas de 96 px en la
   regla, `editNote` con editor multilínea, `activeNote` y letrero en la guía de escenario).
 - **v0.3.6**: tono por sección (`TempoRegion::transpose`, `TempoSegment::transpose`,

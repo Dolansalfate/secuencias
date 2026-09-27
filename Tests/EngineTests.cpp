@@ -731,6 +731,32 @@ int main()
         CHECK (std::abs (s2.analysis.chords[1].start - 1.5) < 1.0e-9 && std::abs (s2.analysis.chords[0].end - 1.0) < 1.0e-9);
     }
 
+    std::cout << "[Separator] bateria en partes: plan, nombres de las partes\n";
+    {
+        SeparationOptions o;
+        o.drumParts = true;
+        const auto plan = Separator::planFor (o);
+        CHECK (plan.size() == 2 && plan.back().tool == "drumsep" && plan.back().model.contains ("DrumSep"));
+        CHECK (Separator::describe (o).contains ("DrumSep") && Separator::describe (o).contains (tr ("6 partes")));
+        o.drumParts = false;
+        CHECK (Separator::planFor (o).size() == 1);
+        CHECK (Separator::drumPartFileName ("drums_(Kick)_MDX23C-DrumSep-aufr33-jarredou.wav") == "drums_kick.wav");
+        CHECK (Separator::drumPartFileName ("input_(HH)_MDX23C-DrumSep-aufr33-jarredou.wav") == "drums_hh.wav");
+        CHECK (Separator::drumPartFileName ("input_(crash)_x.wav") == "drums_crash.wav" && Separator::drumPartFileName ("input_(vocals)_x.wav").isEmpty());
+        // Los archivos de las partes se traducen al cargar la canción
+        auto folder = tmp.getChildFile ("partes");
+        folder.createDirectory();
+        for (auto* n : { "drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash" })
+            writeSine (folder.getChildFile (juce::String (n) + ".wav"), 44100.0, 0.1, 1);
+        Library lp (tmp);
+        lp.load();
+        const SongInfo* partes = nullptr;
+        for (auto& sng : lp.songs) if (sng.folder == folder) partes = &sng;
+        juce::StringArray names;
+        if (partes != nullptr) for (auto& st : partes->stems) names.add (st.name);
+        CHECK (partes != nullptr && names.contains ("Bombo") && names.contains ("Caja") && names.contains ("Toms") && names.contains ("Hi-hat") && names.contains ("Ride") && names.contains ("Crash"));
+    }
+
     std::cout << "[Separator] progreso de tqdm y modelos por bolsa\n";
     CHECK (Separator::parsePercent (" 43%|#####     | 3/7 [00:05<00:07,  1.85seconds/s]") == 43);
     CHECK (Separator::parsePercent ("100%|##########| 7/7 [00:12<00:00,  1.85seconds/s]") == 100);

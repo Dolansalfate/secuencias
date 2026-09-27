@@ -3,6 +3,8 @@
 
 namespace
 {
+    // Partes de batería: MDX23C DrumSep (aufr33 y jarredou) de audio-separator: bombo, caja, toms, hi-hat, ride y crash
+    const char* const drumSepModel = "MDX23C-DrumSep-aufr33-jarredou.ckpt";
     // Modelo de voces de audio-separator: Mel-Band Roformer de Kimberley Jensen, el de mejor SDR de
     // voces (12.6) en la lista de audio-separator 0.47. Pesa 913 MB y usa casi 4 GB de VRAM.
     const char* const roformerModel = "vocals_mel_band_roformer.ckpt";
@@ -93,6 +95,15 @@ std::vector<SeparationStage> Separator::planFor (const SeparationOptions& o)
         if (o.stems >= 6)
             plan.push_back (demucs ("htdemucs_6s"));   // guitarra y piano (no existe versión afinada)
     }
+    if (o.drumParts)
+    {
+        SeparationStage d;
+        d.tool = "drumsep";
+        d.model = drumSepModel;
+        d.passes = 1;
+        d.weight = 1.5;   // MDX23C sobre la pista de batería: rápido comparado con Demucs
+        plan.push_back (d);
+    }
     return plan;
 }
 
@@ -108,11 +119,13 @@ juce::String Separator::describe (const SeparationOptions& o)
 {
     juce::StringArray tools;
     for (auto& s : planFor (o))
-        tools.add (s.tool == "roformer" ? juce::String ("BS-Roformer") : s.model);
+        tools.add (s.tool == "roformer" ? juce::String ("BS-Roformer") : s.tool == "drumsep" ? juce::String ("DrumSep") : s.model);
     const juce::String quality = o.quality == 0 ? juce::String ("normal") : o.quality == 1 ? juce::String ("alta") : tr ("máxima");
     juce::String text = juce::String (o.stems) + " pistas, calidad " + quality + ": " + tools.joinIntoString (" + ");
     if (o.quality >= 2)
         text += " (3 pasadas promediadas)";
+    if (o.drumParts)
+        text += tr (", batería en 6 partes");
     return text;
 }
 
@@ -132,13 +145,47 @@ bool Separator::start (const juce::File& input, const juce::String& pythonPath,
     inputFile = input;
     python = pythonPath;
     options = opts;
-    if (options.roformerVocals && ! isRoformerAvailable (python))
-        options.roformerVocals = false;
+    drumsOnly = false;
+    if (! isRoformerAvailable (python))
+    {
+        options.roformerVocals = false;   // ambos requieren audio-separator y ffmpeg
+        options.drumParts = false;
+    }
     songName = name;
     progress = -1.0f;
     setStatus (State::running, tr ("Iniciando..."));
     startThread();
     return true;
+}
+
+bool Separator::startDrumParts (const juce::File& drumsFile, const juce::String& pythonPath, const juce::String& name)
+{
+    if (isThreadRunning() || getState() == State::running || ! isRoformerAvailable (pythonPath))
+        return false;
+    reset();
+    inputFile = drumsFile;
+    python = pythonPath;
+    options = {};
+    options.drumParts = true;
+    drumsOnly = true;
+    songName = name;
+    progress = -1.0f;
+    setStatus (State::running, tr ("Iniciando..."));
+    startThread();
+    return true;
+}
+
+juce::String Separator::drumPartFileName (const juce::String& out)
+{
+    const auto n = out.toLowerCase();
+    // audio-separator nombra "<entrada>_(Kick)_<modelo>.wav"
+    const std::pair<const char*, const char*> parts[] = { { "(kick)", "drums_kick.wav" }, { "(snare)", "drums_snare.wav" },
+                                                          { "(toms)", "drums_toms.wav" }, { "(hh)", "drums_hh.wav" },
+                                                          { "(ride)", "drums_ride.wav" }, { "(crash)", "drums_crash.wav" } };
+    for (const auto& part : parts)
+        if (n.contains (part.first))
+            return part.second;
+    return {};
 }
 
 void Separator::cancel()
@@ -426,6 +473,22 @@ bool Separator::runStage (const SeparationStage& stage, const juce::File& input,
         return true;
     }
 
+    if (stage.tool == "drumsep")
+    {
+        setStatus (State::running, tr ("Partiendo la batería con DrumSep... (la primera vez descarga el modelo)"));
+        juce::StringArray args { audioSeparatorExe (python).getFullPathName(), input.getFullPathName(),
+                                 "--model_filename", stage.model,
+                                 "--model_file_dir", roformerModelDir().getFullPathName(),
+                                 "--output_dir", outDir.getFullPathName(),
+                                 "--output_format", "WAV",
+                                 "--normalization", "1.0",
+                                 "--mdxc_batch_size", "1" };
+        if (! runProcess (args, stage.passes))
+            return false;
+        resultDir = outDir;
+        return true;
+    }
+
     setStatus (State::running, tr ("Separando con ") + stage.model + tr ("... (la primera vez descarga el modelo)"));
     juce::StringArray args { python, "-u", "-m", "demucs", "-n", stage.model,
                              "--shifts", juce::String (stage.shifts),
@@ -443,6 +506,43 @@ bool Separator::runStage (const SeparationStage& stage, const juce::File& input,
         while (lines.size() > 12)
             lines.remove (0);
         setStatus (State::failed, tr ("Demucs no dejó stems en ") + resultDir.getFullPathName() + "\n\n" + lines.joinIntoString ("\n"));
+        return false;
+    }
+    return true;
+}
+
+bool Separator::splitDrums (const juce::File& drums, const juce::File& outDir, juce::Array<juce::File>& chosen)
+{
+    SeparationStage d;
+    d.tool = "drumsep";
+    d.model = drumSepModel;
+    d.passes = 1;
+    juce::File resultDir;
+    if (! runStage (d, drums, outDir, resultDir))
+        return false;
+    int found = 0;
+    for (auto& f : Library::audioFilesIn (resultDir))
+    {
+        const auto name = drumPartFileName (f.getFileName());
+        if (name.isEmpty())
+            continue;
+        const auto dest = resultFolder.getChildFile (name);
+        if (! f.moveFileTo (dest))
+        {
+            setStatus (State::failed, tr ("No se pudo mover ") + f.getFileName());
+            return false;
+        }
+        chosen.add (dest);
+        ++found;
+    }
+    if (found == 0)
+    {
+        juce::StringArray lines (log);
+        lines.trim();
+        lines.removeEmptyStrings();
+        while (lines.size() > 12)
+            lines.remove (0);
+        setStatus (State::failed, tr ("DrumSep no dejó las partes de la batería.\n\n") + lines.joinIntoString ("\n"));
         return false;
     }
     return true;
@@ -471,6 +571,23 @@ void Separator::run()
         return;
     }
 
+    resultFolder = workDir.getChildFile ("resultado");
+    resultFolder.createDirectory();
+
+    if (drumsOnly)
+    {
+        // Solo partir una batería ya separada: una etapa, sin residuo (el resto de la canción no cambia)
+        totalWeight = stageWeight = 1.0;
+        stageOffset = 0.0;
+        progress = 0.0f;
+        juce::Array<juce::File> parts;
+        if (! splitDrums (mixFile, workDir.getChildFile ("etapa1"), parts))
+            return;
+        progress = 1.0f;
+        setStatus (State::done, tr ("Batería en partes lista."));
+        return;
+    }
+
     // 2) Etapas
     const auto plan = planFor (options);
     totalWeight = 0.0;
@@ -483,6 +600,8 @@ void Separator::run()
     int stageIndex = 0;
     for (auto& stage : plan)
     {
+        if (stage.tool == "drumsep")
+            continue;   // se ejecuta al final, sobre la pista de batería elegida
         stageWeight = stage.weight;
         progress = (float) (stageOffset / totalWeight);
         juce::File resultDir;
@@ -528,8 +647,6 @@ void Separator::run()
 
     // 3) Carpeta final: mover las pistas elegidas y calcular "otros" = mezcla - resto
     setStatus (State::running, tr ("Armando las pistas..."));
-    resultFolder = workDir.getChildFile ("resultado");
-    resultFolder.createDirectory();
     juce::Array<juce::File> chosen;
     const std::pair<juce::File*, const char*> picks[] = { { &vocals, "vocals.wav" }, { &drums, "drums.wav" },
                                                           { &bass, "bass.wav" }, { &guitar, "guitar.wav" },
@@ -545,6 +662,25 @@ void Separator::run()
             return;
         }
         chosen.add (dest);
+    }
+    if (options.drumParts && resultFolder.getChildFile ("drums.wav").existsAsFile())
+    {
+        // Batería en partes: DrumSep sobre drums.wav; las partes reemplazan a la batería y "otros"
+        // absorbe la pequeña diferencia entre la batería y la suma de sus partes
+        stageWeight = 1.5;
+        progress = (float) (stageOffset / totalWeight);
+        const auto drumsFile = resultFolder.getChildFile ("drums.wav");
+        const auto drumsInput = workDir.getChildFile ("bateria").getChildFile ("drums.wav");
+        drumsInput.getParentDirectory().createDirectory();
+        if (! drumsFile.moveFileTo (drumsInput))
+        {
+            setStatus (State::failed, tr ("No se pudo mover drums.wav"));
+            return;
+        }
+        chosen.removeAllInstancesOf (drumsFile);
+        if (! splitDrums (drumsInput, workDir.getChildFile ("etapa_bateria"), chosen))
+            return;
+        stageOffset += 1.5;
     }
     if (chosen.isEmpty())
     {

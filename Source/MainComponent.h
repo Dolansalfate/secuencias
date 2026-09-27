@@ -48,6 +48,8 @@ public:
     void editForCapture (double cutSeconds, double moveMs);   // corta los stems y desplaza el tramo que sigue (herramienta de captura)
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
+    void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
+    void setDrumPartsForCapture (bool on)                     { drumPartsBtn.setToggleState (on, juce::dontSendNotification); }
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
@@ -205,7 +207,7 @@ private:
     void showAudioSettings();
     void showAiSettings();
     juce::File installerScript() const;   // scripts/instalar-ia.sh: en el bundle (macOS), /opt/secuencias, ~/.local/share o el árbol de desarrollo
-    void launchInstaller();               // abre una terminal con el instalador de los motores de IA
+    void launchInstaller (bool withRoformer = false);   // abre una terminal con el instalador de los motores de IA
     juce::String pythonPath() const;
     SeparationOptions selectedOptions() const;
     void askText (const juce::String& title, const juce::String& initial,
@@ -243,6 +245,7 @@ private:
     // --- UI ---
     juce::TextButton importBtn, separateBtn, audioBtn, aiBtn, cancelSepBtn;
     juce::ComboBox stemsBox, qualityBox;
+    juce::ToggleButton drumPartsBtn;           // "Batería en partes" al separar
     juce::ProgressBar sepBar { sepProgress };
     juce::Label sepLabel;
 
@@ -279,6 +282,7 @@ private:
     std::unique_ptr<StageWindow> stageWindow;
     juce::TextButton stageBtn;
     juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
+    int separationStemIndex = -1;              // >= 0: solo esa pista (la batería) se reemplaza por el resultado
     ClipClipboard clipboard;
 
     std::atomic<bool> abortJobs { false };

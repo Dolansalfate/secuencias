@@ -83,7 +83,12 @@ El mismo código sigue compilando en macOS.
   primer golpe encajan en el tiempo más cercano.
 - **Separar canción (IA)**: separa la canción seleccionada (sus pistas se reemplazan por los
   stems y se conservan marcadores, análisis, tempo y cortes; el audio anterior queda en la
-  subcarpeta "original") o un archivo que elijas, que se agrega al setlist,
+  subcarpeta "original") o un archivo que elijas, que se agrega al setlist. Con la casilla
+  "Batería en partes", la batería sale además dividida en bombo, caja, toms, hi-hat, ride y
+  crash; y en una canción ya separada, el mismo botón ofrece "Solo la batería en partes".
+  Bombo y caja salen bien; toms, hi-hat y platillos se mezclan más entre sí. Requiere la
+  instalación opcional de audio-separator ("Ajustes IA" > "Instalar también Roformer y
+  DrumSep"). La separación normal
   con tres niveles de calidad. En calidad alta y máxima las voces se sacan con Roformer, y
   la pista "otros" es exactamente lo que falta para reconstruir la mezcla original.
 - Fundidos automáticos al dar play, stop, saltar, cerrar el loop y cambiar de canción (sin clics).

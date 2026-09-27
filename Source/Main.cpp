@@ -17,15 +17,21 @@ public:
 
         // --captura=/ruta/imagen.png [--cancion=N] [--vivo] [--analizar]: carga la canción N del setlist
         // (desde 1), espera a que termine de cargar (y de analizar, si se pide), guarda la ventana como PNG y sale
+        // Banderas exactas: "--separar" no debe coincidir con "--separarbateria"
+        juce::StringArray tokens;
+        tokens.addTokens (commandLine, " ", "\"");
+        auto hasFlag = [&tokens] (const char* flag) { return tokens.contains (flag); };
         if (commandLine.contains ("--captura="))
         {
             const auto path = commandLine.fromFirstOccurrenceOf ("--captura=", false, false)
                                          .upToFirstOccurrenceOf (" ", false, false).unquoted();
-            const bool live = commandLine.contains ("--vivo");
-            captureAnalyze = commandLine.contains ("--analizar");
-            captureLevel = commandLine.contains ("--nivelar");
-            captureSeparate = commandLine.contains ("--separar");
-            captureSelector = commandLine.contains ("--selector");
+            const bool live = hasFlag ("--vivo");
+            captureAnalyze = hasFlag ("--analizar");
+            captureLevel = hasFlag ("--nivelar");
+            captureSeparate = hasFlag ("--separar");
+            captureSelector = hasFlag ("--selector");
+            captureDrumParts = hasFlag ("--bateria");
+            captureSeparateDrums = hasFlag ("--separarbateria");
             if (commandLine.contains ("--posicion="))
                 capturePosition = commandLine.fromFirstOccurrenceOf ("--posicion=", false, false).getDoubleValue();
             if (commandLine.contains ("--escenario="))
@@ -70,7 +76,9 @@ public:
             if (captureAnalyze) mc->analyzeCurrentSong();
             if (captureLevel)   mc->levelCurrentSong();
             if (captureQuality > 0 || captureStems > 0) mc->setSeparationOptionsForCapture (captureStems, captureQuality);
+            if (captureDrumParts) mc->setDrumPartsForCapture (true);
             if (captureSeparate) mc->separateCurrentSong();
+            if (captureSeparateDrums) mc->separateDrumsOfCurrentSong();
             if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
             if (capturePosition > 0.0) mc->seekForCapture (capturePosition);
             if (captureStageFile != juce::File()) mc->showStage (true);
@@ -157,6 +165,7 @@ private:
     CaptureTimer captureTimer { *this };
     juce::File captureFile, captureStageFile;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
+    bool captureDrumParts = false, captureSeparateDrums = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;

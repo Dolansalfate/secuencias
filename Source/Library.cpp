@@ -215,6 +215,12 @@ static juce::String displayNameFor (const juce::String& base)
     if (b == "other")  return "Otros";
     if (b == "guitar") return "Guitarra";
     if (b == "piano")  return "Piano";
+    if (b == "drums_kick")  return "Bombo";
+    if (b == "drums_snare") return "Caja";
+    if (b == "drums_toms")  return "Toms";
+    if (b == "drums_hh")    return "Hi-hat";
+    if (b == "drums_ride")  return "Ride";
+    if (b == "drums_crash") return "Crash";
     return base;
 }
 
@@ -638,14 +644,31 @@ int Library::importProject (const juce::File& folder)
 
 bool Library::replaceStems (int index, const juce::File& resultFolder)
 {
+    return replaceStemFiles (index, -1, resultFolder);
+}
+
+bool Library::replaceStem (int index, int stemIndex, const juce::File& resultFolder)
+{
+    return replaceStemFiles (index, stemIndex, resultFolder);
+}
+
+bool Library::replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder)
+{
     if (! juce::isPositiveAndBelow (index, (int) songs.size()) || audioFilesIn (resultFolder).isEmpty())
         return false;
     const auto folder = songs[(size_t) index].folder;
     const auto originals = folder.getChildFile ("original");
     if (! originals.createDirectory())
         return false;
-    for (auto& f : audioFilesIn (folder))
-        if (! f.moveFileTo (originals.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
+    juce::Array<juce::File> toMove;
+    if (onlyStem < 0)
+        toMove = audioFilesIn (folder);
+    else if (juce::isPositiveAndBelow (onlyStem, (int) songs[(size_t) index].stems.size()))
+        toMove.add (folder.getChildFile (songs[(size_t) index].stems[(size_t) onlyStem].fileName));
+    else
+        return false;
+    for (auto& f : toMove)
+        if (f.existsAsFile() && ! f.moveFileTo (originals.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
             return false;
     for (auto& f : audioFilesIn (resultFolder))
         if (! f.moveFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
