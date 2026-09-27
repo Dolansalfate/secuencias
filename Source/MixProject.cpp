@@ -248,14 +248,29 @@ juce::StringArray MixProject::list (const juce::File& mixesRoot)
     return names;
 }
 
+std::vector<MixProject::ListEntry> MixProject::entries (const juce::File& mixesRoot)
+{
+    std::vector<ListEntry> out;
+    for (auto& folderName : list (mixesRoot))
+    {
+        const auto folder = mixesRoot.getChildFile (folderName);
+        auto name = juce::JSON::parse (folder.getChildFile ("mix.json")).getProperty ("name", "").toString().trim();
+        out.push_back ({ folder, name.isEmpty() ? folderName : name });
+    }
+    std::stable_sort (out.begin(), out.end(), [] (const ListEntry& a, const ListEntry& b)
+    {
+        const int c = a.name.compareIgnoreCase (b.name);
+        return c != 0 ? c < 0 : a.folder.getFileName().compareIgnoreCase (b.folder.getFileName()) < 0;
+    });
+    return out;
+}
+
 juce::File MixProject::create (const juce::File& mixesRoot, const juce::String& nameIn)
 {
     auto display = nameIn.trim();
     if (display.isEmpty())
         display = "Mix";
-    auto legal = juce::File::createLegalFileName (display).trim().trimCharactersAtStart (".").trim();
-    if (legal.isEmpty())
-        legal = "Mix";
+    const auto legal = Library::legalFolderName (display, "Mix");
     if (! mixesRoot.createDirectory().wasOk())
         return {};
     const auto dir = mixesRoot.getNonexistentChildFile (legal, "", false);

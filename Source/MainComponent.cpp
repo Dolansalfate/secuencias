@@ -3118,17 +3118,25 @@ MainComponent::MixSnapshot MainComponent::mixSnapshot() const
 
 void MainComponent::mixMenu()
 {
-    const auto names = MixProject::list (library.mixesFolder());
+    const auto list = MixProject::entries (library.mixesFolder());
+    // Nombre visible; si dos se llaman igual, también la carpeta para distinguirlos
+    auto labelOf = [&list] (size_t i)
+    {
+        int same = 0;
+        for (auto& e : list)
+            same += e.name == list[i].name ? 1 : 0;
+        return same > 1 ? list[i].name + " (" + list[i].folder.getFileName() + ")" : list[i].name;
+    };
     juce::PopupMenu m;
     m.addItem (1, tr ("Mix nuevo..."));
-    if (! names.isEmpty())
+    if (! list.empty())
     {
         m.addSectionHeader (tr ("Abrir un mix"));
-        for (int i = 0; i < names.size(); ++i)
-            m.addItem (100 + i, names[i], true, mixProject != nullptr && mixProject->folder.getFileName() == names[i]);
+        for (size_t i = 0; i < list.size(); ++i)
+            m.addItem (100 + (int) i, labelOf (i), true, mixProject != nullptr && mixProject->folder == list[i].folder);
         juce::PopupMenu del;
-        for (int i = 0; i < names.size(); ++i)
-            del.addItem (1000 + i, names[i]);
+        for (size_t i = 0; i < list.size(); ++i)
+            del.addItem (1000 + (int) i, labelOf (i));
         m.addSeparator();
         m.addSubMenu (tr ("Borrar un mix"), del);
     }
@@ -3137,15 +3145,26 @@ void MainComponent::mixMenu()
         m.addSeparator();
         m.addItem (2, tr ("Cerrar el mix"));
     }
+    // Nombre propuesto para uno nuevo: "Mix N" que no exista
+    juce::String proposed;
+    for (int n = (int) list.size() + 1; proposed.isEmpty(); ++n)
+    {
+        const auto candidate = "Mix " + juce::String (n);
+        bool used = false;
+        for (auto& e : list)
+            used = used || e.name.equalsIgnoreCase (candidate) || e.folder.getFileName().equalsIgnoreCase (candidate);
+        if (! used)
+            proposed = candidate;
+    }
     juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&mixBtn), [safe, names] (int result)
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&mixBtn), [safe, list, proposed] (int result)
     {
         auto* self = safe.getComponent();
         if (self == nullptr || result == 0)
             return;
         if (result == 1)
         {
-            self->askText (tr ("Nombre del mix"), "Mix " + juce::String (names.size() + 1), [safe] (const juce::String& name)
+            self->askText (tr ("Nombre del mix"), proposed, [safe] (const juce::String& name)
             {
                 auto* s2 = safe.getComponent();
                 if (s2 == nullptr || name.trim().isEmpty())
@@ -3161,23 +3180,23 @@ void MainComponent::mixMenu()
         }
         else if (result == 2)
             self->closeMix (true);
-        else if (result >= 100 && result < 100 + names.size())
-            self->openMix (self->library.mixesFolder().getChildFile (names[result - 100]));
-        else if (result >= 1000 && result < 1000 + names.size())
+        else if (result >= 100 && result < 100 + (int) list.size())
+            self->openMix (list[(size_t) (result - 100)].folder);
+        else if (result >= 1000 && result < 1000 + (int) list.size())
         {
-            const auto folder = self->library.mixesFolder().getChildFile (names[result - 1000]);
+            const auto entry = list[(size_t) (result - 1000)];
             juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, tr ("¿Borrar el mix?"),
-                tr ("«") + folder.getFileName() + tr ("» (sus canciones originales copiadas y tramos) se moverá a la papelera. Las canciones ya creadas con él no se tocan."),
-                "Borrar", "Cancelar", self, juce::ModalCallbackFunction::create ([safe, folder] (int ok)
+                tr ("«") + entry.name + tr ("» (sus canciones originales copiadas y tramos) se moverá a la papelera. Las canciones ya creadas con él no se tocan."),
+                "Borrar", "Cancelar", self, juce::ModalCallbackFunction::create ([safe, entry] (int ok)
                 {
                     auto* s2 = safe.getComponent();
                     if (s2 == nullptr || ok == 0)
                         return;
-                    if (s2->mixProject != nullptr && s2->mixProject->folder == folder)
+                    if (s2->mixProject != nullptr && s2->mixProject->folder == entry.folder)
                         s2->closeMix (true);
-                    if (! folder.moveToTrash() && folder.isDirectory())
+                    if (! Library::sendToTrash (entry.folder) && entry.folder.isDirectory())
                         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Borrar el mix"),
-                                                                tr ("No se pudo mover a la papelera:\n") + folder.getFullPathName());
+                                                                tr ("No se pudo mover a la papelera:\n") + entry.folder.getFullPathName());
                 }));
         }
     });
@@ -3214,6 +3233,8 @@ void MainComponent::openMix (const juce::File& folder)
         unloadSong();
     else
         engine.pause();
+    // Sin fila elegida: un clic en cualquier canción (también en la que estaba) cierra el mix y la carga
+    setlist.deselectAllRows();
     ++mixPlayRequest;
     // Un análisis de otro mix (cancelado al cerrarlo) no debe tomarse como de este
     if (mixAnalyzer.getState() != Analyzer::State::running)
@@ -3270,6 +3291,7 @@ void MainComponent::openMix (const juce::File& folder)
         {
             mixProject->name = newName.trim();   // la carpeta conserva su nombre (los trabajos en curso la usan)
             mixProject->save();
+            sepLabel.setText (tr ("Armando el mix «") + mixProject->name + tr ("»"), juce::dontSendNotification);
         }
     };
     ed->refineCut = [this] (int s, double t)
@@ -3349,6 +3371,7 @@ void MainComponent::closeMix (bool reloadSong)
             sp->mixPreviewSong.reset();
         });
     }
+    restoreSetlistSelection();   // la fila de la canción a la que se volvió (o ninguna)
     resized();
     sepLabel.setText ({}, juce::dontSendNotification);
 }
@@ -3671,8 +3694,12 @@ void MainComponent::applyMixPreviewGrid (const Analysis& a)
     engine.setClick (mixClick, a.bpm > 0.0 ? a.bpm : 120.0, 0.0, -6.0f, 0);
 }
 
-void MainComponent::setMixPreview (std::shared_ptr<LoadedSong> song, int kind, const juce::String& sourceFile, const Analysis& grid, double from, int request)
+void MainComponent::setMixPreview (std::shared_ptr<LoadedSong> song, int kind, const juce::String& sourceFile, const Analysis& grid, double from,
+                                   int request, int version)
 {
+    // Una carga vieja (llegó otra escucha, un Stop o se cerró el mix) no toca lo que suena
+    if (request != mixPlayRequest)
+        return;
     if (song == nullptr || song->tracks.empty())
     {
         if (mixEditor != nullptr)
@@ -3683,21 +3710,34 @@ void MainComponent::setMixPreview (std::shared_ptr<LoadedSong> song, int kind, c
     engine.pause();
     const int gen = mixGeneration.load();
     juce::Component::SafePointer<MainComponent> safe (this);
-    afterFadeOut ([safe, song, kind, sourceFile, grid, from, gen, request]
+    afterFadeOut ([safe, song, kind, sourceFile, grid, from, gen, request, version]
     {
         auto* self = safe.getComponent();
-        if (self == nullptr || gen != self->mixGeneration.load() || self->mixEditor == nullptr)
+        if (self == nullptr || gen != self->mixGeneration.load() || self->mixEditor == nullptr || request != self->mixPlayRequest)
             return;
+        if (std::abs (song->sampleRate - self->engine.getSampleRate()) > 1.0)
+        {
+            // Se cargó a la frecuencia anterior del dispositivo: se vuelve a pedir a la actual
+            if (kind == 1)
+            {
+                const int index = self->mixSourceIndex (sourceFile);
+                if (index >= 0)
+                    self->playMixSource (index, from);
+            }
+            else
+                self->playMix (from);
+            return;
+        }
         self->engine.setSong (song);
         self->engine.setMasterGain (1.0f);
         self->engine.setSongGain (1.0f);
         self->mixPreviewSong = song;
         self->mixPreviewKind = kind;
         self->mixPreviewSourceFile = sourceFile;
+        self->mixPreviewVersion = kind == 2 ? version : -1;   // recién ahora es lo que está en el motor
         self->applyMixPreviewGrid (grid);
         self->engine.seekSeconds (juce::jmax (0.0, from));
-        if (request == self->mixPlayRequest)
-            self->engine.play();   // si entretanto se pidió Stop u otra escucha, queda cargado sin sonar
+        self->engine.play();
     });
 }
 
@@ -3760,7 +3800,7 @@ void MainComponent::playMixSource (int source, double from)
             if (self->mixEditor != nullptr)
                 self->mixEditor->setStatus ({});
             // Los tiempos más recientes de la fuente (pudieron editarse mientras se cargaba)
-            self->setMixPreview (song, 1, fileName, self->mixProject->sources[(size_t) index].analysis, from, request);
+            self->setMixPreview (song, 1, fileName, self->mixProject->sources[(size_t) index].analysis, from, request, -1);
         });
     });
 }
@@ -3867,6 +3907,10 @@ void MainComponent::renderMix (std::function<void (bool)> then)
             }
             if (then)
                 then (ok);
+            // Una escucha pedida mientras se preparaba (y que sigue siendo la última) suena ahora
+            const int wanted = std::exchange (self->mixWantedPlay, 0);
+            if (ok && wanted != 0 && wanted == self->mixPlayRequest && self->mixEditor != nullptr)
+                self->playMix (self->mixWantedFrom);
         });
     });
 }
@@ -3883,13 +3927,23 @@ void MainComponent::playMix (double from)
         engine.play();
         return;
     }
+    if (mixRendering)
+    {
+        // Ya se está preparando (por otra escucha o por "Crear canción"): suena al terminar
+        mixWantedPlay = request;
+        mixWantedFrom = from;
+        if (mixEditor != nullptr)
+            mixEditor->setStatus (tr ("Preparando el mix: suena en cuanto esté listo..."));
+        return;
+    }
     const int gen = mixGeneration.load();
     juce::Component::SafePointer<MainComponent> safe (this);
     renderMix ([safe, from, gen, request] (bool ok)
     {
         auto* self = safe.getComponent();
-        if (self == nullptr || ! ok || gen != self->mixGeneration.load() || self->mixProject == nullptr)
-            return;
+        if (self == nullptr || ! ok || gen != self->mixGeneration.load() || self->mixProject == nullptr
+            || request != self->mixPlayRequest)
+            return;   // entretanto se pidió otra escucha o Stop
         SongInfo info;
         info.folder = self->mixProject->folder;
         StemInfo st;
@@ -3908,8 +3962,7 @@ void MainComponent::playMix (double from)
                 auto* s2 = safe.getComponent();
                 if (s2 == nullptr || gen != s2->mixGeneration.load())
                     return;
-                s2->mixPreviewVersion = version;
-                s2->setMixPreview (song, 2, {}, s2->mixRenderedInfo.analysis, from, request);
+                s2->setMixPreview (song, 2, {}, s2->mixRenderedInfo.analysis, from, request, version);
             });
         });
     });

@@ -752,6 +752,10 @@ Pasos de `run()`:
 - Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, sources: [{ name, file, length,
   analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats }] }`),
   `fuentes/` (copias de las canciones originales) y `mezcla.wav` (último render, 44,1 kHz, 24 bits).
+  La carpeta es la identidad del mix (`Library::legalFolderName`: sin puntos ni espacios al final,
+  que Windows quitaría); el nombre visible es el `name` de mix.json (renombrar no mueve la carpeta)
+  y `MixProject::entries` lo lee para el menú "Armar mix" (abrir y borrar van por carpeta; borrar
+  usa `Library::sendToTrash`, con `gio trash` en Linux).
   `Library::isReservedFolder` hace que `load()` no tome `_mixes` ni `_bancos` como canciones; el
   análisis se guarda con `Library::analysisToVar` / `analysisFromVar` (el mismo formato de song.json).
 - Tiempo: un tramo va de un tiempo detectado (`start`) al tiempo siguiente al último incluido
@@ -787,8 +791,12 @@ Pasos de `run()`:
   `mixRenderedInfo` (describeSong del render); `playMix` / `playMixSource` cargan el render o la
   fuente con `AudioEngine::loadSong` a la frecuencia del dispositivo y `setMixPreview` los pone en el
   motor con fundido, con su `BeatGrid` y el click si está pedido; la fuente que suena se guarda
-  por archivo (`mixPreviewSourceFile`), y `mixPlayRequest` evita que una carga vieja arranque
-  después de un Stop. Si cambia la frecuencia del dispositivo, `dropMixPreview` descarta lo
+  por archivo (`mixPreviewSourceFile`), y `mixPlayRequest` hace que una carga vieja (tras otra
+  escucha, un Stop o un cierre) no toque el motor; `mixPreviewVersion` se fija recién al instalar
+  el render, y si lo cargado quedó a otra frecuencia del dispositivo se vuelve a pedir. Pedir
+  escuchar el mix mientras se prepara (por otra escucha o por "Crear canción") queda en
+  `mixWantedPlay` y suena al terminar el render. Al abrir el mix se quita la selección del
+  setlist (un clic en cualquier canción, también la de antes, cierra el mix y la carga). Si cambia la frecuencia del dispositivo, `dropMixPreview` descarta lo
   cargado. `mixGeneration` (atómico) invalida los trabajos de un mix cerrado. `createSongFromMix` / `startMixSong`: separar copia
   el render a un temporal (`pendingMixInput`), guarda `pendingMixSong` y llama a
   `startSeparation (archivo, nombre)`; al terminar la separación, `applyMixSongInfo` pone los
@@ -1012,6 +1020,9 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   por fuente (`mixAnalyzerFile`), `mixPool`, `mixReturnFolder`, `mixPlayRequest`, fuentes
   arrastradas al mix, sin saturar el render, tiempos pegados a la unión (el "1" que queda justo
   antes de un corte ajustado a la transiente) y deduplicación en uniones a medio tiempo.
+  Segunda ronda: `mixWantedPlay`, versión de la escucha al instalar, frecuencia del dispositivo,
+  `MixProject::entries` (nombre visible en el menú), `Library::sendToTrash` público y
+  `legalFolderName` (también para las canciones importadas), selección del setlist con el mix abierto.
   Arreglado de paso: el analizador escribía su script de Python sin convertirlo desde UTF-8.
 - **v0.5.1**: el diálogo "Grabar" ofrece los dos destinos (pista nueva o banco de muestras);
   `SampleBankData::preRoll` y `trimHit` uniforme para que el ataque de cada muestra caiga

@@ -639,7 +639,7 @@ juce::StringArray Library::listBanks() const
 int Library::importStemFiles (const juce::Array<juce::File>& files, const juce::String& songName, bool moveFiles)
 {
     auto name = songName.trim().isEmpty() ? tr ("Nueva canción") : songName.trim();
-    auto folder = root.getNonexistentChildFile (juce::File::createLegalFileName (name), "", false);
+    auto folder = root.getNonexistentChildFile (legalFolderName (name, "Cancion"), "", false);
     if (! folder.createDirectory())
         return -1;
 
@@ -682,7 +682,7 @@ int Library::importProject (const juce::File& folder)
 {
     if (! isProjectFolder (folder))
         return -1;
-    const auto dest = root.getNonexistentChildFile (juce::File::createLegalFileName (folder.getFileName()), "", false);
+    const auto dest = root.getNonexistentChildFile (legalFolderName (folder.getFileName(), "Cancion"), "", false);
     if (! folder.copyDirectoryTo (dest))
     {
         dest.deleteRecursively();
@@ -767,7 +767,14 @@ bool Library::exportAll (const juce::File& destination) const
     return ok;
 }
 
-static bool sendToTrash (const juce::File& folder)
+juce::String Library::legalFolderName (const juce::String& name, const juce::String& fallback)
+{
+    const auto legal = juce::File::createLegalFileName (name.trim()).trim()
+                           .trimCharactersAtStart (". ").trimCharactersAtEnd (". ").trim();
+    return legal.isEmpty() ? fallback : legal;
+}
+
+bool Library::sendToTrash (const juce::File& folder)
 {
    #if JUCE_LINUX
     // "gio trash" usa la papelera estándar de Ubuntu/GNOME (se puede restaurar desde Archivos)

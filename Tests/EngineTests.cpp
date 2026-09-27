@@ -2353,6 +2353,22 @@ int main()
         CHECK (lb.size() == 16 && lb[8].beatInBar == 1 && lb[7].beatInBar == 4);
     }
 
+    std::cout << "[Mix] lista de mixes con su nombre visible y nombres de carpeta válidos en todos los sistemas\n";
+    {
+        const auto mixesRoot = tmp.getChildFile ("mixes-con-nombre");
+        const auto a = MixProject::create (mixesRoot, "Zeta");
+        const auto b = MixProject::create (mixesRoot, tr ("Alabanza vol."));   // Windows quitaría el punto final
+        CHECK (a != juce::File() && b != juce::File() && b.getFileName() == "Alabanza vol");
+        MixProject renamed;
+        CHECK (MixProject::load (a, renamed));
+        renamed.name = tr ("Boda Pérez");
+        CHECK (renamed.save());
+        const auto list = MixProject::entries (mixesRoot);
+        CHECK (list.size() == 2 && list[0].name == tr ("Alabanza vol.") && list[1].name == tr ("Boda Pérez") && list[1].folder == a);
+        CHECK (Library::legalFolderName (tr (" .Mi canción. "), "x") == tr ("Mi canción") && Library::legalFolderName ("...", "Mix") == "Mix");
+        CHECK (MixProject::entries (tmp.getChildFile ("no-existe")).empty());
+    }
+
     engine.setSong (nullptr);
     tmp.deleteRecursively();
 

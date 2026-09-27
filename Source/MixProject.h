@@ -57,6 +57,14 @@ struct MixProject
     bool save() const;                                  // mix.json (crea la carpeta si hace falta)
     static bool load (const juce::File& mixFolder, MixProject& out);   // false si no hay mix.json legible
     static juce::StringArray list (const juce::File& mixesRoot);       // nombres de carpeta de los mixes (con mix.json), por nombre
+    // Los mixes guardados con su nombre visible (el "name" de mix.json, que cambia al renombrar; si
+    // falta, el de la carpeta), ordenados por ese nombre. Solo lee el nombre (no abre las fuentes).
+    struct ListEntry
+    {
+        juce::File folder;
+        juce::String name;
+    };
+    static std::vector<ListEntry> entries (const juce::File& mixesRoot);
     // Crea <mixesRoot>/<nombre legal> (sin pisar uno existente) con un mix.json vacío; File() si falla
     static juce::File create (const juce::File& mixesRoot, const juce::String& name);
 

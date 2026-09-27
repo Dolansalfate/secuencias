@@ -218,7 +218,8 @@ private:
     void loadMixPeaks (const juce::String& fileName);
     void playMixSource (int source, double from);
     void playMix (double from);
-    void setMixPreview (std::shared_ptr<LoadedSong>, int kind, const juce::String& sourceFile, const Analysis& grid, double from, int request);
+    void setMixPreview (std::shared_ptr<LoadedSong>, int kind, const juce::String& sourceFile, const Analysis& grid, double from,
+                        int request, int version);   // version: la del render del mix (kind 2) o -1
     void dropMixPreview();                            // descarta lo que había para escuchar (p. ej. cambió la frecuencia)
     void applyMixPreviewGrid (const Analysis&);
     void renderMix (std::function<void (bool ok)> then);   // renderiza si el render quedó viejo
@@ -340,6 +341,8 @@ private:
     int mixPreviewKind = 0, mixPreviewVersion = -1;   // 0 nada, 1 una fuente, 2 el mix
     juce::String mixPreviewSourceFile;             // la fuente que suena (por archivo: los índices cambian al quitar)
     int mixPlayRequest = 0;                        // cada pedido de escucha y cada Stop lo cambian: una carga vieja no arranca sola
+    int mixWantedPlay = 0;                         // pedido de escuchar el mix que llegó mientras se preparaba (suena al terminar)
+    double mixWantedFrom = 0.0;
     bool mixClick = false;
     juce::File mixReturnFolder;                    // canción que estaba cargada al abrir el mix (por carpeta: el setlist puede cambiar)
     std::vector<MixSnapshot> mixUndo;

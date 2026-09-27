@@ -205,6 +205,13 @@ public:
     // Mixes en preparación (canciones originales + tramos): carpetas dentro de <raíz>/_mixes (MixProject)
     static const char* mixesFolderName() { return "_mixes"; }
     juce::File mixesFolder() const { return root.getChildFile (mixesFolderName()); }
+    // Mueve a la papelera del sistema (en Linux con `gio trash`, que guarda de dónde vino y permite
+    // restaurarlo; si no, File::moveToTrash). true si la carpeta ya no está.
+    static bool sendToTrash (const juce::File&);
+    // Nombre de carpeta válido en todos los sistemas: sin caracteres ilegales ni espacios o puntos al
+    // principio o al final (Windows quita el punto final y la carpeta real no coincidiría); `fallback` si queda vacío
+    static juce::String legalFolderName (const juce::String& name, const juce::String& fallback);
+
     // Carpetas de la raíz que no son canciones (bancos de golpes y mixes)
     static bool isReservedFolder (const juce::File& f)
     {
