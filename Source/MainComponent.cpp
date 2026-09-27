@@ -2641,15 +2641,12 @@ void MainComponent::recordDialog (bool toBank, int bankTrack)
 {
     if (recording.active)
         return;
-    if (! toBank && (currentInfo() == nullptr || currentSong == nullptr))
-    {
-        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Grabar"), tr ("Carga una canción para grabarle una pista nueva."));
-        return;
-    }
-    if (! toBank && ! timeMap.isPlain())
+    // Una pista nueva solo con canción cargada y en tempo y tono originales (la toma se alinea con el audio guardado)
+    const bool canTrack = currentInfo() != nullptr && currentSong != nullptr && timeMap.isPlain();
+    if (! toBank && ! canTrack && (currentInfo() == nullptr || currentSong == nullptr))
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Grabar"),
-                                                tr ("Para grabar, vuelve al tempo y al tono originales: la toma se guarda alineada con el audio tal como está en el disco."));
+                                                tr ("Carga una canción para grabarle una pista nueva (o graba golpes para un banco desde el trigger de una pista)."));
         return;
     }
     juce::String problem;
@@ -2681,16 +2678,29 @@ void MainComponent::recordDialog (bool toBank, int bankTrack)
             choices.push_back ({ compactOf[(size_t) i], compactOf[(size_t) i + 1] });
         }
 
-    auto* w = new juce::AlertWindow (toBank ? tr ("Grabar golpes para un banco de muestras") : tr ("Grabar una pista nueva"),
-                                     toBank ? tr ("Toca golpes sueltos, de suave a fuerte, con silencio entre ellos. Al detener, cada golpe "
-                                                  "queda como una muestra del banco y el trigger de la pista lo usa.")
-                                            : tr ("La canción arranca desde el cabezal y la entrada se graba alineada con ella (se compensa la "
-                                                  "latencia del dispositivo). Al detener (botón, Stop o final de la canción) la toma se agrega "
-                                                  "como pista nueva."),
+    // Dos destinos: pista nueva (se suma a la mezcla) o golpes sueltos para un banco de muestras (sonido del trigger)
+    juce::StringArray destinations;
+    std::vector<bool> destIsBank;
+    if (canTrack)
+    {
+        destinations.add (tr ("Pista nueva de la canción (se suma a la mezcla)"));
+        destIsBank.push_back (false);
+    }
+    destinations.add (tr ("Golpes sueltos para un banco de muestras (sonido del trigger)"));
+    destIsBank.push_back (true);
+
+    auto* w = new juce::AlertWindow (tr ("Grabar"),
+                                     tr ("Pista nueva: la canción arranca desde el cabezal y la entrada se graba alineada con ella (se compensa "
+                                         "la latencia del dispositivo); al detener (botón, Stop o final) la toma se agrega como pista.\n"
+                                         "Banco de muestras: toca golpes sueltos, de suave a fuerte, con silencio entre ellos; al detener, "
+                                         "cada golpe se recorta justo en su ataque y queda como una muestra del banco, listo para el trigger.")
+                                         + (canTrack ? juce::String() : tr ("\n(Sin canción cargada o con tempo/tono cambiados solo se puede grabar un banco.)")),
                                      juce::MessageBoxIconType::NoIcon, this);
+    w->addComboBox ("destino", destinations, tr ("Qué grabar"));
+    w->getComboBoxComponent ("destino")->setSelectedItemIndex (toBank || ! canTrack ? destinations.size() - 1 : 0);
     w->addComboBox ("entrada", items, tr ("Entrada"));
     w->getComboBoxComponent ("entrada")->setSelectedItemIndex (juce::jlimit (0, items.size() - 1, props.getUserSettings()->getIntValue ("recordInput", 0)));
-    w->addTextEditor ("nombre", toBank ? tr ("Bombo") : tr ("Grabación"), toBank ? tr ("Nombre del banco") : tr ("Nombre de la pista"));
+    w->addTextEditor ("nombre", toBank || ! canTrack ? tr ("Bombo") : tr ("Grabación"), tr ("Nombre de la pista o del banco"));
     w->addComboBox ("monitor", {}, tr ("Escuchar la entrada por"));
     auto* mon = w->getComboBoxComponent ("monitor");
     const int savedMonitor = props.getUserSettings()->getIntValue ("recordMonitor", 0);
@@ -2702,10 +2712,12 @@ void MainComponent::recordDialog (bool toBank, int bankTrack)
                       tr ("Compensación extra (ms; positivo = adelanta la toma)"));
     w->addButton (tr ("Grabar"), 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, choices, toBank, bankTrack] (int result)
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, choices, destIsBank, bankTrack] (int result)
     {
-        if (result != 1 || choices.empty())
+        if (result != 1 || choices.empty() || destIsBank.empty())
             return;
+        const int dest = juce::jlimit (0, (int) destIsBank.size() - 1, w->getComboBoxComponent ("destino")->getSelectedItemIndex());
+        const bool bankMode = destIsBank[(size_t) dest];
         const int idx = juce::jlimit (0, (int) choices.size() - 1, w->getComboBoxComponent ("entrada")->getSelectedItemIndex());
         const int monId = w->getComboBoxComponent ("monitor")->getSelectedId();
         const int monitorPair = monId == 999 ? -1 : juce::jmax (0, monId - 1);
@@ -2714,7 +2726,7 @@ void MainComponent::recordDialog (bool toBank, int bankTrack)
         settings->setValue ("recordInput", idx);
         settings->setValue ("recordMonitor", monitorPair);
         settings->setValue ("recordOffsetMs", extra);
-        startRecording (choices[(size_t) idx].first, choices[(size_t) idx].second, toBank, bankTrack,
+        startRecording (choices[(size_t) idx].first, choices[(size_t) idx].second, bankMode, bankMode ? bankTrack : -1,
                         w->getTextEditorContents ("nombre").trim(), monitorPair, extra);
     }), true);
 }
@@ -2851,6 +2863,7 @@ void MainComponent::recordingFinished (bool ok, const juce::String& message, con
             bankCache.banks.clear();
         }
         auto* info = currentInfo();
+        bool assigned = false;
         if (info != nullptr && currentSong != nullptr && juce::isPositiveAndBelow (bankTrack, (int) currentSong->tracks.size()))
         {
             const int stem = currentSong->tracks[(size_t) bankTrack]->stemIndex;
@@ -2862,8 +2875,11 @@ void MainComponent::recordingFinished (bool ok, const juce::String& message, con
                 library.saveSong (*info);
                 syncTriggerMarks();
                 requestRender();
+                assigned = true;
             }
         }
+        if (! assigned)
+            sepLabel.setText (message + tr ("  ·  elígelo en la casilla del trigger de una pista: Sonido > ") + bankName, juce::dontSendNotification);
         return;
     }
     // Pista nueva en la canción grabada (que puede ya no ser la seleccionada)

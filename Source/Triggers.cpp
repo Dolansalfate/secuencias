@@ -135,23 +135,28 @@ namespace triggers
         return true;
     }
 
-    static void trimHit (juce::AudioBuffer<float>& hit, double sr)
+    // Deja el golpe con exactamente `pre` muestras antes de su ataque (ceros si la grabación no las tiene),
+    // fundido de entrada de 1 ms en esas muestras previas, fundido de salida de 5 ms y tope de 4 s.
+    static void trimHit (juce::AudioBuffer<float>& hit, double sr, int pre)
     {
         const int n = hit.getNumSamples();
         if (n <= 0)
             return;
         const double onset = arrangement::findOnset (hit, sr, juce::jmin (0.5, n / sr * 0.5), juce::jmin (0.5, n / sr * 0.5));
-        const int pre = (int) (0.002 * sr);
-        const int start = onset >= 0.0 ? juce::jmax (0, (int) (onset * sr) - pre) : 0;
+        const int attack = onset >= 0.0 ? juce::jlimit (0, n, (int) (onset * sr)) : 0;
         const int maxLen = (int) (4.0 * sr);
-        const int len = juce::jmin (n - start, maxLen);
-        if (len <= 0)
+        const int lead = juce::jmax (0, pre - attack);   // ceros que faltan delante del ataque
+        const int from = attack - (pre - lead);          // primera muestra que se copia (>= 0)
+        const int copy = juce::jmin (n - from, maxLen - lead);
+        if (copy <= 0)
             return;
-        juce::AudioBuffer<float> trimmed (2, len);
+        juce::AudioBuffer<float> trimmed (2, lead + copy);
+        trimmed.clear();
         for (int ch = 0; ch < 2; ++ch)
-            trimmed.copyFrom (ch, 0, hit, juce::jmin (ch, hit.getNumChannels() - 1), start, len);
+            trimmed.copyFrom (ch, lead, hit, juce::jmin (ch, hit.getNumChannels() - 1), from, copy);
+        const int len = trimmed.getNumSamples();
         const int fadeIn = juce::jmin (len / 2, (int) (0.001 * sr)), fadeOut = juce::jmin (len / 2, (int) (0.005 * sr));
-        if (fadeIn > 0)  trimmed.applyGainRamp (0, fadeIn, 0.0f, 1.0f);
+        if (fadeIn > 0 && lead + fadeIn <= len) trimmed.applyGainRamp (lead, fadeIn, 0.0f, 1.0f);
         if (fadeOut > 0) trimmed.applyGainRamp (len - fadeOut, fadeOut, 1.0f, 0.0f);
         hit = std::move (trimmed);
     }
@@ -161,12 +166,13 @@ namespace triggers
         auto bank = std::make_shared<SampleBankData>();
         bank->name = folder.getFileName();
         bank->sampleRate = sr;
+        bank->preRoll = (int) (0.002 * sr);   // 2 ms antes del ataque, que el motor adelanta
         for (auto& f : Library::audioFilesIn (folder))
         {
             SampleBankData::Hit hit;
             if (! readAudio (f, sr, formats, hit.buffer))
                 continue;
-            trimHit (hit.buffer, sr);
+            trimHit (hit.buffer, sr, bank->preRoll);
             hit.peak = peakOf (hit.buffer);
             hit.name = f.getFileNameWithoutExtension();
             if (hit.buffer.getNumSamples() > 0 && hit.peak > 0.0f)

@@ -26,6 +26,8 @@ struct SampleBankData
     juce::String name;
     double sampleRate = 44100.0;
     std::vector<Hit> hits;   // ordenados por pico creciente
+    int preRoll = 0;         // muestras que cada golpe trae antes de su ataque (loadBank las deja iguales en todos):
+                             // el motor adelanta las voces eso, así el ataque cae exacto sobre el golpe detectado
 
     int pick (float velocity, int& lastIndex) const;   // índice en hits, o -1 si está vacío
 };

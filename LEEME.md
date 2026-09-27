@@ -33,8 +33,12 @@ El mismo código sigue compilando en macOS.
   un instrumento VST/AU con la nota MIDI que quieras, por ejemplo 36 = bombo), y el umbral,
   sensibilidad y tiempo mínimo de la detección. Las marcas naranjas al pie del carril
   muestran los golpes detectados y su fuerza.
-- **Grabar** (botón junto al transporte): graba una entrada de tu interfaz como pista nueva de la
-  canción. Eliges la entrada (mono o un par estéreo), el nombre, por qué salida quieres
+- **Grabar** (botón junto al transporte): dos destinos en el mismo diálogo. **Pista nueva**:
+  graba una entrada de tu interfaz como pista de la canción, que se suma a la mezcla. **Banco de
+  muestras**: grabas golpes sueltos (de suave a fuerte, con silencio entre ellos) que no quedan
+  como pista sino como sonido para el trigger: cada golpe se recorta solo justo en su ataque, y
+  al dispararse su transiente cae exactamente sobre la del golpe original, sin retardo. Eliges la
+  entrada (mono o un par estéreo), el nombre, por qué salida quieres
   escucharte y, si hace falta, una compensación extra en milisegundos. La canción arranca desde
   el cabezal; al detener (el mismo botón, Stop o el final de la canción) la toma se agrega como
   una pista más, ya alineada con la canción (la app descuenta la latencia de la interfaz). Si tu

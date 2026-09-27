@@ -783,6 +783,7 @@ int main()
         auto bank = triggers::loadBank (bankDir, rate, formats);
         CHECK (bank != nullptr && bank->hits.size() == 4 && bank->hits[0].peak < bank->hits[3].peak && bank->hits[3].peak > 0.5f);
         CHECK (bank != nullptr && bank->hits[3].buffer.getNumSamples() > (int) (0.01 * rate) && bank->hits[3].buffer.getMagnitude (0, 0, (int) (0.006 * rate)) > 0.2f);   // el ataque quedó en los primeros ms
+        CHECK (bank != nullptr && bank->preRoll == (int) (0.002 * rate));   // 2 ms antes del ataque en todas las muestras
         int last = -1;
         CHECK (bank != nullptr && bank->pick (1.0f, last) == 3 && bank->pick (1.0f, last) == 2 && bank->pick (0.0f, last) == 0 && bank->pick (0.0f, last) == 1);
         SampleBankData empty;
@@ -1136,6 +1137,27 @@ int main()
         CHECK (std::abs (strong - 0.5f) < 0.02f);                       // velocidad 1 -> ganancia 1 -> 0.5
         CHECK (std::abs (soft - 0.25f) < 0.02f);                        // velocidad 0 -> ganancia 0.5 -> 0.25
         CHECK (set->lanes[0]->control.peakL.load() > 0.4f);             // medidores de la línea
+        // Pre-roll del banco: el motor adelanta las voces esas muestras, así el ataque de la muestra cae
+        // exacto en el golpe. Con 10 ms de pre-roll, la voz del golpe de 0,25 s empieza a sonar en 0,24 s.
+        bank->preRoll = (int) (0.01 * sr);
+        engine.seekSeconds (0.0);
+        render (engine, out, 10);   // fundido del salto: queda en ~0,12 s, antes del golpe
+        double firstSound = -1.0;
+        for (int b = 0; b < 60 && firstSound < 0.0 && engine.isPlaying(); ++b)
+        {
+            render (engine, out, 1);
+            const double t0 = engine.getPositionSeconds() - block / sr;
+            for (int k = 0; k < block; ++k)
+                if (std::abs (out.data[0][(size_t) k]) > 0.4f)
+                {
+                    firstSound = t0 + k / sr;
+                    break;
+                }
+        }
+        CHECK (std::abs (firstSound - 0.24) < 0.002);
+        if (std::abs (firstSound - 0.24) >= 0.002)
+            std::cout << "  primer sonido en " << firstSound << " s\n";
+        bank->preRoll = 0;
         // Mute de la línea: silencio; solo de la línea silencia las pistas
         set->lanes[0]->control.muted = true;
         engine.seekSeconds (0.2);

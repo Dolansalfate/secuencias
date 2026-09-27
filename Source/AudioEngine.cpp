@@ -707,13 +707,15 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             }
 
             const bool hasBank = lane.bank != nullptr && ! lane.bank->hits.empty();
+            const juce::int64 preRoll = hasBank ? lane.bank->preRoll : 0;   // las muestras traen esto antes del ataque: se adelantan
 
             for (int i = 0; i < n; ++i)
             {
                 laneL[(size_t) i] = laneR[(size_t) i] = 0.0f;
-                const auto p = positions[(size_t) i];
-                if (p < 0 || ! hasBank)
+                const auto p0 = positions[(size_t) i];
+                if (p0 < 0 || ! hasBank)
                     continue;
+                const auto p = p0 + preRoll;
                 if (p != lane.lastPos + 1)
                 {
                     // Salto o arranque: buscar el primer golpe en o después de esta muestra

@@ -102,10 +102,13 @@ modelo que usa Moises).
   (botón, Stop, pausa o final) la toma se guarda alineada con la canción (se descuenta la
   latencia de entrada más salida que informa el dispositivo, más una compensación manual en
   ms) como `<nombre>.wav` en la carpeta de la canción con `songTime` (ya está en la línea de
-  tiempo del arreglo: no pasa por los tramos). O **golpes para un banco de muestras** ("Grabar
-  golpes como banco nuevo..." en el menú del trigger): se tocan golpes sueltos, al detener se
-  cortan (`sliceHits`) y se guardan en `_bancos/<nombre>/golpe-NN.wav`, y el trigger de esa
-  pista pasa a usarlos. Si el dispositivo no tiene entradas activas se activan las dos
+  tiempo del arreglo: no pasa por los tramos). O **golpes para un banco de muestras** (el
+  mismo diálogo, "Qué grabar"; o "Grabar golpes como banco nuevo..." en el menú del trigger,
+  que además asigna el banco a esa pista): se tocan golpes sueltos, al detener se cortan
+  (`sliceHits`) y se guardan en `_bancos/<nombre>/golpe-NN.wav`. Al cargar un banco cada
+  muestra queda con exactamente 2 ms antes de su ataque (`SampleBankData::preRoll`) y el motor
+  adelanta las voces esos 2 ms: la transiente de la muestra cae sobre la transiente detectada
+  en la pista, sin retardo. Si el dispositivo no tiene entradas activas se activan las dos
   primeras solas (y "Audio" ahora deja elegir hasta 32 entradas). Grabar una pista exige tempo
   y tono originales (la toma se alinea con el audio guardado). Ajustes: `recordInput`,
   `recordMonitor` (-1 = no escuchar), `recordOffsetMs`.
@@ -368,7 +371,8 @@ LEEME.md               Guía para el usuario final
   `LoadedTrack` de control (ganancia, mute, solo, salida, medidores) sin buffer. En
   `renderChunk`, tras las pistas: por muestra, con `positions[]`, se disparan los golpes cuya
   posición coincide (tras un salto se relocaliza con búsqueda binaria; los que quedaron atrás
-  no suenan), en 16 voces prealocadas (se roba la más avanzada), ganancia 0,5 + 0,5 × velocidad,
+  no suenan; con banco se compara `position + bank->preRoll`, así la voz arranca antes y su
+  ataque cae en el golpe), en 16 voces prealocadas (se roba la más avanzada), ganancia 0,5 + 0,5 × velocidad,
   mezcla en `laneL/laneR`, envolvente global, salida al par de la línea y medidores. El solo de
   una línea silencia las pistas y viceversa. `LoadedTrack::replaced` (atómico, lo pone
   `buildSamplers` cuando el trigger está en modo "solo el sonido" y tiene banco) silencia la
@@ -665,8 +669,9 @@ Pasos de `run()`:
   anterior a superar en 6 dB el valle previo (como `findOnset`); tras un golpe hay que bajar
   6 dB desde su pico (o pasar `minMs`) para admitir otro; velocidad = (pico − umbral) / (0 −
   umbral), elevada a 1/sensibilidad. `sliceHits` corta una grabación de golpes sueltos en
-  muestras (para bancos); `loadBank` lee una carpeta (recorte a 2 ms antes del ataque,
-  fundidos, tope 4 s, remuestreo, orden por pico) y `SampleBankData::pick` elige por velocidad
+  muestras (para bancos); `loadBank` lee una carpeta (`trimHit`: cada golpe queda con
+  exactamente `preRoll` = 2 ms antes de su ataque, con ceros si faltan, fundidos de 1 y 5 ms,
+  tope 4 s, remuestreo, orden por pico) y `SampleBankData::pick` elige por velocidad
   alternando vecinas; `readAudio` y `writeWav` son utilidades.
 - En `MainComponent`: `buildSamplers (renderizado, info, sr, carpetaBancos, formatos, caché)`
   corre en el hilo de carga al final de cada render (y solo eso, reutilizando `currentSong`,
@@ -921,6 +926,9 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.5.1**: el diálogo "Grabar" ofrece los dos destinos (pista nueva o banco de muestras);
+  `SampleBankData::preRoll` y `trimHit` uniforme para que el ataque de cada muestra caiga
+  exacto sobre el golpe detectado (el motor adelanta las voces el pre-roll).
 - **v0.5.0 (instrumentos VST3/AU, punto 3)**: `Instruments` (`InstrumentRack`: búsqueda con
   `PluginDirectoryScanner` en un hilo, carga asíncrona, estado en `instrumentos.xml`, editor en
   ventana propia, `prepareAll`), `InstrumentLane`/`InstrumentSet` en el motor (MIDI desde los
