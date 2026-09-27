@@ -44,6 +44,13 @@ public:
     void setPlaying (bool);
     void setLoop (double startSeconds, double endSeconds);   // end <= start = sin loop
     void refreshTrackStates();                                // mute y solo desde los atómicos de cada pista
+    void setTriggerStates (const std::vector<bool>& perTrack);            // botón T de cada carril
+    struct TriggerMark
+    {
+        double seconds = 0.0;
+        float velocity = 1.0f;
+    };
+    void setTriggerMarks (const std::vector<std::vector<TriggerMark>>& perTrack);   // golpes detectados (tiempo de reproducción)
     void zoomToFit();
 
     std::function<void (double seconds)> onSeek;
@@ -55,7 +62,8 @@ public:
     std::function<void (int chordIndex, double seconds)> onChordClicked;   // clic derecho en la fila de acordes (-1 = sin acorde ahí)
     std::function<void (double seconds, int lane)> onLaneMenu;                        // clic derecho sobre un carril (menú del audio)
     std::function<void (double seconds, double deltaSeconds, int lane)> onClipDragged; // Shift + arrastre sobre un carril: mover el tramo
-    std::function<void (int track, bool state)> onMute, onSolo;
+    std::function<void (int track, bool state)> onMute, onSolo, onTrigger;
+    std::function<void (int track)> onLaneHeaderMenu;   // clic derecho en la cabecera de un carril (trigger)
     // Ganancia de nivelado (lineal) de un stem en un instante de reproducción, para dibujar la onda como sonará
     std::function<float (int stemIndex, double seconds)> levelGainAt;
     void refreshWaveforms();   // cambió el nivelado: volver a dibujar las ondas

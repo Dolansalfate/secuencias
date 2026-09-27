@@ -314,6 +314,8 @@ MainComponent::MainComponent()
     timeline.onNoteClicked = [this] (int index, double t) { noteMenu (index, t); };
     timeline.onChordClicked = [this] (int index, double t) { chordMenu (index, t); };
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
+    timeline.onTrigger = [this] (int track, bool on) { setTriggerEnabled (track, on); };
+    timeline.onLaneHeaderMenu = [this] (int track) { triggerMenu (track); };
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
     mixer.onLevelEdited = [this] (int stem, double db) { stemLevelEdited (stem, db); };
     mixer.onClickChanged = [this] (bool on, float db, int pair)
@@ -883,11 +885,13 @@ void MainComponent::loadSongAt (int index)
         resized();
 
         const double sr = engine.getSampleRate();
+        const auto banksDir = library.banksFolder();
         juce::Component::SafePointer<MainComponent> safe (this);
 
-        loaderPool.addJob ([this, safe, info, sr, gen]
+        loaderPool.addJob ([this, safe, info, sr, gen, banksDir]
         {
             std::shared_ptr<LoadedSong> song, source, arranged;
+            std::shared_ptr<SamplerSet> samplerSet;
             juce::String error;
             try
             {
@@ -908,6 +912,8 @@ void MainComponent::loadSongAt (int index)
                             juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->sectionLabel.setText (tr ("Renderizando tempo y tono..."), juce::dontSendNotification); });
                             song = stretcher::render (arranged, map, sr, abort);
                         }
+                        if (song != nullptr)
+                            samplerSet = buildSamplers (*song, info, sr, banksDir, formatManager, bankCache);
                     }
                 }
             }
@@ -920,17 +926,17 @@ void MainComponent::loadSongAt (int index)
             {
                 error = tr ("Error al cargar: ") + juce::String (e.what());
             }
-            juce::MessageManager::callAsync ([safe, song, source, arranged, gen, error]
+            juce::MessageManager::callAsync ([safe, song, source, arranged, samplerSet, gen, error]
             {
                 if (auto* self = safe.getComponent())
-                    self->songLoaded (song, source, arranged, gen, error);
+                    self->songLoaded (song, source, arranged, samplerSet, gen, error);
             });
         });
     });
 }
 
 void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_ptr<LoadedSong> source, std::shared_ptr<LoadedSong> arranged,
-                                int generation, const juce::String& error)
+                                std::shared_ptr<SamplerSet> samplerSet, int generation, const juce::String& error)
 {
     if (generation != loadGeneration.load())
         return;
@@ -948,6 +954,7 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     arrangedSong = arranged != nullptr ? arranged : source;
     auto* info = currentInfo();
     renderedClips = info != nullptr ? info->clips : std::vector<Clip>();
+    renderedTriggers = info != nullptr ? triggersOf (*info) : std::vector<TriggerSettings>();
     undoStack.clear();
     loadedFolder = info != nullptr ? info->folder : juce::File();
     renderedTranspose = info != nullptr ? info->transpose : 0;
@@ -964,6 +971,7 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     mixer.setMasterGainDb (masterDb);
     mixer.setSong (currentSong);
     timeline.setSong (currentSong, engine.getSampleRate());
+    applySamplers (samplerSet);
     syncTimelineMarkers();
     timeline.setAnalysis (mappedAnalysis());
     updateBeatGrid();
@@ -995,6 +1003,16 @@ void MainComponent::saveCurrentMix()
             st.muted = t->muted.load();
             st.outputPair = t->outputPair.load();
         }
+        if (samplers != nullptr)
+            for (auto& lane : samplers->lanes)
+                if (juce::isPositiveAndBelow (lane->stemIndex, (int) info->stems.size()))
+                {
+                    auto& tg = info->stems[(size_t) lane->stemIndex].trigger;
+                    const float g = lane->control.gain.load();
+                    tg.gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
+                    tg.muted = lane->control.muted.load();
+                    tg.outputPair = lane->control.outputPair.load();
+                }
     }
     library.saveSong (*info);
 }
@@ -1057,6 +1075,7 @@ void MainComponent::syncTimelineMarkers()
         for (auto& n : info->notes)
             notes.push_back ({ timeMap.toPlayback (n.seconds), n.text });
         timeline.setNotes (notes);
+        syncTriggerMarks();
     }
     else
     {
@@ -1240,7 +1259,17 @@ void MainComponent::renderTempo()
     const auto clips = info->clips;
     const bool clipsChanged = ! sameClips (clips, renderedClips);
     const auto newMap = TimeMap::build (*info, arrangement::lengthSeconds (clips, sourceLength));
-    if (! clipsChanged && sameStretch (newMap, timeMap) && info->transpose == renderedTranspose)
+    const bool stretchChanged = clipsChanged || ! sameStretch (newMap, timeMap) || info->transpose != renderedTranspose;
+    const auto trig = triggersOf (*info);
+    bool triggersChanged = trig.size() != renderedTriggers.size();
+    for (size_t i = 0; ! triggersChanged && i < trig.size(); ++i)
+    {
+        const auto& a = trig[i];
+        const auto& b = renderedTriggers[i];
+        triggersChanged = a.enabled != b.enabled || a.sound != b.sound || a.note != b.note || std::abs (a.thresholdDb - b.thresholdDb) > 1.0e-9
+                          || std::abs (a.sensitivity - b.sensitivity) > 1.0e-9 || std::abs (a.minMs - b.minMs) > 1.0e-9;
+    }
+    if (! stretchChanged && ! triggersChanged)
     {
         tempoControlsFromSong();
         return;
@@ -1251,10 +1280,13 @@ void MainComponent::renderTempo()
     const int rgen = ++renderGeneration;
     const int transpose = info->transpose;
     auto source = sourceSong;
-    auto arrangedBefore = clipsChanged ? nullptr : arrangedSong;   // si el arreglo no cambió, se reutiliza
-    sepLabel.setText (clipsChanged ? tr ("Renderizando el arreglo...") : tr ("Renderizando tempo y tono..."), juce::dontSendNotification);
+    auto arrangedBefore = clipsChanged ? nullptr : arrangedSong;     // si el arreglo no cambió, se reutiliza
+    auto renderedBefore = stretchChanged ? nullptr : currentSong;   // solo cambiaron los triggers: se reutiliza lo que suena
+    const SongInfo infoCopy = *info;
+    const auto banksDir = library.banksFolder();
+    sepLabel.setText (! stretchChanged ? tr ("Detectando golpes...") : clipsChanged ? tr ("Renderizando el arreglo...") : tr ("Renderizando tempo y tono..."), juce::dontSendNotification);
     juce::Component::SafePointer<MainComponent> safe (this);
-    loaderPool.addJob ([this, safe, source, arrangedBefore, clips, newMap, transpose, sr, gen, rgen]
+    loaderPool.addJob ([this, safe, source, arrangedBefore, renderedBefore, clips, newMap, transpose, sr, gen, rgen, infoCopy, banksDir]
     {
         auto abort = [this, gen, rgen] { return gen != loadGeneration.load() || rgen != renderGeneration || abortJobs.load(); };
         auto progress = [safe] (float p)
@@ -1265,25 +1297,28 @@ void MainComponent::renderTempo()
                     safe->sepLabel.setText (tr ("Renderizando tempo y tono... ") + juce::String ((int) (p * 100)) + "%", juce::dontSendNotification);
             });
         };
-        std::shared_ptr<LoadedSong> arranged = arrangedBefore, rendered;
+        std::shared_ptr<LoadedSong> arranged = arrangedBefore, rendered = renderedBefore;
+        std::shared_ptr<SamplerSet> samplerSet;
         try
         {
             if (arranged == nullptr)
                 arranged = arrangement::render (source, clips, sr, abort);
-            if (arranged != nullptr)
+            if (arranged != nullptr && rendered == nullptr)
                 rendered = stretcher::render (arranged, newMap, sr, abort, progress);
+            if (rendered != nullptr)
+                samplerSet = buildSamplers (*rendered, infoCopy, sr, banksDir, formatManager, bankCache);
         }
         catch (const std::exception&) {}
-        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, rgen]
+        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, samplerSet, rgen]
         {
             if (auto* self = safe.getComponent())
-                self->songRendered (rendered, arranged, newMap, transpose, clips, rgen);
+                self->songRendered (rendered, arranged, newMap, transpose, clips, samplerSet, rgen);
         });
     });
 }
 
 void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap map,
-                                  int transpose, std::vector<Clip> clips, int rgen)
+                                  int transpose, std::vector<Clip> clips, std::shared_ptr<SamplerSet> samplerSet, int rgen)
 {
     if (rgen != renderGeneration)
         return;
@@ -1300,14 +1335,26 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
     timeMap = map;
     renderedTranspose = transpose;
     renderedClips = std::move (clips);
+    if (auto* info = currentInfo())
+        renderedTriggers = triggersOf (*info);
     arrangedSong = arranged;
+    const bool sameSong = currentSong == rendered;
     currentSong = rendered;
+    if (sameSong)
+    {
+        // Solo cambiaron los triggers: el audio sigue igual, no hace falta cortar ni recargar la vista
+        applySamplers (samplerSet);
+        tempoControlsFromSong();
+        sepLabel.setText (tr ("Golpes detectados"), juce::dontSendNotification);
+        return;
+    }
     engine.pause();
-    afterFadeOut ([this, wasPlaying, songPos]
+    afterFadeOut ([this, wasPlaying, songPos, samplerSet]
     {
         engine.setSong (currentSong);
         mixer.setSong (currentSong);
         timeline.setSong (currentSong, engine.getSampleRate());
+        applySamplers (samplerSet);
         syncTimelineMarkers();
         timeline.setAnalysis (mappedAnalysis());
         updateBeatGrid();
@@ -2084,6 +2131,275 @@ void MainComponent::arrangementEdited()
     library.saveSong (*info);
     syncTimelineMarkers();
     tempoControlsFromSong();
+    requestRender();
+}
+
+std::vector<TriggerSettings> MainComponent::triggersOf (const SongInfo& info)
+{
+    std::vector<TriggerSettings> out;
+    for (auto& st : info.stems)
+        out.push_back (st.trigger);
+    return out;
+}
+
+std::shared_ptr<SamplerSet> MainComponent::buildSamplers (const LoadedSong& rendered, const SongInfo& info, double sr,
+                                                          const juce::File& banksFolder, juce::AudioFormatManager& formats, BankCache& cache)
+{
+    auto set = std::make_shared<SamplerSet>();
+    for (auto& t : rendered.tracks)
+    {
+        if (! juce::isPositiveAndBelow (t->stemIndex, (int) info.stems.size()))
+            continue;
+        const auto& st = info.stems[(size_t) t->stemIndex];
+        const auto& tg = st.trigger;
+        if (! tg.enabled || ! tg.sound.startsWith ("banco:"))
+            continue;
+        const auto bankName = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
+        std::shared_ptr<SampleBankData> bank;
+        {
+            const auto key = bankName + "@" + juce::String (sr);
+            const juce::ScopedLock sl (cache.lock);
+            auto it = cache.banks.find (key);
+            if (it != cache.banks.end())
+                bank = it->second;
+        }
+        if (bank == nullptr)
+        {
+            bank = triggers::loadBank (banksFolder.getChildFile (juce::File::createLegalFileName (bankName)), sr, formats);
+            if (bank != nullptr)
+            {
+                const juce::ScopedLock sl (cache.lock);
+                cache.banks[bankName + "@" + juce::String (sr)] = bank;
+            }
+        }
+        auto lane = std::make_unique<SamplerLane>();
+        lane->name = st.name + " (muestras)";
+        lane->stemIndex = t->stemIndex;
+        lane->events = triggers::detect (t->buffer, sr, tg.thresholdDb, tg.sensitivity, tg.minMs);
+        lane->bank = bank;
+        lane->control.name = lane->name;
+        lane->control.stemIndex = -1;
+        lane->control.gain = tg.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (tg.gainDb);
+        lane->control.smoothedGain = lane->control.gain.load();
+        lane->control.muted = tg.muted;
+        lane->control.outputPair = tg.outputPair;
+        set->lanes.push_back (std::move (lane));
+    }
+    return set;
+}
+
+void MainComponent::applySamplers (std::shared_ptr<SamplerSet> set)
+{
+    samplers = std::move (set);
+    engine.setSamplers (samplers);
+    mixer.setSamplers (samplers);
+    syncTriggerMarks();
+}
+
+void MainComponent::syncTriggerMarks()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr)
+        return;
+    std::vector<bool> states;
+    std::vector<std::vector<TimelineView::TriggerMark>> marks;
+    const double sr = engine.getSampleRate();
+    for (auto& t : currentSong->tracks)
+    {
+        const bool has = juce::isPositiveAndBelow (t->stemIndex, (int) info->stems.size());
+        states.push_back (has && info->stems[(size_t) t->stemIndex].trigger.enabled);
+        std::vector<TimelineView::TriggerMark> m;
+        if (samplers != nullptr)
+            for (auto& lane : samplers->lanes)
+                if (lane->stemIndex == t->stemIndex)
+                    for (auto& e : lane->events)
+                        m.push_back ({ (double) e.sample / sr, e.velocity });
+        marks.push_back (std::move (m));
+    }
+    timeline.setTriggerStates (states);
+    timeline.setTriggerMarks (marks);
+}
+
+void MainComponent::setTriggerEnabled (int track, bool on)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
+        return;
+    const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+    if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+        return;
+    auto& tg = info->stems[(size_t) stem].trigger;
+    if (on && tg.sound.isEmpty())
+    {
+        // Sin sonido asignado todavía: elegirlo primero
+        syncTriggerMarks();
+        triggerMenu (track);
+        return;
+    }
+    tg.enabled = on;
+    library.saveSong (*info);
+    syncTriggerMarks();
+    requestRender();
+}
+
+void MainComponent::triggerMenu (int track)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
+        return;
+    const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+    if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+        return;
+    const auto& st = info->stems[(size_t) stem];
+    const auto& tg = st.trigger;
+    int detected = -1;
+    if (samplers != nullptr)
+        for (auto& lane : samplers->lanes)
+            if (lane->stemIndex == stem)
+                detected = (int) lane->events.size();
+
+    juce::PopupMenu m;
+    m.addSectionHeader (tr ("Trigger de ") + st.name + (detected >= 0 ? " (" + juce::String (detected) + tr (" golpes)") : juce::String()));
+    m.addItem (1, tr ("Trigger activado"), tg.sound.isNotEmpty(), tg.enabled);
+    juce::PopupMenu sound;
+    const auto banks = library.listBanks();
+    for (int i = 0; i < banks.size(); ++i)
+        sound.addItem (100 + i, tr ("Banco: ") + banks[i], true, tg.sound == "banco:" + banks[i]);
+    if (banks.isEmpty())
+        sound.addItem (99, tr ("(no hay bancos de muestras todavía)"), false);
+    sound.addSeparator();
+    sound.addItem (2, tr ("Importar muestras (wav) como banco nuevo..."));
+    m.addSubMenu (tr ("Sonido"), sound);
+    m.addItem (3, tr ("Ajustes de detección... (umbral ") + juce::String (tg.thresholdDb, 0) + " dB, sensibilidad " + juce::String (tg.sensitivity, 1) + ")");
+    m.addSeparator();
+    m.addItem (4, tr ("Quitar el trigger de esta pista"), tg.enabled || tg.sound.isNotEmpty());
+
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this, track, stem, banks] (int result)
+    {
+        auto* inf = currentInfo();
+        if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
+            return;
+        auto& t = inf->stems[(size_t) stem].trigger;
+        if (result == 1)
+            t.enabled = ! t.enabled;
+        else if (result == 2)
+        {
+            importBankFor (track);
+            return;
+        }
+        else if (result == 3)
+        {
+            triggerSettingsDialog (track);
+            return;
+        }
+        else if (result == 4)
+        {
+            t.enabled = false;
+            t.sound.clear();
+        }
+        else if (result >= 100 && result < 100 + banks.size())
+        {
+            t.sound = "banco:" + banks[result - 100];
+            t.enabled = true;
+        }
+        else
+            return;
+        library.saveSong (*inf);
+        syncTriggerMarks();
+        requestRender();
+    });
+}
+
+void MainComponent::importBankFor (int track)
+{
+    pickFiles (tr ("Elige los wav de los golpes (de suave a fuerte, o varios parecidos)"),
+               juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+               juce::File::getSpecialLocation (juce::File::userMusicDirectory), Library::audioFilePatterns(),
+               [this, track] (const juce::Array<juce::File>& files)
+    {
+        if (files.isEmpty())
+            return;
+        askText (tr ("Nombre del banco de muestras"), files[0].getParentDirectory().getFileName(), [this, track, files] (const juce::String& name)
+        {
+            auto* inf = currentInfo();
+            if (inf == nullptr || currentSong == nullptr || name.trim().isEmpty() || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
+                return;
+            const auto folder = library.bankFolder (name.trim());
+            folder.createDirectory();
+            int copied = 0;
+            for (auto& f : files)
+                if (Library::isAudioFile (f) && f.copyFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
+                    ++copied;
+            if (copied == 0)
+            {
+                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Banco de muestras"), tr ("No se pudo copiar ningún archivo."));
+                return;
+            }
+            {
+                const juce::ScopedLock sl (bankCache.lock);
+                bankCache.banks.clear();   // el banco cambió: se vuelve a cargar
+            }
+            const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+            if (juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
+            {
+                auto& t = inf->stems[(size_t) stem].trigger;
+                t.sound = "banco:" + folder.getFileName();
+                t.enabled = true;
+                library.saveSong (*inf);
+                syncTriggerMarks();
+                requestRender();
+            }
+            sepLabel.setText (tr ("Banco «") + folder.getFileName() + tr ("»: ") + juce::String (copied) + tr (" muestras"), juce::dontSendNotification);
+        });
+    });
+}
+
+void MainComponent::triggerSettingsDialog (int track)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
+        return;
+    const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+    if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+        return;
+    const auto& tg = info->stems[(size_t) stem].trigger;
+    auto* w = new juce::AlertWindow (tr ("Detección de golpes: ") + info->stems[(size_t) stem].name,
+                                     tr ("Umbral: nivel mínimo de un golpe (dBFS). Sensibilidad: > 1 realza los golpes suaves. "
+                                         "Tiempo mínimo entre golpes en ms."), juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("umbral", juce::String (tg.thresholdDb, 0), tr ("Umbral (dB, de -80 a 0)"));
+    w->addTextEditor ("sens", juce::String (tg.sensitivity, 2), tr ("Sensibilidad (0,2 a 5)"));
+    w->addTextEditor ("min", juce::String (tg.minMs, 0), tr ("Tiempo mínimo (ms)"));
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, stem] (int result)
+    {
+        auto* inf = currentInfo();
+        if (inf == nullptr || result != 1 || ! juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
+            return;
+        auto& t = inf->stems[(size_t) stem].trigger;
+        t.thresholdDb = juce::jlimit (-80.0, 0.0, w->getTextEditorContents ("umbral").replace (",", ".").getDoubleValue());
+        t.sensitivity = juce::jlimit (0.2, 5.0, w->getTextEditorContents ("sens").replace (",", ".").getDoubleValue());
+        t.minMs = juce::jlimit (5.0, 2000.0, w->getTextEditorContents ("min").replace (",", ".").getDoubleValue());
+        library.saveSong (*inf);
+        requestRender();
+    }), true);
+}
+
+void MainComponent::setTriggerForCapture (const juce::String& bank)
+{
+    auto* info = currentInfo();
+    if (info == nullptr)
+        return;
+    for (auto& st : info->stems)
+        if (Analyzer::isDrumsTrack (st.name, st.fileName) || st.name.containsIgnoreCase ("bombo") || st.fileName.containsIgnoreCase ("kick"))
+        {
+            st.trigger.enabled = true;
+            st.trigger.sound = "banco:" + bank;
+            break;
+        }
+    library.saveSong (*info);
     requestRender();
 }
 

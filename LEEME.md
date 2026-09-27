@@ -21,6 +21,15 @@ El mismo código sigue compilando en macOS.
   y el tiempo en que va (con puntos que marcan el pulso), el tempo, la tonalidad, la sección
   actual y la siguiente, y el tiempo. Doble clic sobre ella (o F11) la pone a pantalla
   completa; las teclas del pedal siguen funcionando aunque esa ventana tenga el foco.
+- **Triggers con tus propios sonidos**: botón "T" en la cabecera de una pista (por ejemplo el
+  bombo separado): sus golpes disparan un banco de muestras, con timing exacto y sin latencia,
+  porque los golpes se detectan de antemano sobre el audio. El banco es una carpeta con wav
+  (de suave a fuerte; se importan desde el menú del "T" y pronto se podrán grabar desde la
+  app): cada golpe elige la muestra según su fuerza. El sampler aparece como un canal más del
+  mezclador ("Bombo (muestras)"), con fader y salida propia: mutea el bombo original para
+  reemplazarlo o deja ambos para reforzarlo. Clic derecho en la cabecera para elegir el banco
+  y ajustar umbral, sensibilidad y tiempo mínimo; las marcas naranjas al pie del carril
+  muestran los golpes detectados y su fuerza.
 - **Notas de texto** ("+ Nota" o tecla N, o clic derecho en la fila de notas de la regla):
   un comentario anclado a un punto de la canción, por ejemplo "corte de batería, entra solo
   el bajo" en el compás 111, con los segundos que debe quedarse visible. En la guía de

@@ -2,6 +2,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Library.h"
+#include "Triggers.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -40,6 +41,34 @@ struct LoadedSong
     std::vector<std::unique_ptr<LoadedTrack>> tracks;
     juce::int64 length = 0;
     double sampleRate = 44100.0;
+};
+
+// Sampler de triggers: los golpes detectados en una pista disparan muestras de un banco. Una
+// "línea" por pista con trigger; sus controles y medidores son un LoadedTrack sin buffer, así el
+// mezclador la trata como un canal más. Todo lo que toca el hilo de audio está prealocado.
+struct SamplerLane
+{
+    LoadedTrack control;                         // gain, muted, solo, outputPair y medidores
+    juce::String name;
+    int stemIndex = -1;                          // pista de origen
+    std::vector<TriggerEvent> events;            // ordenados por muestra (línea de tiempo de reproducción)
+    std::shared_ptr<const SampleBankData> bank;
+    // Solo hilo de audio
+    size_t nextEvent = 0;
+    juce::int64 lastPos = -2;
+    int lastHit = -1;
+    struct Voice
+    {
+        const juce::AudioBuffer<float>* buffer = nullptr;
+        int pos = 0;
+        float gain = 0.0f;
+    };
+    Voice voices[16];
+};
+
+struct SamplerSet
+{
+    std::vector<std::unique_ptr<SamplerLane>> lanes;
 };
 
 // Ganancia por tramo (nivelado): gains[i] rige desde positions[i] hasta positions[i+1].
@@ -104,6 +133,8 @@ public:
     void setSongGain (float linear)    { songGain = juce::jmax (0.0f, linear); }
     // Ganancia por tramo (nivelado dentro de la canción), aplicada a las pistas y no al click
     void setGainCurve (std::shared_ptr<const GainCurve>);   // nullptr = sin nivelado
+    void setSamplers (std::shared_ptr<SamplerSet>);          // nullptr = sin triggers; se cambia bajo songLock
+    std::shared_ptr<SamplerSet> getSamplers() const          { return samplers; }
 
     // Medidores de las salidas del dispositivo (después del fader maestro)
     float takeOutputPeak (int channel);         // pico desde la última lectura; 0 si el canal no existe
@@ -136,6 +167,7 @@ private:
     std::shared_ptr<LoadedSong> song;
     std::shared_ptr<const BeatGrid> beatGrid;   // también bajo songLock
     std::shared_ptr<const GainCurve> gainCurve; // también bajo songLock
+    std::shared_ptr<SamplerSet> samplers;       // también bajo songLock
     float levelSmooth = 1.0f;                   // ganancia por tramo suavizada (hilo de audio)
     std::atomic<float> songGain { 1.0f };
 
@@ -169,4 +201,5 @@ private:
     std::vector<float> xfadeOut, xfadeIn;    // pesos del crossfade (1 y 0 fuera del cierre del loop)
     std::vector<float> levelGain;            // ganancia de nivelado por muestra
     std::vector<int> levelSegment;           // tramo del nivelado en el que cae cada muestra
+    std::vector<float> laneL, laneR;         // mezcla de las voces de una línea del sampler
 };

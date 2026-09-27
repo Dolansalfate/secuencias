@@ -395,6 +395,21 @@ SongInfo Library::readSong (const juce::File& folder) const
                 si.gainDb     = juce::jlimit (-60.0f, 12.0f, (float) (double) st.getProperty ("gainDb", 0.0));
                 si.muted      = (bool) st.getProperty ("muted", false);
                 si.outputPair = juce::jmax (0, (int) st.getProperty ("outputPair", 0));
+                si.songTime   = (bool) st.getProperty ("songTime", false);
+                const auto tg = st.getProperty ("trigger", juce::var());
+                if (tg.isObject())
+                {
+                    auto& t = si.trigger;
+                    t.enabled     = (bool) tg.getProperty ("enabled", false);
+                    t.sound       = tg.getProperty ("sound", "").toString();
+                    t.note        = juce::jlimit (0, 127, (int) tg.getProperty ("note", 36));
+                    t.thresholdDb = juce::jlimit (-80.0, 0.0, (double) tg.getProperty ("thresholdDb", -30.0));
+                    t.sensitivity = juce::jlimit (0.2, 5.0, (double) tg.getProperty ("sensitivity", 1.0));
+                    t.minMs       = juce::jlimit (5.0, 2000.0, (double) tg.getProperty ("minMs", 40.0));
+                    t.gainDb      = juce::jlimit (-60.0f, 12.0f, (float) (double) tg.getProperty ("gainDb", 0.0));
+                    t.muted       = (bool) tg.getProperty ("muted", false);
+                    t.outputPair  = juce::jmax (0, (int) tg.getProperty ("outputPair", 0));
+                }
                 if (si.fileName.isNotEmpty() && isAudioFile (folder.getChildFile (si.fileName)))
                     s.stems.push_back (si);
             }
@@ -537,6 +552,22 @@ bool Library::saveSong (const SongInfo& s) const
         so->setProperty ("gainDb", (double) st.gainDb);
         so->setProperty ("muted", st.muted);
         so->setProperty ("outputPair", st.outputPair);
+        if (st.songTime)
+            so->setProperty ("songTime", true);
+        if (st.trigger.enabled || st.trigger.sound.isNotEmpty())
+        {
+            auto* tg = new juce::DynamicObject();
+            tg->setProperty ("enabled", st.trigger.enabled);
+            tg->setProperty ("sound", st.trigger.sound);
+            tg->setProperty ("note", st.trigger.note);
+            tg->setProperty ("thresholdDb", st.trigger.thresholdDb);
+            tg->setProperty ("sensitivity", st.trigger.sensitivity);
+            tg->setProperty ("minMs", st.trigger.minMs);
+            tg->setProperty ("gainDb", (double) st.trigger.gainDb);
+            tg->setProperty ("muted", st.trigger.muted);
+            tg->setProperty ("outputPair", st.trigger.outputPair);
+            so->setProperty ("trigger", juce::var (tg));
+        }
         stems.add (juce::var (so));
     }
     obj->setProperty ("stems", stems);
@@ -567,7 +598,7 @@ void Library::load()
         for (auto& v : *arr)
         {
             auto folder = root.getChildFile (v.toString());
-            if (folder.isDirectory() && ! added.contains (folder.getFileName()) && ! audioFilesIn (folder).isEmpty())
+            if (folder.isDirectory() && ! added.contains (folder.getFileName()) && folder.getFileName() != banksFolderName() && ! audioFilesIn (folder).isEmpty())
             {
                 songs.push_back (readSong (folder));
                 added.add (folder.getFileName());
@@ -577,10 +608,20 @@ void Library::load()
     auto dirs = root.findChildFiles (juce::File::findDirectories, false);
     dirs.sort();
     for (auto& d : dirs)
-        if (! added.contains (d.getFileName()) && ! audioFilesIn (d).isEmpty())
+        if (! added.contains (d.getFileName()) && d.getFileName() != banksFolderName() && ! audioFilesIn (d).isEmpty())
             songs.push_back (readSong (d));
 
     saveSetlist();
+}
+
+juce::StringArray Library::listBanks() const
+{
+    juce::StringArray names;
+    for (auto& d : banksFolder().findChildFiles (juce::File::findDirectories, false))
+        if (! audioFilesIn (d).isEmpty())
+            names.add (d.getFileName());
+    names.sort (true);
+    return names;
 }
 
 int Library::importStemFiles (const juce::Array<juce::File>& files, const juce::String& songName, bool moveFiles)
@@ -709,6 +750,8 @@ bool Library::exportAll (const juce::File& destination) const
     const auto setlistFile = root.getChildFile ("setlist.json");
     if (setlistFile.existsAsFile())
         ok = setlistFile.copyFileTo (destination.getChildFile ("setlist.json")) && ok;
+    if (banksFolder().isDirectory())
+        ok = banksFolder().copyDirectoryTo (destination.getChildFile (banksFolderName())) && ok;
     return ok;
 }
 

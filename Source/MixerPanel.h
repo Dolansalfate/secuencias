@@ -7,7 +7,7 @@
 class ChannelStrip : public juce::Component
 {
 public:
-    ChannelStrip (std::shared_ptr<LoadedSong>, LoadedTrack&, juce::Colour);
+    ChannelStrip (std::shared_ptr<void> keepAlive, LoadedTrack&, juce::Colour);
 
     std::function<void()> onChanged;   // cambió algo que se guarda en song.json (ganancia, mute, salida)
     std::function<void (double db)> onLevelEdited;   // se escribió un valor en la casilla de nivelado
@@ -27,7 +27,7 @@ public:
 private:
     void changed() { if (onChanged) onChanged(); }
 
-    std::shared_ptr<LoadedSong> song;   // mantiene viva la pista
+    std::shared_ptr<void> keepAlive;    // mantiene viva la pista (la canción o el conjunto de samplers)
     LoadedTrack& track;
     juce::Colour colour;
     juce::Label nameLabel;
@@ -109,6 +109,7 @@ public:
     void setClickVisible (bool visible);
 
     void setSong (std::shared_ptr<LoadedSong>);   // nullptr = sin canales
+    void setSamplers (std::shared_ptr<SamplerSet>);   // canales de los triggers (sampler), después de las pistas
     void refreshOutputs();                        // cambió el dispositivo: rehacer los ComboBox de salida
     // Nivelado por pista del tramo actual: dB por stemIndex (vacío o sin nivelado = "--")
     void setLevelGains (const std::vector<double>& dbPerStem, bool enabled);
@@ -120,7 +121,7 @@ public:
 private:
     juce::Viewport view;
     juce::Component holder;
-    juce::OwnedArray<ChannelStrip> strips;
+    juce::OwnedArray<ChannelStrip> strips, samplerStrips;
     ClickStrip click;
     MasterStrip master;
 };

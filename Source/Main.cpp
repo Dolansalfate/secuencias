@@ -32,6 +32,8 @@ public:
             captureSelector = hasFlag ("--selector");
             captureDrumParts = hasFlag ("--bateria");
             captureSeparateDrums = hasFlag ("--separarbateria");
+            if (commandLine.contains ("--trigger="))
+                captureTriggerBank = commandLine.fromFirstOccurrenceOf ("--trigger=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
             if (commandLine.contains ("--posicion="))
                 capturePosition = commandLine.fromFirstOccurrenceOf ("--posicion=", false, false).getDoubleValue();
             if (commandLine.contains ("--escenario="))
@@ -77,6 +79,7 @@ public:
             if (captureLevel)   mc->levelCurrentSong();
             if (captureQuality > 0 || captureStems > 0) mc->setSeparationOptionsForCapture (captureStems, captureQuality);
             if (captureDrumParts) mc->setDrumPartsForCapture (true);
+            if (captureTriggerBank.isNotEmpty()) mc->setTriggerForCapture (captureTriggerBank);
             if (captureSeparate) mc->separateCurrentSong();
             if (captureSeparateDrums) mc->separateDrumsOfCurrentSong();
             if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
@@ -164,6 +167,7 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     CaptureTimer captureTimer { *this };
     juce::File captureFile, captureStageFile;
+    juce::String captureTriggerBank;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
     bool captureDrumParts = false, captureSeparateDrums = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;

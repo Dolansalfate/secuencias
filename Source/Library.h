@@ -47,6 +47,20 @@ struct SongNote
     juce::String text;
 };
 
+// Trigger de una pista: sus golpes disparan un sonido (banco de muestras o, más adelante, un VST)
+struct TriggerSettings
+{
+    bool enabled = false;
+    juce::String sound;          // "banco:<nombre>" (sampler interno) o "vst:<n>" (instrumento del rack)
+    int note = 36;               // nota MIDI para instrumentos
+    double thresholdDb = -30.0;  // nivel mínimo de un golpe
+    double sensitivity = 1.0;    // > 1 realza los golpes suaves
+    double minMs = 40.0;         // tiempo mínimo entre golpes
+    float gainDb = 0.0f;         // canal del sampler en el mezclador
+    bool muted = false;
+    int outputPair = 0;
+};
+
 struct StemInfo
 {
     juce::String name;       // nombre visible
@@ -54,6 +68,8 @@ struct StemInfo
     float gainDb = 0.0f;
     bool muted = false;
     int outputPair = 0;      // 0 = salidas 1-2, 1 = 3-4, ...
+    bool songTime = false;   // grabada sobre la línea de tiempo de la canción: no pasa por el arreglo (clips)
+    TriggerSettings trigger;
 };
 
 struct Beat
@@ -180,6 +196,12 @@ public:
     void move (int index, int delta);
 
     juce::File getRoot() const { return root; }
+
+    // Bancos de golpes (sampler): carpetas con wav dentro de <raíz>/_bancos, compartidos por todas las canciones
+    static const char* banksFolderName() { return "_bancos"; }
+    juce::File banksFolder() const { return root.getChildFile (banksFolderName()); }
+    juce::StringArray listBanks() const;
+    juce::File bankFolder (const juce::String& name) const { return banksFolder().getChildFile (juce::File::createLegalFileName (name)); }
 
     // Formatos que la app puede decodificar en esta plataforma (m4a solo en macOS).
     static bool isAudioFile (const juce::File&);

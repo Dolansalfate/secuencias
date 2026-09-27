@@ -55,6 +55,8 @@ AudioEngine::AudioEngine()
     xfadeIn.resize (maxChunk);
     levelGain.resize (maxChunk);
     levelSegment.resize (maxChunk);
+    laneL.resize (maxChunk);
+    laneR.resize (maxChunk);
 }
 
 std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double sr,
@@ -120,6 +122,17 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
     return song;
 }
 
+void AudioEngine::setSamplers (std::shared_ptr<SamplerSet> set)
+{
+    std::shared_ptr<SamplerSet> old;
+    {
+        const juce::SpinLock::ScopedLockType sl (songLock);
+        old = std::move (samplers);
+        samplers = std::move (set);
+    }
+    // "old" se libera aquí, fuera del lock
+}
+
 void AudioEngine::setBeatGrid (std::shared_ptr<const BeatGrid> grid)
 {
     std::shared_ptr<const BeatGrid> old;
@@ -146,11 +159,13 @@ void AudioEngine::setSong (std::shared_ptr<LoadedSong> newSong)
     std::shared_ptr<LoadedSong> old;
     std::shared_ptr<const BeatGrid> oldGrid;
     std::shared_ptr<const GainCurve> oldCurve;
+    std::shared_ptr<SamplerSet> oldSamplers;
     {
         const juce::SpinLock::ScopedLockType sl (songLock);
         old = std::move (song);
         oldGrid = std::move (beatGrid);
         oldCurve = std::move (gainCurve);
+        oldSamplers = std::move (samplers);
         levelSmooth = 1.0f;
         song = std::move (newSong);
         songLength = song != nullptr ? song->length : 0;
@@ -413,6 +428,10 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
     bool anySolo = false;
     for (auto& t : s.tracks)
         anySolo = anySolo || t->solo.load();
+    SamplerSet* sampler = samplers.get();
+    if (sampler != nullptr)
+        for (auto& lane : sampler->lanes)
+            anySolo = anySolo || lane->control.solo.load();
 
     for (auto& t : s.tracks)
     {
@@ -494,6 +513,110 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
         if (peakR > t->peakR.load()) t->peakR = peakR;
         t->rmsL = std::sqrt (sumL / (float) n);
         t->rmsR = std::sqrt (sumR / (float) n);
+    }
+
+    // 2b) Sampler de triggers: las voces disparadas por los golpes de cada línea
+    if (sampler != nullptr)
+    {
+        for (auto& lanePtr : sampler->lanes)
+        {
+            auto& lane = *lanePtr;
+            auto& c = lane.control;
+            const bool silent = c.muted.load() || (anySolo && ! c.solo.load());
+            const float target = silent ? 0.0f : c.gain.load();
+            float g = c.smoothedGain;
+            const float gStep = (target - g) / (float) n;
+            const bool hasBank = lane.bank != nullptr && ! lane.bank->hits.empty();
+
+            for (int i = 0; i < n; ++i)
+            {
+                laneL[(size_t) i] = laneR[(size_t) i] = 0.0f;
+                const auto p = positions[(size_t) i];
+                if (p < 0 || ! hasBank)
+                    continue;
+                if (p != lane.lastPos + 1)
+                {
+                    // Salto o arranque: buscar el primer golpe en o después de esta muestra
+                    auto it = std::lower_bound (lane.events.begin(), lane.events.end(), p,
+                                                [] (const TriggerEvent& e, juce::int64 v) { return e.sample < v; });
+                    lane.nextEvent = (size_t) (it - lane.events.begin());
+                }
+                lane.lastPos = p;
+                while (lane.nextEvent < lane.events.size() && lane.events[lane.nextEvent].sample <= p)
+                {
+                    const auto& ev = lane.events[lane.nextEvent++];
+                    if (ev.sample != p)
+                        continue;   // quedó atrás (por ejemplo tras un salto): no se dispara
+                    const int hit = lane.bank->pick (ev.velocity, lane.lastHit);
+                    if (hit < 0)
+                        continue;
+                    // Voz libre, o la más avanzada
+                    SamplerLane::Voice* v = nullptr;
+                    for (auto& voice : lane.voices)
+                        if (voice.buffer == nullptr) { v = &voice; break; }
+                    if (v == nullptr)
+                    {
+                        v = &lane.voices[0];
+                        for (auto& voice : lane.voices)
+                            if (voice.pos > v->pos) v = &voice;
+                    }
+                    v->buffer = &lane.bank->hits[(size_t) hit].buffer;
+                    v->pos = -i;   // empieza en la muestra i de este bloque
+                    v->gain = 0.5f + 0.5f * juce::jlimit (0.0f, 1.0f, ev.velocity);
+                }
+            }
+            // Render de las voces activas
+            for (auto& v : lane.voices)
+            {
+                if (v.buffer == nullptr)
+                    continue;
+                const int len = v.buffer->getNumSamples();
+                const float* bl = v.buffer->getReadPointer (0);
+                const float* br = v.buffer->getReadPointer (juce::jmin (1, v.buffer->getNumChannels() - 1));
+                for (int i = 0; i < n; ++i)
+                {
+                    const int k = v.pos + i;
+                    if (k < 0) continue;
+                    if (k >= len) break;
+                    laneL[(size_t) i] += bl[k] * v.gain;
+                    laneR[(size_t) i] += br[k] * v.gain;
+                }
+                v.pos += n;
+                if (v.pos >= len)
+                    v.buffer = nullptr;
+            }
+            // Ganancia, envolvente, salida y medidores
+            int l, r;
+            outputPairChannels (c.outputPair.load(), numOuts, l, r);
+            float* outL = outputs[l];
+            float* outR = outputs[r];
+            float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;
+            if (outL != nullptr && outR != nullptr && (g > 0.0f || target > 0.0f))
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    g += gStep;
+                    const float e = envelope[(size_t) i] * g;
+                    const float sl = laneL[(size_t) i] * e, sr2 = laneR[(size_t) i] * e;
+                    if (outL == outR)
+                        outL[offset + i] += 0.5f * (sl + sr2);
+                    else
+                    {
+                        outL[offset + i] += sl;
+                        outR[offset + i] += sr2;
+                    }
+                    peakL = juce::jmax (peakL, std::abs (sl));
+                    peakR = juce::jmax (peakR, std::abs (sr2));
+                    sumL += sl * sl;
+                    sumR += sr2 * sr2;
+                }
+            }
+            c.smoothedGain = target;
+            if (peakL > c.peakL.load()) c.peakL = peakL;
+            if (peakR > c.peakR.load()) c.peakR = peakR;
+            c.rmsL = std::sqrt (sumL / (float) n);
+            c.rmsR = std::sqrt (sumR / (float) n);
+        }
     }
 
     // 3) Click (metrónomo) generado

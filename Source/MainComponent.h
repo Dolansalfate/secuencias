@@ -12,6 +12,7 @@
 #include "MixerPanel.h"
 #include "FilePicker.h"
 #include "StageView.h"
+#include <map>
 
 class MarkerButton;
 
@@ -50,6 +51,7 @@ public:
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
     void setDrumPartsForCapture (bool on)                     { drumPartsBtn.setToggleState (on, juce::dontSendNotification); }
+    void setTriggerForCapture (const juce::String& bank);     // activa el trigger de la batería con ese banco (herramienta de captura)
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
@@ -88,7 +90,7 @@ private:
     SongInfo* currentInfo();
     void loadSongAt (int index);
     void songLoaded (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> source, std::shared_ptr<LoadedSong> arranged,
-                     int generation, const juce::String& error);
+                     std::shared_ptr<SamplerSet> samplers, int generation, const juce::String& error);
     void saveCurrentMix();
     void markSongDirty();
     void unloadSong();
@@ -148,7 +150,23 @@ private:
     void requestRender();                          // con retardo, desde el Timer
     void renderTempo();
     void songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap, int transpose,
-                       std::vector<Clip> clips, int generation);
+                       std::vector<Clip> clips, std::shared_ptr<SamplerSet> samplers, int generation);
+
+    // Triggers (punto 1): golpes de las pistas que disparan bancos de muestras
+    struct BankCache
+    {
+        juce::CriticalSection lock;
+        std::map<juce::String, std::shared_ptr<SampleBankData>> banks;   // "nombre@sr"
+    };
+    static std::shared_ptr<SamplerSet> buildSamplers (const LoadedSong& rendered, const SongInfo&, double sampleRate,
+                                                      const juce::File& banksFolder, juce::AudioFormatManager&, BankCache&);
+    static std::vector<TriggerSettings> triggersOf (const SongInfo&);
+    void applySamplers (std::shared_ptr<SamplerSet>);   // al motor, al mezclador y a las marcas de la regla
+    void syncTriggerMarks();
+    void triggerMenu (int track);
+    void setTriggerEnabled (int track, bool on);
+    void importBankFor (int track);
+    void triggerSettingsDialog (int track);
     double songLengthSeconds() const;              // largo de la línea de tiempo de la canción (arreglo, sin estirar)
 
     // Arreglo (fase 4): cortar, mover, eliminar y unir tramos de audio; deshacer
@@ -225,6 +243,9 @@ private:
     std::shared_ptr<LoadedSong> sourceSong;    // los archivos originales, para volver a renderizar
     std::shared_ptr<LoadedSong> arrangedSong;  // el arreglo (tramos colocados), en la línea de tiempo de la canción
     std::vector<Clip> renderedClips;           // tramos con los que se renderizó lo que suena
+    std::shared_ptr<SamplerSet> samplers;      // triggers de lo que suena
+    std::vector<TriggerSettings> renderedTriggers;
+    BankCache bankCache;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)

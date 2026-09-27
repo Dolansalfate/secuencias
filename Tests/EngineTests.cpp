@@ -9,9 +9,18 @@
 #include "TempoMap.h"
 #include "Music.h"
 #include "Arrangement.h"
+#include "Triggers.h"
 #include "Stretcher.h"
 #include <cmath>
 #include <iostream>
+
+static StemInfo stem (const juce::String& name, const juce::String& file)
+{
+    StemInfo si;
+    si.name = name;
+    si.fileName = file;
+    return si;
+}
 
 static int failures = 0;
 
@@ -98,7 +107,7 @@ namespace
         SongInfo info;
         info.folder = folder;
         for (auto& f : Library::audioFilesIn (folder))
-            info.stems.push_back ({ f.getFileNameWithoutExtension(), f.getFileName(), 0.0f, false, 0 });
+            info.stems.push_back (stem (f.getFileNameWithoutExtension(), f.getFileName()));
         return AudioEngine::loadSong (info, rate, formats, {});
     }
 }
@@ -432,7 +441,7 @@ int main()
                && std::abs (back->notes[1].duration) < 1.0e-9 && back->notes[1].text == "Coro");
         // Nivelado por pista: vectores por stem, ajustados al número de stems al leer
         si.stems.clear();
-        si.stems.push_back ({ "Z", "z.wav", 0.0f, false, 0 });
+        si.stems.push_back (stem ("Z", "z.wav"));
         si.markers = { mk ("A", 0.1) };
         si.markers[0].stemGainsDb = { 3.5 };
         si.markers[0].stemLufs = { -20.0 };
@@ -731,6 +740,85 @@ int main()
         CHECK (std::abs (s2.analysis.chords[1].start - 1.5) < 1.0e-9 && std::abs (s2.analysis.chords[0].end - 1.0) < 1.0e-9);
     }
 
+    std::cout << "[Triggers] deteccion de golpes, bancos, cortes y ajustes guardados\n";
+    {
+        const double rate = 48000.0;
+        juce::Random rnd (3);
+        // Golpes de 60 ms (ruido con caída) en 0.5, 1.0, 1.5 y 2.0 s con amplitudes 0.9, 0.5, 0.25, 0.1 y piso de ruido
+        juce::AudioBuffer<float> b (2, (int) (3.0 * rate));
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                b.setSample (ch, i, rnd.nextFloat() * 0.0006f - 0.0003f);
+        const double at[] = { 0.5, 1.0, 1.5, 2.0 };
+        const float amp[] = { 0.9f, 0.5f, 0.25f, 0.1f };
+        for (int h = 0; h < 4; ++h)
+            for (int i = 0; i < (int) (0.06 * rate); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    b.addSample (ch, (int) (at[h] * rate) + i, amp[h] * (float) std::exp (-i / (0.015 * rate)) * (rnd.nextFloat() * 2.0f - 1.0f));
+        const auto ev = triggers::detect (b, rate, -40.0, 1.0, 40.0);
+        CHECK (ev.size() == 4);
+        if (ev.size() == 4)
+        {
+            for (int h = 0; h < 4; ++h)
+                CHECK (std::abs ((double) ev[(size_t) h].sample / rate - at[h]) < 0.004);   // a menos de 4 ms del ataque
+            CHECK (ev[0].velocity > ev[1].velocity && ev[1].velocity > ev[2].velocity && ev[2].velocity > ev[3].velocity && ev[0].velocity > 0.8f && ev[3].velocity > 0.05f);
+        }
+        CHECK (triggers::detect (b, rate, -15.0, 1.0, 40.0).size() == 2);   // la envolvente es RMS: 0.25 de ruido queda en -18 dB, bajo el umbral
+        const auto sens = triggers::detect (b, rate, -40.0, 2.0, 40.0);       // más sensible: velocidades más altas para los suaves
+        CHECK (sens.size() == 4 && sens[3].velocity > ev[3].velocity);
+        CHECK (triggers::detect (b, rate, -40.0, 1.0, 800.0).size() == 2);   // tiempo mínimo de 0.8 s: quedan los de 0.5 y 1.5 s
+        CHECK (triggers::detect (juce::AudioBuffer<float>(), rate, -40.0, 1.0, 40.0).empty());
+
+        // Cortar una grabación de golpes en muestras: 4 golpes, cada uno hasta el siguiente
+        const auto hits = triggers::sliceHits (b, rate, -40.0, 60.0);
+        CHECK (hits.size() == 4 && hits[0].getNumSamples() > (int) (0.4 * rate) && hits[0].getNumSamples() <= (int) (0.5 * rate)
+               && hits[0].getMagnitude (0, 0, hits[0].getNumSamples()) > 0.5f);
+
+        // Banco: guardar los golpes como wav, cargarlo (recorte al ataque, orden por pico) y elegir por velocidad
+        auto bankDir = tmp.getChildFile ("_bancos").getChildFile ("BomboPrueba");
+        bankDir.createDirectory();
+        for (size_t i = 0; i < hits.size(); ++i)
+            CHECK (triggers::writeWav (hits[i], rate, bankDir.getChildFile ("golpe" + juce::String ((int) i + 1) + ".wav")));
+        auto bank = triggers::loadBank (bankDir, rate, formats);
+        CHECK (bank != nullptr && bank->hits.size() == 4 && bank->hits[0].peak < bank->hits[3].peak && bank->hits[3].peak > 0.5f);
+        CHECK (bank != nullptr && bank->hits[3].buffer.getNumSamples() > (int) (0.01 * rate) && bank->hits[3].buffer.getMagnitude (0, 0, (int) (0.006 * rate)) > 0.2f);   // el ataque quedó en los primeros ms
+        int last = -1;
+        CHECK (bank != nullptr && bank->pick (1.0f, last) == 3 && bank->pick (1.0f, last) == 2 && bank->pick (0.0f, last) == 0 && bank->pick (0.0f, last) == 1);
+        SampleBankData empty;
+        CHECK (empty.pick (0.5f, last) == -1);
+        CHECK (triggers::loadBank (tmp.getChildFile ("no-existe"), rate, formats) == nullptr);
+        // La carpeta _bancos no es una canción y aparece en la lista de bancos
+        Library lb (tmp);
+        lb.load();
+        bool asSong = false;
+        for (auto& sng : lb.songs) asSong = asSong || sng.folder.getFileName() == "_bancos";
+        CHECK (! asSong && lb.listBanks().contains ("BomboPrueba"));
+
+        // Ajustes de trigger y songTime: ida y vuelta por song.json
+        SongInfo si;
+        si.folder = tmp.getChildFile ("trig");
+        si.folder.createDirectory();
+        writeSine (si.folder.getChildFile ("drums.wav"), 44100.0, 0.2, 1);
+        si.stems.push_back (stem ("Bateria", "drums.wav"));
+        si.stems[0].songTime = true;
+        si.stems[0].trigger.enabled = true;
+        si.stems[0].trigger.sound = "banco:BomboPrueba";
+        si.stems[0].trigger.thresholdDb = -24.0;
+        si.stems[0].trigger.sensitivity = 1.5;
+        si.stems[0].trigger.minMs = 55.0;
+        si.stems[0].trigger.gainDb = -3.0f;
+        si.stems[0].trigger.outputPair = 1;
+        CHECK (lb.saveSong (si));
+        Library lb2 (tmp);
+        lb2.load();
+        const SongInfo* back = nullptr;
+        for (auto& sng : lb2.songs) if (sng.folder == si.folder) back = &sng;
+        CHECK (back != nullptr && back->stems.size() == 1 && back->stems[0].songTime && back->stems[0].trigger.enabled
+               && back->stems[0].trigger.sound == "banco:BomboPrueba" && std::abs (back->stems[0].trigger.thresholdDb + 24.0) < 1.0e-9
+               && std::abs (back->stems[0].trigger.sensitivity - 1.5) < 1.0e-9 && std::abs (back->stems[0].trigger.minMs - 55.0) < 1.0e-9
+               && std::abs (back->stems[0].trigger.gainDb + 3.0f) < 1.0e-6f && back->stems[0].trigger.outputPair == 1);
+    }
+
     std::cout << "[Separator] bateria en partes: plan, nombres de las partes\n";
     {
         SeparationOptions o;
@@ -935,6 +1023,64 @@ int main()
         render (engine, out, 100, peaks);
         CHECK (peaks[2] > 0.5f);   // click en salida 3-4
         CHECK (peaks[0] < 1.0e-4f);
+    }
+
+    std::cout << "[AudioEngine] sampler de triggers: dispara muestras en las posiciones exactas\n";
+    {
+        engine.setClick (false, 120.0, 0.0, 0.0f, 0);
+        song->tracks[0]->muted = true;
+        song->tracks[1]->muted = true;
+        // Banco con un solo golpe: 100 ms de nivel constante 0.5
+        auto bank = std::make_shared<SampleBankData>();
+        bank->sampleRate = sr;
+        SampleBankData::Hit hit;
+        hit.buffer.setSize (2, (int) (0.1 * sr));
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < hit.buffer.getNumSamples(); ++i)
+                hit.buffer.setSample (ch, i, 0.5f);
+        hit.peak = 0.5f;
+        bank->hits.push_back (std::move (hit));
+        auto set = std::make_shared<SamplerSet>();
+        auto lane = std::make_unique<SamplerLane>();
+        lane->name = "prueba";
+        lane->bank = bank;
+        lane->events = { { (juce::int64) (0.25 * sr), 1.0f }, { (juce::int64) (0.6 * sr), 0.0f } };   // fuerte y suave
+        lane->control.gain = 1.0f;
+        lane->control.outputPair = 0;
+        set->lanes.push_back (std::move (lane));
+        engine.setSamplers (set);
+        engine.seekSeconds (0.0);
+        engine.play();
+        render (engine, out, 20);   // fundido de entrada
+        float before = 0.0f, strong = 0.0f, between = 0.0f, soft = 0.0f;
+        for (int b = 0; b < 200 && engine.isPlaying(); ++b)
+        {
+            render (engine, out, 1);
+            const double t = engine.getPositionSeconds() - block / sr;
+            const float pk = out.peak (0);
+            if (t > 0.12 && t + block / sr < 0.24) before = std::max (before, pk);
+            if (t > 0.26 && t + block / sr < 0.34) strong = std::max (strong, pk);
+            if (t > 0.40 && t + block / sr < 0.58) between = std::max (between, pk);
+            if (t > 0.61 && t + block / sr < 0.69) soft = std::max (soft, pk);
+        }
+        CHECK (before < 1.0e-4f && between < 1.0e-4f);                 // silencio fuera de los golpes
+        CHECK (std::abs (strong - 0.5f) < 0.02f);                       // velocidad 1 -> ganancia 1 -> 0.5
+        CHECK (std::abs (soft - 0.25f) < 0.02f);                        // velocidad 0 -> ganancia 0.5 -> 0.25
+        CHECK (set->lanes[0]->control.peakL.load() > 0.4f);             // medidores de la línea
+        // Mute de la línea: silencio; solo de la línea silencia las pistas
+        set->lanes[0]->control.muted = true;
+        engine.seekSeconds (0.2);
+        render (engine, out, 20);
+        float muted = 0.0f;
+        for (int b = 0; b < 12; ++b) { render (engine, out, 1); muted = std::max (muted, out.peak (0)); }
+        CHECK (muted < 1.0e-3f);
+        set->lanes[0]->control.muted = false;
+        engine.setSamplers (nullptr);
+        engine.pause();
+        song->tracks[0]->muted = false;
+        song->tracks[1]->muted = false;
+        engine.seekSeconds (0.0);
+        render (engine, out, 4);
     }
 
     std::cout << "[AudioEngine] la curva de ganancia por tramo se aplica con rampa\n";

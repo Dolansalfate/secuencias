@@ -346,6 +346,12 @@ public:
         solo.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
         solo.onClick = [this] { if (owner.onSolo) owner.onSolo (index, solo.getToggleState()); };
         addAndMakeVisible (solo);
+        trig.setButtonText ("T");
+        trig.setClickingTogglesState (true);
+        trig.setColour (juce::TextButton::buttonOnColourId, juce::Colours::orange.darker (0.2f));
+        trig.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
+        trig.onClick = [this] { if (owner.onTrigger) owner.onTrigger (index, trig.getToggleState()); };
+        addAndMakeVisible (trig);
         refreshState();
         ui::disableFocus (*this);
         setWantsKeyboardFocus (false);
@@ -364,6 +370,18 @@ public:
         repaint();
     }
 
+    void setTriggerState (bool on)
+    {
+        if (trig.getToggleState() != on)
+            trig.setToggleState (on, juce::dontSendNotification);
+    }
+
+    void setMarks (std::vector<TriggerMark> m)
+    {
+        marks = std::move (m);
+        repaint();
+    }
+
     void resized() override
     {
         auto h = getLocalBounds().withWidth (headerWidth).reduced (6, 4);
@@ -372,13 +390,21 @@ public:
         mute.setBounds (buttons.removeFromLeft (26));
         buttons.removeFromLeft (4);
         solo.setBounds (buttons.removeFromLeft (26));
+        buttons.removeFromLeft (4);
+        trig.setBounds (buttons.removeFromLeft (26));
         name.setBounds (h);
         invalidate();
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
-        if (e.x < headerWidth || owner.song == nullptr)
+        if (e.x < headerWidth)
+        {
+            if (e.mods.isPopupMenu() && owner.onLaneHeaderMenu)
+                owner.onLaneHeaderMenu (index);   // menú del trigger de la pista
+            return;
+        }
+        if (owner.song == nullptr)
             return;
         const double t = juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (e.x - headerWidth));
         if (e.mods.isPopupMenu())
@@ -442,6 +468,22 @@ public:
         g.drawImageAt (image, headerWidth, 0);
         g.setColour (juce::Colours::black.withAlpha (0.5f));
         g.fillRect (headerWidth, getHeight() - 1, getWidth() - headerWidth, 1);
+
+        // Golpes detectados (triggers): marcas naranjas al pie del carril, tan altas como fuerte fue el golpe
+        if (! marks.empty())
+        {
+            g.setColour (juce::Colours::orange);
+            const double t0 = owner.viewStart, t1 = owner.xToTime (getWidth() - headerWidth);
+            const int maxH = juce::jmax (6, getHeight() / 3);
+            for (auto& m : marks)
+            {
+                if (m.seconds < t0) continue;
+                if (m.seconds > t1) break;
+                const int x = headerWidth + owner.timeToX (m.seconds);
+                const int h = 3 + (int) ((float) (maxH - 3) * juce::jlimit (0.0f, 1.0f, m.velocity));
+                g.fillRect (x, getHeight() - 1 - h, 2, h);
+            }
+        }
     }
 
     LoadedTrack& getTrack() { return track; }
@@ -492,9 +534,10 @@ private:
     int index;
     juce::Colour colour;
     juce::Label name;
-    juce::TextButton mute, solo;
+    juce::TextButton mute, solo, trig;
     juce::Image image;
     bool imageValid = false;
+    std::vector<TriggerMark> marks;
 };
 
 //==============================================================================
@@ -714,6 +757,18 @@ void TimelineView::setLoop (double start, double end)
     loopStart = start;
     loopEnd = end;
     overlay->repaint();
+}
+
+void TimelineView::setTriggerStates (const std::vector<bool>& perTrack)
+{
+    for (int i = 0; i < lanes.size(); ++i)
+        lanes[i]->setTriggerState (i < (int) perTrack.size() && perTrack[(size_t) i]);
+}
+
+void TimelineView::setTriggerMarks (const std::vector<std::vector<TriggerMark>>& perTrack)
+{
+    for (int i = 0; i < lanes.size(); ++i)
+        lanes[i]->setMarks (i < (int) perTrack.size() ? perTrack[(size_t) i] : std::vector<TriggerMark>());
 }
 
 void TimelineView::refreshTrackStates()

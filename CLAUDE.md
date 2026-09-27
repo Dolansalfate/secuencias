@@ -80,6 +80,16 @@ modelo que usa Moises).
   escenario, un letrero amarillo grande mientras dura y, hasta 12 s antes, "Próxima nota (en
   N s): ...". Se guardan en `song.json` (`notes`), se mueven o recortan con la grilla
   (`shiftGrid`) y Ctrl+Z las deshace.
+- **Triggers y sampler interno** (`Triggers`, `SamplerLane` en el motor): botón "T" en la cabecera
+  de cada carril (o clic derecho en la cabecera): los golpes de esa pista (por ejemplo el bombo
+  separado) disparan un **banco de muestras** (carpeta con wav en `<biblioteca>/_bancos/<nombre>`,
+  compartida por todas las canciones; se importan wav sueltos como banco nuevo, o se graban,
+  punto 2). La detección es fuera de línea sobre el audio ya renderizado (`triggers::detect`:
+  umbral en dBFS, sensibilidad y tiempo mínimo por pista), así los golpes se conocen de
+  antemano: timing exacto a la muestra y sin latencia. Cada golpe elige la muestra por su
+  fuerza (capas de suave a fuerte, alternando vecinas) y suena en un canal propio del
+  mezclador ("<pista> (muestras)", naranja: fader, mute, solo, salida y medidor, guardados en
+  `trigger` de la pista). Las marcas naranjas al pie del carril muestran los golpes y su fuerza.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -270,6 +280,7 @@ Source/
                        detección de secciones de tempo
   Music.h/.cpp         Notas, acordes y tonalidades: enarmonías, sostenidos o bemoles, solfeo
   Arrangement.h/.cpp   Arreglo: tramos de audio (cortar, mover, eliminar, unir), render a RAM, shiftGrid
+  Triggers.h/.cpp      Golpes detectados (detect), bancos de muestras (loadBank, sliceHits, writeWav)
   Stretcher.h/.cpp     Render de tempo y tono con Signalsmith Stretch (FetchContent, MIT)
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
 linux/                 .desktop (plantilla con @EXEC@), ícono SVG y empaquetar-deb.sh
@@ -312,6 +323,14 @@ LEEME.md               Guía para el usuario final
   añade la ganancia por pista, suavizada con `LoadedTrack::levelSmooth`; no afecta al click.
   `setSongGain` (nivelado entre canciones) se multiplica
   con el fader maestro en `applyMasterAndMeter`.
+- Sampler de triggers: `setSamplers (SamplerSet)` bajo `songLock` (`setSong` lo descarta).
+  Cada `SamplerLane` tiene sus `events` (muestra y velocidad, ordenados), su banco y un
+  `LoadedTrack` de control (ganancia, mute, solo, salida, medidores) sin buffer. En
+  `renderChunk`, tras las pistas: por muestra, con `positions[]`, se disparan los golpes cuya
+  posición coincide (tras un salto se relocaliza con búsqueda binaria; los que quedaron atrás
+  no suenan), en 16 voces prealocadas (se roba la más avanzada), ganancia 0,5 + 0,5 × velocidad,
+  mezcla en `laneL/laneR`, envolvente global, salida al par de la línea y medidores. El solo de
+  una línea silencia las pistas y viceversa.
 - Fader maestro: `masterGain` se aplica con rampa a todas las salidas al final del callback
   (`applyMasterAndMeter`), que además mide pico (`takeOutputPeak`) y RMS (`getOutputRms`) por
   canal de salida, hasta `maxMeteredOutputs`.
@@ -391,6 +410,11 @@ Secuencias/
   dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. Todo lo demás
   (tiempos, acordes, marcadores, secciones de tempo, nivelado) está en la línea de tiempo de
   la canción, no en la del audio original.
+- Triggers: por stem, `trigger`: `{ enabled, sound ("banco:<nombre>" o "vst:<n>"), note, thresholdDb,
+  sensitivity, minMs, gainDb, muted, outputPair }` (`TriggerSettings`), y `songTime` (la pista
+  ya está en la línea de tiempo del arreglo: no pasa por los clips; para grabaciones). Los
+  bancos viven en `<raíz>/_bancos/<nombre>/*.wav` (`Library::listBanks`, `bankFolder`;
+  `load()` no los toma como canción; `exportAll` los copia).
 - Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
   (`SongNote`, ordenadas por `sortNotes`; las de texto vacío no se guardan).
 - Escritura y tonalidad: `spelling` (0 = según la tonalidad, 1 = sostenidos, 2 = bemoles) y
@@ -569,6 +593,23 @@ Pasos de `run()`:
   [--modocorte=1|2|3]` corta (con el modo elegido; imprime dónde cayó el corte) y desplaza
   para revisar el render.
 
+### 5.4f Triggers (golpes y sampler)
+- `triggers::detect (buffer, sr, umbralDb, sensibilidad, minMs)`: envolvente RMS en dB por
+  bloques de 1 ms; golpe donde sube ≥ 6 dB en 3 ms y supera el umbral; el inicio es el bloque
+  anterior a superar en 6 dB el valle previo (como `findOnset`); tras un golpe hay que bajar
+  6 dB desde su pico (o pasar `minMs`) para admitir otro; velocidad = (pico − umbral) / (0 −
+  umbral), elevada a 1/sensibilidad. `sliceHits` corta una grabación de golpes sueltos en
+  muestras (para bancos); `loadBank` lee una carpeta (recorte a 2 ms antes del ataque,
+  fundidos, tope 4 s, remuestreo, orden por pico) y `SampleBankData::pick` elige por velocidad
+  alternando vecinas; `readAudio` y `writeWav` son utilidades.
+- En `MainComponent`: `buildSamplers (renderizado, info, sr, carpetaBancos, formatos, caché)`
+  corre en el hilo de carga al final de cada render (y solo eso, reutilizando `currentSong`,
+  cuando únicamente cambian los triggers: `renderedTriggers`); `applySamplers` lo entrega al
+  motor y al mezclador; `syncTriggerMarks` pinta las marcas y los botones T; `triggerMenu`,
+  `setTriggerEnabled`, `importBankFor`, `triggerSettingsDialog`; `saveCurrentMix` guarda el
+  canal del sampler en `trigger`. La caché de bancos (`BankCache`) se vacía al importar.
+  `--captura --trigger=<banco>` activa el trigger de la batería.
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -746,6 +787,11 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.4.0 (triggers y sampler, punto 1 del plan de estudio en vivo)**: `Triggers`
+  (detección de golpes, bancos de muestras), `SamplerLane`/`SamplerSet` en el motor, botón T y
+  marcas de golpes en los carriles, canal del sampler en el mezclador, `trigger` por stem en
+  `song.json`, bancos en `_bancos`, `--captura --trigger`. Siguen: grabación de entradas
+  (punto 2) e instrumentos VST/AU (punto 3).
 - **v0.3.8**: batería en partes (etapa `drumsep` con MDX23C DrumSep, casilla "Batería en
   partes", "Solo la batería en partes" para canciones ya separadas, `startDrumParts`,
   `replaceStem`, nombres Bombo/Caja/Toms/Hi-hat/Ride/Crash, botón "Instalar también Roformer y
