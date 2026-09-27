@@ -209,6 +209,11 @@ public:
     static juce::String audioFilePatterns();     // "*.wav;*.flac;..." para los selectores de archivos
     static juce::String audioFormatsDescription();   // "wav, aiff, flac, ..." para mensajes
     static juce::Array<juce::File> audioFilesIn (const juce::File& folder);
+    // Archivo nuevo para una grabación dentro de la carpeta de una canción ("<nombre>.wav", sin pisar nada)
+    static juce::File newRecordingFile (const juce::File& songFolder, const juce::String& name)
+    {
+        return songFolder.getNonexistentChildFile (juce::File::createLegalFileName (name.trim().isEmpty() ? "grabacion" : name.trim()), ".wav", false);
+    }
 
     std::vector<SongInfo> songs;
 

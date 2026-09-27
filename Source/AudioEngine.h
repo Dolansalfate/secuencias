@@ -25,6 +25,7 @@ struct LoadedTrack
 {
     juce::String name;
     int stemIndex = -1;
+    bool songTime = false;                    // ya está en la línea de tiempo de la canción (grabación): no pasa por los tramos
     juce::AudioBuffer<float> buffer;          // estéreo, a la frecuencia del dispositivo
     WaveformCache waveform;
     std::atomic<float> gain { 1.0f };
@@ -70,6 +71,19 @@ struct SamplerLane
 struct SamplerSet
 {
     std::vector<std::unique_ptr<SamplerLane>> lanes;
+};
+
+// Grabación de una entrada (punto 2). La UI crea el ThreadedWriter (y lo destruye después de
+// clearRecorder, que espera a que el callback deje de usarlo); el hilo de audio solo copia los
+// canales de entrada elegidos al writer (cola sin bloqueo), los escucha por un par de salida con
+// rampa y mide su pico. `recordStartPosition` es la posición del transporte al grabar el primer bloque.
+struct RecordSetup
+{
+    juce::AudioFormatWriter::ThreadedWriter* writer = nullptr;   // nullptr = solo escuchar y medir
+    int inputL = 0, inputR = -1;      // canales de entrada entre los activos; inputR = -1: mono
+    bool monitor = true;
+    float monitorGain = 1.0f;
+    int monitorPair = 0;
 };
 
 // Ganancia por tramo (nivelado): gains[i] rige desde positions[i] hasta positions[i+1].
@@ -144,6 +158,19 @@ public:
 
     double getSampleRate() const    { return sampleRate.load(); }
     int getNumOutputChannels() const { return numOutputs.load(); }
+    int getNumInputChannels() const  { return numInputs.load(); }
+    int getInputLatency() const      { return inputLatency.load(); }    // muestras, según el dispositivo
+    int getOutputLatency() const     { return outputLatency.load(); }
+
+    // Grabación: empieza en el siguiente bloque. Las dos funciones esperan (unos ms, desde la UI) a que
+    // termine el callback en curso, así al volver de clearRecorder el writer ya no se usa y se puede destruir.
+    void setRecorder (const RecordSetup&);
+    void clearRecorder();
+    bool isRecording() const                       { return recorder.load() != nullptr; }
+    juce::int64 getRecordStartPosition() const     { return recordStartPosition.load(); }   // -1 = aún nada grabado
+    juce::int64 getRecordedSamples() const         { return recordedSamples.load(); }
+    juce::int64 getDroppedSamples() const          { return droppedSamples.load(); }        // no cupieron en la cola
+    float takeInputPeak()                          { return inputPeak.exchange (0.0f); }    // pico de la entrada armada
 
     std::atomic<bool> needsReload { false };   // cambió la frecuencia del dispositivo
 
@@ -163,6 +190,19 @@ public:
 private:
     void renderChunk (LoadedSong&, float* const* outputs, int numOutputs, int offset, int n);
     void applyMasterAndMeter (float* const* outputs, int numOutputs, int numSamples);
+    void processInput (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples);
+    void waitForCallback();
+
+    // Grabación: dos configuraciones alternas (la UI escribe la que el callback no lee) y un puntero atómico
+    RecordSetup recordSlots[2];
+    int recordSlotIndex = 0;                                   // solo UI
+    std::atomic<const RecordSetup*> recorder { nullptr };
+    std::atomic<int> callbackDepth { 0 };                      // 1 mientras corre el callback
+    std::atomic<juce::int64> recordStartPosition { -1 }, recordedSamples { 0 }, droppedSamples { 0 };
+    std::atomic<float> inputPeak { 0.0f };
+    std::atomic<int> numInputs { 0 }, inputLatency { 0 }, outputLatency { 0 };
+    float monitorSmooth = 0.0f;                                // hilo de audio
+    int monitorL = 0, monitorR = -1, monitorOutPair = 0;       // últimos canales escuchados (para apagar con rampa)
 
     juce::SpinLock songLock;
     std::shared_ptr<LoadedSong> song;

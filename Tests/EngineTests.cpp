@@ -10,6 +10,7 @@
 #include "Music.h"
 #include "Arrangement.h"
 #include "Triggers.h"
+#include "Recorder.h"
 #include "Stretcher.h"
 #include <cmath>
 #include <iostream>
@@ -1028,6 +1029,71 @@ int main()
         CHECK (peaks[0] < 1.0e-4f);
     }
 
+    std::cout << "[Recorder] alineación de la toma, compensación y banco desde una grabación\n";
+    {
+        juce::AudioBuffer<float> raw (1, 1000);
+        for (int i = 0; i < 1000; ++i)
+            raw.setSample (0, i, 0.5f);
+        const auto rawF = tmp.getChildFile ("toma-cruda.wav");
+        const auto outF = tmp.getChildFile ("toma-alineada.wav");
+        CHECK (triggers::writeWav (raw, sr, rawF));
+        CHECK (recorder::writeAligned (rawF, 500, outF, formats));
+        {
+            std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (outF));
+            CHECK (r != nullptr && r->lengthInSamples == 1500);
+            juce::AudioBuffer<float> b (1, 1500);
+            r->read (&b, 0, 1500, 0, true, false);
+            CHECK (std::abs (b.getSample (0, 499)) < 1.0e-6f && std::abs (b.getSample (0, 500) - 0.5f) < 1.0e-3f && std::abs (b.getSample (0, 1499) - 0.5f) < 1.0e-3f);
+        }
+        CHECK (recorder::writeAligned (rawF, -200, outF, formats));
+        {
+            std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (outF));
+            CHECK (r != nullptr && r->lengthInSamples == 800);
+        }
+        CHECK (recorder::compensation (128, 256, 10.0, 48000.0) == 128 + 256 + 480);
+        CHECK (recorder::compensation (0, 0, -5.0, 48000.0) == -240);
+
+        // Grabación de tres golpes sueltos (0,2, 0,7 y 1,2 s; 50 ms cada uno; de suave a fuerte) -> banco de 3 muestras
+        juce::AudioBuffer<float> rec (1, (int) (2.0 * sr));
+        rec.clear();
+        const float amps[3] = { 0.3f, 0.5f, 0.8f };
+        const double starts[3] = { 0.2, 0.7, 1.2 };
+        for (int h = 0; h < 3; ++h)
+            for (int i = 0; i < (int) (0.05 * sr); ++i)
+                rec.setSample (0, (int) (starts[h] * sr) + i, amps[h] * (1.0f - (float) i / (float) (0.05 * sr)) * std::sin ((float) i * 0.3f));
+        const auto bankDir = tmp.getChildFile ("_bancos").getChildFile ("Grabado");
+        CHECK (recorder::saveBank (rec, sr, bankDir) == 3);
+        CHECK (Library::audioFilesIn (bankDir).size() == 3);
+        auto bank = triggers::loadBank (bankDir, sr, formats);
+        CHECK (bank != nullptr && bank->hits.size() == 3 && bank->hits[0].peak < bank->hits[1].peak && bank->hits[1].peak < bank->hits[2].peak);
+    }
+
+    std::cout << "[Arrangement] una pista en tiempo de canción (grabación) no pasa por los tramos\n";
+    {
+        auto srcSong = std::make_shared<LoadedSong>();
+        srcSong->sampleRate = sr;
+        srcSong->length = (juce::int64) sr;
+        for (int k = 0; k < 2; ++k)
+        {
+            auto t = std::make_unique<LoadedTrack>();
+            t->name = k == 0 ? "audio" : "grabacion";
+            t->stemIndex = k;
+            t->songTime = k == 1;
+            t->buffer.setSize (2, (int) sr);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < (int) sr; ++i)
+                    t->buffer.setSample (ch, i, (float) i / (float) sr);
+            srcSong->tracks.push_back (std::move (t));
+        }
+        std::vector<Clip> swapped { { 0.5, 1.0, 0.0 }, { 0.0, 0.5, 0.5 } };   // las dos mitades intercambiadas
+        auto out2 = arrangement::render (srcSong, swapped, sr);
+        CHECK (out2 != nullptr && out2->tracks.size() == 2);
+        const int i0 = 2000;   // lejos de los fundidos de 5 ms
+        CHECK (std::abs (out2->tracks[0]->buffer.getSample (0, i0) - (float) ((int) (0.5 * sr) + i0) / (float) sr) < 1.0e-4f);   // reordenada
+        CHECK (std::abs (out2->tracks[1]->buffer.getSample (0, i0) - (float) i0 / (float) sr) < 1.0e-4f);                        // tal cual
+        CHECK (out2->tracks[1]->songTime);
+    }
+
     std::cout << "[AudioEngine] sampler de triggers: dispara muestras en las posiciones exactas\n";
     {
         engine.setClick (false, 120.0, 0.0, 0.0f, 0);
@@ -1093,6 +1159,71 @@ int main()
         set->lanes[0]->control.muted = false;
         engine.setSamplers (nullptr);
         engine.pause();
+        song->tracks[0]->muted = false;
+        song->tracks[1]->muted = false;
+        engine.seekSeconds (0.0);
+        render (engine, out, 4);
+    }
+
+    std::cout << "[AudioEngine] grabación de la entrada: archivo, posición inicial, escucha con rampa\n";
+    {
+        song->tracks[0]->muted = true;
+        song->tracks[1]->muted = true;
+        engine.pause();
+        engine.seekSeconds (0.5);
+        render (engine, out, 4);
+        const auto rawFile = tmp.getChildFile ("entrada-grabada.wav");
+        rawFile.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::FileOutputStream> stream (rawFile.createOutputStream());
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (stream.get(), sr, 1, 24, {}, 0));
+        CHECK (w != nullptr);
+        stream.release();
+        juce::TimeSliceThread thread ("grabacion-test");
+        thread.startThread();
+        auto writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (w.release(), thread, 1 << 16);
+        RecordSetup rs;
+        rs.writer = writer.get();
+        rs.inputL = 0;
+        rs.inputR = -1;
+        rs.monitor = true;
+        rs.monitorPair = 0;
+        engine.setRecorder (rs);
+        CHECK (engine.isRecording());
+        std::vector<float> inData ((size_t) block, 0.3f);
+        const float* inPtrs[1] = { inData.data() };
+        juce::AudioIODeviceCallbackContext ctx;
+        float monitorPeak = 0.0f, firstSample = 0.0f;
+        for (int b = 0; b < 10; ++b)
+        {
+            engine.audioDeviceIOCallbackWithContext (inPtrs, 1, out.ptrs.data(), (int) out.ptrs.size(), block, ctx);
+            if (b == 0) firstSample = std::abs (out.data[0][0]);
+            if (b >= 5) monitorPeak = std::max (monitorPeak, out.peak (0));
+        }
+        CHECK (std::abs ((double) engine.getRecordStartPosition() - 0.5 * sr) <= 2 * block);   // posición del transporte al empezar
+        CHECK (engine.getRecordedSamples() == 10 * block && engine.getDroppedSamples() == 0);
+        CHECK (engine.takeInputPeak() > 0.29f);
+        CHECK (firstSample < 0.02f);                          // la escucha entra con rampa (dentro del primer bloque)
+        CHECK (std::abs (monitorPeak - 0.3f) < 0.01f);        // y llega al nivel de la entrada por la salida 1-2
+        engine.clearRecorder();
+        CHECK (! engine.isRecording());
+        float tail = 0.0f;
+        for (int b = 0; b < 3; ++b)
+        {
+            engine.audioDeviceIOCallbackWithContext (inPtrs, 1, out.ptrs.data(), (int) out.ptrs.size(), block, ctx);
+            tail = out.peak (0);
+        }
+        CHECK (tail < 1.0e-3f);                               // la escucha se apaga sola
+        writer.reset();                                       // cierra el archivo
+        thread.stopThread (2000);
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (rawFile));
+        CHECK (reader != nullptr && reader->lengthInSamples == 10 * block);
+        if (reader != nullptr)
+        {
+            juce::AudioBuffer<float> rb (1, (int) reader->lengthInSamples);
+            reader->read (&rb, 0, rb.getNumSamples(), 0, true, false);
+            CHECK (std::abs (rb.getSample (0, 0) - 0.3f) < 1.0e-3f && std::abs (rb.getSample (0, rb.getNumSamples() - 1) - 0.3f) < 1.0e-3f);
+        }
         song->tracks[0]->muted = false;
         song->tracks[1]->muted = false;
         engine.seekSeconds (0.0);

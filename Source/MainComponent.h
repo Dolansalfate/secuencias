@@ -12,6 +12,7 @@
 #include "MixerPanel.h"
 #include "FilePicker.h"
 #include "StageView.h"
+#include "Recorder.h"
 #include <map>
 
 class MarkerButton;
@@ -168,6 +169,27 @@ private:
     void setTriggerEnabled (int track, bool on);
     void importBankFor (int track);
     void triggerSettingsDialog (int track);
+
+    // Grabación de entradas (punto 2): una pista nueva alineada con la canción, o golpes para un banco
+    struct Recording
+    {
+        std::unique_ptr<juce::TimeSliceThread> thread;
+        std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer;
+        juce::File tempFile;         // toma cruda (sin alinear)
+        juce::File songFolder;       // canción a la que se agrega la pista
+        juce::String name;           // nombre de la pista nueva o del banco
+        bool toBank = false;         // destino: banco de muestras; si no, pista nueva de la canción
+        int bankTrack = -1;          // pista cuyo trigger usará el banco nuevo (-1 = ninguna)
+        double extraOffsetMs = 0.0;  // compensación manual además de la latencia del dispositivo
+        bool active = false;
+        juce::uint32 startedAt = 0;
+    };
+    void recordDialog (bool toBank, int bankTrack);      // entrada, nombre, escucha, compensación
+    bool ensureInputsEnabled (juce::String& problem);    // activa las dos primeras entradas si no hay ninguna
+    void startRecording (int inputL, int inputR, bool toBank, int bankTrack, const juce::String& name, int monitorPair, double extraOffsetMs);
+    void stopRecording (bool discard);                   // cierra la toma y la guarda (alineada o como banco) en el hilo de carga
+    void recordingFinished (bool ok, const juce::String& message, const juce::String& fileName, const juce::String& name,
+                            bool toBank, int bankTrack, const juce::String& bankName, const juce::File& songFolder);
     double songLengthSeconds() const;              // largo de la línea de tiempo de la canción (arreglo, sin estirar)
 
     // Arreglo (fase 4): cortar, mover, eliminar y unir tramos de audio; deshacer
@@ -247,6 +269,7 @@ private:
     std::shared_ptr<SamplerSet> samplers;      // triggers de lo que suena
     std::vector<TriggerSettings> renderedTriggers;
     BankCache bankCache;
+    Recording recording;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)
@@ -276,7 +299,7 @@ private:
     juce::ListBox setlist;
 
     juce::Label songTitle, nextLabel, sectionLabel, timeLabel, chordLabel, keyLabel;
-    juce::TextButton prevBtn, playBtn, stopBtn, nextBtn, liveBtn, zoomFitBtn;
+    juce::TextButton prevBtn, playBtn, stopBtn, nextBtn, recordBtn, liveBtn, zoomFitBtn;
     juce::ToggleButton loopBtn;
     juce::Slider positionSlider;
 

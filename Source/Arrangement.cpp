@@ -331,9 +331,20 @@ namespace arrangement
             t->muted = src->muted.load();
             t->solo = src->solo.load();
             t->outputPair = src->outputPair.load();
+            t->songTime = src->songTime;
             t->buffer.setSize (2, outLen);
             t->buffer.clear();
             const int channels = juce::jmin (2, src->buffer.getNumChannels());
+            if (src->songTime)
+            {
+                // Grabación hecha sobre el arreglo: ya está en la línea de tiempo de la canción, se copia tal cual
+                const int n = juce::jmin (outLen, src->buffer.getNumSamples());
+                for (int ch = 0; ch < 2; ++ch)
+                    t->buffer.copyFrom (ch, 0, src->buffer, juce::jmin (ch, channels - 1), 0, n);
+                t->waveform = WaveformCache::build (t->buffer);
+                out->tracks.push_back (std::move (t));
+                continue;
+            }
             for (auto& c : clips)
             {
                 const int s0 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcStart * sr));

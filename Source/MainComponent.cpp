@@ -136,6 +136,14 @@ MainComponent::MainComponent()
     stopBtn.onClick = [this] { engine.stop(); updateLoopRegion(); };
     nextBtn.setButtonText (">>");
     nextBtn.onClick = [this] { nextSong (1); };
+    recordBtn.setButtonText ("Grabar");
+    recordBtn.onClick = [this]
+    {
+        if (recording.active)
+            stopRecording (false);
+        else
+            recordDialog (false, -1);
+    };
     loopBtn.setButtonText (tr ("Loop de sección"));
     loopBtn.onClick = [this] { updateLoopRegion(); };
 
@@ -161,7 +169,7 @@ MainComponent::MainComponent()
     cutModeBox.onChange = [this] { props.getUserSettings()->setValue ("cutMode", cutModeBox.getSelectedId()); };
 
     for (auto* c : std::initializer_list<juce::Component*> { &songTitle, &nextLabel, &sectionLabel, &timeLabel, &chordLabel, &keyLabel,
-                     &prevBtn, &playBtn, &stopBtn, &nextBtn, &loopBtn, &positionSlider, &addMarkerBtn, &cutModeBox })
+                     &prevBtn, &playBtn, &stopBtn, &nextBtn, &recordBtn, &loopBtn, &positionSlider, &addMarkerBtn, &cutModeBox })
         addAndMakeVisible (c);
 
     // --- Click ---
@@ -408,6 +416,8 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    if (recording.active)
+        stopRecording (true);   // sin hilos de grabación vivos al salir
     ++loadGeneration;
     abortJobs = true;
     levelPool.removeAllJobs (true, 10000);
@@ -497,6 +507,8 @@ void MainComponent::resized()
     stopBtn.setBounds (transport.removeFromLeft (110));
     transport.removeFromLeft (6);
     nextBtn.setBounds (transport.removeFromLeft (70));
+    transport.removeFromLeft (6);
+    recordBtn.setBounds (transport.removeFromLeft (96));
     transport.removeFromLeft (16);
     loopBtn.setBounds (transport.removeFromLeft (170));
     liveBtn.setBounds (transport.removeFromRight (100));
@@ -850,6 +862,8 @@ void MainComponent::unloadSong()
 
 void MainComponent::loadSongAt (int index)
 {
+    if (recording.active)
+        stopRecording (false);   // una toma en curso se cierra (y se guarda) antes de cambiar de canción
     if (! juce::isPositiveAndBelow (index, (int) library.songs.size()))
         return;
 
@@ -2314,6 +2328,7 @@ void MainComponent::triggerMenu (int track)
     if (banks.isEmpty())
         sound.addItem (99, tr ("(no hay bancos todavía)"), false);
     sound.addItem (2, tr ("Importar muestras (wav) como banco nuevo..."));
+    sound.addItem (5, tr ("Grabar golpes como banco nuevo..."));
     sound.addSeparator();
     sound.addSectionHeader (tr ("Instrumentos VST / AU"));
     sound.addItem (299, tr ("(sin instrumentos cargados)"), false);
@@ -2359,6 +2374,11 @@ void MainComponent::triggerMenu (int track)
         else if (result == 3)
         {
             triggerSettingsDialog (track);
+            return;
+        }
+        else if (result == 5)
+        {
+            recordDialog (true, track);
             return;
         }
         else if (result == 4)
@@ -2493,6 +2513,290 @@ void MainComponent::setTriggerForCapture (const juce::String& bank)
         }
     library.saveSong (*info);
     requestRender();
+}
+
+//==============================================================================
+// Grabación de entradas (punto 2)
+
+bool MainComponent::ensureInputsEnabled (juce::String& problem)
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+    {
+        problem = tr ("No hay un dispositivo de audio abierto. Revísalo en «Audio».");
+        return false;
+    }
+    if (device->getActiveInputChannels().countNumberOfSetBits() > 0)
+        return true;
+    if (device->getInputChannelNames().isEmpty())
+    {
+        problem = tr ("El dispositivo de audio actual no tiene entradas. Elige en «Audio» una interfaz con entradas.");
+        return false;
+    }
+    // Se activan las dos primeras entradas (queda guardado con la configuración del dispositivo)
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.useDefaultInputChannels = false;
+    setup.inputChannels.clear();
+    setup.inputChannels.setRange (0, juce::jmin (2, device->getInputChannelNames().size()), true);
+    if (setup.inputDeviceName.isEmpty())
+        setup.inputDeviceName = setup.outputDeviceName;
+    const auto err = deviceManager.setAudioDeviceSetup (setup, true);
+    device = deviceManager.getCurrentAudioDevice();
+    if (err.isNotEmpty() || device == nullptr || device->getActiveInputChannels().countNumberOfSetBits() == 0)
+    {
+        problem = tr ("No se pudieron activar las entradas del dispositivo") + (err.isNotEmpty() ? ": " + err : juce::String())
+                  + tr ("\n\nActívalas en «Audio».");
+        return false;
+    }
+    return true;
+}
+
+void MainComponent::recordDialog (bool toBank, int bankTrack)
+{
+    if (recording.active)
+        return;
+    if (! toBank && (currentInfo() == nullptr || currentSong == nullptr))
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Grabar"), tr ("Carga una canción para grabarle una pista nueva."));
+        return;
+    }
+    if (! toBank && ! timeMap.isPlain())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Grabar"),
+                                                tr ("Para grabar, vuelve al tempo y al tono originales: la toma se guarda alineada con el audio tal como está en el disco."));
+        return;
+    }
+    juce::String problem;
+    if (! ensureInputsEnabled (problem))
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Grabar"), problem);
+        return;
+    }
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const auto names = device->getInputChannelNames();
+    const auto active = device->getActiveInputChannels();
+    juce::StringArray items;
+    std::vector<std::pair<int, int>> choices;   // canales (entre los activos) izquierdo y derecho (-1 = mono)
+    std::vector<int> compactOf ((size_t) names.size(), -1);
+    int compact = 0;
+    for (int i = 0; i < names.size(); ++i)
+        if (active[i])
+            compactOf[(size_t) i] = compact++;
+    for (int i = 0; i < names.size(); ++i)
+        if (active[i])
+        {
+            items.add (tr ("Entrada ") + juce::String (i + 1) + ": " + names[i]);
+            choices.push_back ({ compactOf[(size_t) i], -1 });
+        }
+    for (int i = 0; i + 1 < names.size(); i += 2)
+        if (active[i] && active[i + 1])
+        {
+            items.add (tr ("Entradas ") + juce::String (i + 1) + "-" + juce::String (i + 2) + tr (" (estéreo)"));
+            choices.push_back ({ compactOf[(size_t) i], compactOf[(size_t) i + 1] });
+        }
+
+    auto* w = new juce::AlertWindow (toBank ? tr ("Grabar golpes para un banco de muestras") : tr ("Grabar una pista nueva"),
+                                     toBank ? tr ("Toca golpes sueltos, de suave a fuerte, con silencio entre ellos. Al detener, cada golpe "
+                                                  "queda como una muestra del banco y el trigger de la pista lo usa.")
+                                            : tr ("La canción arranca desde el cabezal y la entrada se graba alineada con ella (se compensa la "
+                                                  "latencia del dispositivo). Al detener (botón, Stop o final de la canción) la toma se agrega "
+                                                  "como pista nueva."),
+                                     juce::MessageBoxIconType::NoIcon, this);
+    w->addComboBox ("entrada", items, tr ("Entrada"));
+    w->getComboBoxComponent ("entrada")->setSelectedItemIndex (juce::jlimit (0, items.size() - 1, props.getUserSettings()->getIntValue ("recordInput", 0)));
+    w->addTextEditor ("nombre", toBank ? tr ("Bombo") : tr ("Grabación"), toBank ? tr ("Nombre del banco") : tr ("Nombre de la pista"));
+    w->addComboBox ("monitor", {}, tr ("Escuchar la entrada por"));
+    auto* mon = w->getComboBoxComponent ("monitor");
+    const int savedMonitor = props.getUserSettings()->getIntValue ("recordMonitor", 0);
+    fillOutputBox (*mon, juce::jmax (0, savedMonitor));
+    mon->addItem (tr ("No escuchar"), 999);
+    if (savedMonitor < 0)
+        mon->setSelectedId (999, juce::dontSendNotification);
+    w->addTextEditor ("ajuste", juce::String (props.getUserSettings()->getDoubleValue ("recordOffsetMs", 0.0), 1),
+                      tr ("Compensación extra (ms; positivo = adelanta la toma)"));
+    w->addButton (tr ("Grabar"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, choices, toBank, bankTrack] (int result)
+    {
+        if (result != 1 || choices.empty())
+            return;
+        const int idx = juce::jlimit (0, (int) choices.size() - 1, w->getComboBoxComponent ("entrada")->getSelectedItemIndex());
+        const int monId = w->getComboBoxComponent ("monitor")->getSelectedId();
+        const int monitorPair = monId == 999 ? -1 : juce::jmax (0, monId - 1);
+        const double extra = juce::jlimit (-500.0, 500.0, w->getTextEditorContents ("ajuste").replace (",", ".").getDoubleValue());
+        auto* settings = props.getUserSettings();
+        settings->setValue ("recordInput", idx);
+        settings->setValue ("recordMonitor", monitorPair);
+        settings->setValue ("recordOffsetMs", extra);
+        startRecording (choices[(size_t) idx].first, choices[(size_t) idx].second, toBank, bankTrack,
+                        w->getTextEditorContents ("nombre").trim(), monitorPair, extra);
+    }), true);
+}
+
+void MainComponent::startRecording (int inputL, int inputR, bool toBank, int bankTrack, const juce::String& name, int monitorPair, double extraOffsetMs)
+{
+    if (recording.active)
+        return;
+    const double sr = engine.getSampleRate();
+    auto tempDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("secuencias_grabacion");
+    tempDir.createDirectory();
+    const auto file = tempDir.getNonexistentChildFile ("toma", ".wav", false);
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    juce::WavAudioFormat wav;
+    const int channels = inputR >= 0 ? 2 : 1;
+    std::unique_ptr<juce::AudioFormatWriter> writer (stream != nullptr ? wav.createWriterFor (stream.get(), sr, (unsigned) channels, 24, {}, 0) : nullptr);
+    if (writer == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Grabar"), tr ("No se pudo crear el archivo temporal de la toma en ") + tempDir.getFullPathName());
+        return;
+    }
+    stream.release();
+    recording.thread = std::make_unique<juce::TimeSliceThread> ("Grabacion");
+    recording.thread->startThread();
+    recording.writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), *recording.thread, (int) (sr * 8.0));   // 8 s de cola
+    recording.tempFile = file;
+    recording.songFolder = currentInfo() != nullptr ? currentInfo()->folder : juce::File();
+    recording.name = name.isEmpty() ? (toBank ? tr ("Banco") : tr ("Grabación")) : name;
+    recording.toBank = toBank;
+    recording.bankTrack = bankTrack;
+    recording.extraOffsetMs = extraOffsetMs;
+    recording.active = true;
+    recording.startedAt = juce::Time::getMillisecondCounter();
+
+    RecordSetup setup;
+    setup.writer = recording.writer.get();
+    setup.inputL = inputL;
+    setup.inputR = inputR;
+    setup.monitor = monitorPair >= 0;
+    setup.monitorPair = juce::jmax (0, monitorPair);
+    setup.monitorGain = 1.0f;
+    if (! toBank && engine.getPositionSeconds() >= songLengthSeconds() - 0.05)
+        engine.seekSeconds (0.0);   // al final: la toma arranca desde el principio
+    engine.setRecorder (setup);
+    if (! toBank && ! engine.isPlaying())
+        engine.play();
+    recordBtn.setButtonText (tr ("Detener REC"));
+    recordBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::red.darker (0.3f));
+    sepLabel.setText (tr ("GRABANDO"), juce::dontSendNotification);
+}
+
+void MainComponent::stopRecording (bool discard)
+{
+    if (! recording.active)
+        return;
+    recording.active = false;
+    const auto startPos = engine.getRecordStartPosition();
+    const auto recorded = engine.getRecordedSamples();
+    const auto dropped = engine.getDroppedSamples();
+    const double sr = engine.getSampleRate();
+    const auto latency = recorder::compensation (engine.getInputLatency(), engine.getOutputLatency(), recording.extraOffsetMs, sr);
+    engine.clearRecorder();        // espera a que el callback deje de usar el writer
+    recording.writer.reset();      // vacía la cola y cierra el archivo
+    if (recording.thread != nullptr)
+        recording.thread->stopThread (3000);
+    recording.thread.reset();
+    recordBtn.setButtonText ("Grabar");
+    recordBtn.removeColour (juce::TextButton::buttonColourId);
+
+    const auto temp = recording.tempFile;
+    const auto name = recording.name;
+    const bool toBank = recording.toBank;
+    const int bankTrack = recording.bankTrack;
+    const auto songFolder = recording.songFolder;
+    if (discard || recorded <= 0 || startPos < 0)
+    {
+        temp.deleteFile();
+        sepLabel.setText (tr ("Grabación descartada"), juce::dontSendNotification);
+        return;
+    }
+    const auto bankDir = toBank ? library.bankFolder (name) : juce::File();
+    sepLabel.setText (tr ("Guardando la grabación..."), juce::dontSendNotification);
+    juce::Component::SafePointer<MainComponent> safe (this);
+    loaderPool.addJob ([this, safe, temp, name, toBank, bankTrack, songFolder, bankDir, startPos, latency, dropped, sr]
+    {
+        bool ok = false;
+        juce::String message, fileName;
+        try
+        {
+            if (toBank)
+            {
+                juce::AudioBuffer<float> buffer;
+                const int count = triggers::readAudio (temp, sr, formatManager, buffer) ? recorder::saveBank (buffer, sr, bankDir) : 0;
+                ok = count > 0;
+                message = ok ? tr ("Banco «") + bankDir.getFileName() + tr ("»: ") + juce::String (count) + tr (" golpes guardados")
+                             : tr ("No se detectaron golpes en la grabación (¿la entrada correcta? ¿nivel suficiente?)");
+            }
+            else
+            {
+                const auto out = Library::newRecordingFile (songFolder, name);
+                ok = songFolder.isDirectory() && recorder::writeAligned (temp, startPos - latency, out, formatManager);
+                fileName = out.getFileName();
+                message = ok ? tr ("Pista «") + name + tr ("» grabada") : tr ("No se pudo guardar la grabación");
+            }
+        }
+        catch (const std::exception& e)
+        {
+            message = tr ("Error al guardar la grabación: ") + juce::String (e.what());
+        }
+        if (dropped > 0)
+            message += tr (" (atención: se perdieron ") + juce::String (dropped) + tr (" muestras porque la cola de grabación se llenó)");
+        temp.deleteFile();
+        juce::MessageManager::callAsync ([safe, ok, message, fileName, name, toBank, bankTrack, bankDir, songFolder]
+        {
+            if (auto* self = safe.getComponent())
+                self->recordingFinished (ok, message, fileName, name, toBank, bankTrack, bankDir.getFileName(), songFolder);
+        });
+    });
+}
+
+void MainComponent::recordingFinished (bool ok, const juce::String& message, const juce::String& fileName, const juce::String& name,
+                                       bool toBank, int bankTrack, const juce::String& bankName, const juce::File& songFolder)
+{
+    sepLabel.setText (message, juce::dontSendNotification);
+    if (! ok)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Grabar"), message);
+        return;
+    }
+    if (toBank)
+    {
+        {
+            const juce::ScopedLock sl (bankCache.lock);
+            bankCache.banks.clear();
+        }
+        auto* info = currentInfo();
+        if (info != nullptr && currentSong != nullptr && juce::isPositiveAndBelow (bankTrack, (int) currentSong->tracks.size()))
+        {
+            const int stem = currentSong->tracks[(size_t) bankTrack]->stemIndex;
+            if (juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+            {
+                auto& t = info->stems[(size_t) stem].trigger;
+                t.sound = "banco:" + bankName;
+                t.enabled = true;
+                library.saveSong (*info);
+                syncTriggerMarks();
+                requestRender();
+            }
+        }
+        return;
+    }
+    // Pista nueva en la canción grabada (que puede ya no ser la seleccionada)
+    for (int i = 0; i < (int) library.songs.size(); ++i)
+    {
+        auto& s = library.songs[(size_t) i];
+        if (s.folder != songFolder)
+            continue;
+        StemInfo si;
+        si.name = name;
+        si.fileName = fileName;
+        si.songTime = true;
+        s.stems.push_back (si);
+        s.fitStemArrays();
+        library.saveSong (s);
+        if (i == currentIndex)
+            loadSongAt (currentIndex);   // recarga con la pista nueva
+        break;
+    }
 }
 
 void MainComponent::clipMenu (double playbackSeconds, int lane)
@@ -2891,6 +3195,20 @@ void MainComponent::timerCallback()
 
     if (engine.needsReload.exchange (false) && currentIndex >= 0)
         loadSongAt (currentIndex);   // guarda la mezcla y recarga a la nueva frecuencia
+
+    if (recording.active)
+    {
+        if (! recording.toBank && ! engine.isPlaying())
+            stopRecording (false);   // la canción se detuvo (Stop, pausa o final): la toma se cierra
+        else
+        {
+            const float pk = engine.takeInputPeak();
+            sepLabel.setText (tr ("GRABANDO ") + ui::formatTime ((juce::Time::getMillisecondCounter() - recording.startedAt) / 1000.0)
+                              + tr ("  ·  entrada ") + juce::String (juce::Decibels::gainToDecibels (pk, -60.0f), 0) + " dB"
+                              + (engine.getDroppedSamples() > 0 ? tr ("  ·  se están perdiendo muestras") : juce::String()),
+                              juce::dontSendNotification);
+        }
+    }
 
     juce::String deviceError;
     if (engine.takeDeviceError (deviceError))
@@ -3345,7 +3663,7 @@ void MainComponent::filesDropped (const juce::StringArray& paths, int, int)
 
 void MainComponent::showAudioSettings()
 {
-    auto* selector = new juce::AudioDeviceSelectorComponent (deviceManager, 0, 0, 2, 64, false, false, true, false);
+    auto* selector = new juce::AudioDeviceSelectorComponent (deviceManager, 0, 32, 2, 64, false, false, true, false);
     selector->setSize (560, 440);
 
     juce::DialogWindow::LaunchOptions o;

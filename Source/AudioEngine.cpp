@@ -86,6 +86,7 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
         auto track = std::make_unique<LoadedTrack>();
         track->name = stem.name;
         track->stemIndex = (int) i;
+        track->songTime = stem.songTime;
         track->gain = stem.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (stem.gainDb);
         track->smoothedGain = track->gain.load();
         track->muted = stem.muted;
@@ -240,6 +241,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const double sr = device->getCurrentSampleRate();
     sampleRate = sr;
     numOutputs = juce::jmax (1, device->getActiveOutputChannels().countNumberOfSetBits());
+    numInputs = device->getActiveInputChannels().countNumberOfSetBits();
+    inputLatency = device->getInputLatencyInSamples();
+    outputLatency = device->getOutputLatencyInSamples();
 
     const juce::SpinLock::ScopedLockType sl (songLock);
     if (song != nullptr && std::abs (song->sampleRate - sr) > 1.0)
@@ -286,29 +290,138 @@ void AudioEngine::outputPairChannels (int pair, int numOuts, int& left, int& rig
     }
 }
 
-void AudioEngine::audioDeviceIOCallbackWithContext (const float* const*, int,
+void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* ins, int numIns,
                                                     float* const* outputs, int numOuts, int numSamples,
                                                     const juce::AudioIODeviceCallbackContext&)
 {
+    struct DepthGuard
+    {
+        explicit DepthGuard (std::atomic<int>& d) : depth (d) { ++depth; }
+        ~DepthGuard() { --depth; }
+        std::atomic<int>& depth;
+    } guard (callbackDepth);
+
     for (int ch = 0; ch < numOuts; ++ch)
         if (outputs[ch] != nullptr)
             juce::FloatVectorOperations::clear (outputs[ch], numSamples);
 
+    // Entrada: grabación, medidor y escucha (antes de la canción, así pasa por el fader maestro)
+    processInput (ins, numIns, outputs, numOuts, numSamples);
+
     if (numOuts <= 0)
         return;
 
-    const juce::SpinLock::ScopedTryLockType sl (songLock);
-    if (! sl.isLocked() || song == nullptr)
-        return;
-
-    for (int done = 0; done < numSamples;)
     {
-        const int n = juce::jmin (numSamples - done, maxChunk);
-        renderChunk (*song, outputs, numOuts, done, n);
-        done += n;
+        const juce::SpinLock::ScopedTryLockType sl (songLock);
+        if (sl.isLocked() && song != nullptr)
+            for (int done = 0; done < numSamples;)
+            {
+                const int n = juce::jmin (numSamples - done, maxChunk);
+                renderChunk (*song, outputs, numOuts, done, n);
+                done += n;
+            }
     }
 
     applyMasterAndMeter (outputs, numOuts, numSamples);
+}
+
+void AudioEngine::processInput (const float* const* ins, int numIns, float* const* outputs, int numOuts, int n)
+{
+    const RecordSetup* rec = recorder.load();
+    float target = 0.0f;
+    if (rec != nullptr && numIns > 0 && ins != nullptr)
+    {
+        const int li = juce::jlimit (0, numIns - 1, rec->inputL);
+        const int ri = rec->inputR >= 0 && rec->inputR < numIns ? rec->inputR : -1;
+        const float* inL = ins[li];
+        const float* inR = ri >= 0 ? ins[ri] : nullptr;
+        if (inL != nullptr)
+        {
+            if (rec->writer != nullptr)
+            {
+                if (recordStartPosition.load() < 0)
+                    recordStartPosition = position.load();
+                const float* chans[2] = { inL, inR != nullptr ? inR : inL };
+                if (rec->writer->write (chans, n))
+                    recordedSamples += n;
+                else
+                    droppedSamples += n;
+            }
+            float pk = 0.0f;
+            for (int i = 0; i < n; ++i)
+                pk = juce::jmax (pk, std::abs (inL[i]), inR != nullptr ? std::abs (inR[i]) : 0.0f);
+            if (pk > inputPeak.load())
+                inputPeak = pk;
+            monitorL = li;
+            monitorR = ri;
+            monitorOutPair = rec->monitorPair;
+            target = rec->monitor ? juce::jmax (0.0f, rec->monitorGain) : 0.0f;
+        }
+    }
+
+    // Escucha de la entrada por el par elegido, con rampa (también para apagarse al dejar de grabar)
+    if (numOuts <= 0 || numIns <= 0 || ins == nullptr || (target <= 0.0f && monitorSmooth <= 0.0005f))
+    {
+        monitorSmooth = target;
+        return;
+    }
+    const int li = juce::jlimit (0, numIns - 1, monitorL);
+    const int ri = monitorR >= 0 && monitorR < numIns ? monitorR : li;
+    const float* inL = ins[li];
+    const float* inR = ins[ri] != nullptr ? ins[ri] : inL;
+    if (inL == nullptr)
+    {
+        monitorSmooth = target;
+        return;
+    }
+    int l, r;
+    outputPairChannels (monitorOutPair, numOuts, l, r);
+    float* outL = outputs[l];
+    float* outR = outputs[r];
+    const float step = (target - monitorSmooth) / (float) juce::jmax (1, n);
+    float g = monitorSmooth;
+    if (outL != nullptr && outL == outR)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            g += step;
+            outL[i] += 0.5f * (inL[i] + inR[i]) * g;
+        }
+    }
+    else
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            g += step;
+            if (outL != nullptr) outL[i] += inL[i] * g;
+            if (outR != nullptr) outR[i] += inR[i] * g;
+        }
+    }
+    monitorSmooth = target;
+}
+
+void AudioEngine::setRecorder (const RecordSetup& setup)
+{
+    recordSlotIndex = 1 - recordSlotIndex;
+    recordSlots[recordSlotIndex] = setup;
+    recordStartPosition = -1;
+    recordedSamples = 0;
+    droppedSamples = 0;
+    recorder = &recordSlots[recordSlotIndex];
+    waitForCallback();
+}
+
+void AudioEngine::clearRecorder()
+{
+    recorder = nullptr;
+    waitForCallback();
+}
+
+void AudioEngine::waitForCallback()
+{
+    // Tras publicar la configuración nueva basta ver el callback fuera una vez: el siguiente ya lee la nueva
+    for (int i = 0; i < 200 && callbackDepth.load() != 0; ++i)
+        juce::Thread::sleep (1);
 }
 
 void AudioEngine::applyMasterAndMeter (float* const* outputs, int numOuts, int numSamples)

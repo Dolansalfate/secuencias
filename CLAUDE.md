@@ -96,6 +96,19 @@ modelo que usa Moises).
   menú que el botón T: los tres modos, el sonido (bancos grabados o importados; instrumentos
   VST/AU cuando haya), la nota MIDI que se enviará a un instrumento (mapa de batería General
   MIDI o cualquier nota) y los ajustes de detección.
+- **Grabación de entradas** (botón "Grabar", `Recorder`, `AudioEngine::setRecorder`): graba una
+  entrada del dispositivo (mono o par estéreo) **como pista nueva de la canción**: la canción
+  arranca desde el cabezal, la entrada se escucha por el par de salida elegido y al detener
+  (botón, Stop, pausa o final) la toma se guarda alineada con la canción (se descuenta la
+  latencia de entrada más salida que informa el dispositivo, más una compensación manual en
+  ms) como `<nombre>.wav` en la carpeta de la canción con `songTime` (ya está en la línea de
+  tiempo del arreglo: no pasa por los tramos). O **golpes para un banco de muestras** ("Grabar
+  golpes como banco nuevo..." en el menú del trigger): se tocan golpes sueltos, al detener se
+  cortan (`sliceHits`) y se guardan en `_bancos/<nombre>/golpe-NN.wav`, y el trigger de esa
+  pista pasa a usarlos. Si el dispositivo no tiene entradas activas se activan las dos
+  primeras solas (y "Audio" ahora deja elegir hasta 32 entradas). Grabar una pista exige tempo
+  y tono originales (la toma se alinea con el audio guardado). Ajustes: `recordInput`,
+  `recordMonitor` (-1 = no escuchar), `recordOffsetMs`.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -287,6 +300,7 @@ Source/
   Music.h/.cpp         Notas, acordes y tonalidades: enarmonías, sostenidos o bemoles, solfeo
   Arrangement.h/.cpp   Arreglo: tramos de audio (cortar, mover, eliminar, unir), render a RAM, shiftGrid
   Triggers.h/.cpp      Golpes detectados (detect), bancos de muestras (loadBank, sliceHits, writeWav)
+  Recorder.h/.cpp      Grabación: alinear la toma con la canción (writeAligned), banco desde golpes (saveBank)
   Stretcher.h/.cpp     Render de tempo y tono con Signalsmith Stretch (FetchContent, MIT)
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
 linux/                 .desktop (plantilla con @EXEC@), ícono SVG y empaquetar-deb.sh
@@ -309,6 +323,7 @@ LEEME.md               Guía para el usuario final
 | **Carga** | `juce::ThreadPool loaderPool {1}`: `AudioEngine::loadSong` lee y remuestrea los stems a RAM | Cada carga lleva un número de generación (`loadGeneration`); las cargas viejas se abortan o descartan. El resultado vuelve a la UI con `MessageManager::callAsync` + `SafePointer`. |
 | **Separador** | `Separator` (`juce::Thread`) ejecuta Demucs con `ChildProcess` | La UI consulta `getState()`, `getProgress()` y `getMessage()` desde el Timer. Sin callbacks cruzados. |
 | **Analizador** | `Analyzer` (`juce::Thread`) mezcla los stems en RAM a WAV y ejecuta madmom | Mismo patrón que el separador; el resultado (`Analysis`) se aplica en la UI al ver `done`. |
+| **Grabación** | `TimeSliceThread` de un `AudioFormatWriter::ThreadedWriter` (JUCE): vuelca a disco lo que el callback deja en su cola sin bloqueo | Vive en `MainComponent::recording` mientras se graba; al detener, la toma se alinea o se corta en el hilo de carga. |
 
 ### 5.2 AudioEngine
 - `LoadedSong` contiene `LoadedTrack`s. Cada pista es un `AudioBuffer<float>` **estéreo, a la
@@ -339,6 +354,16 @@ LEEME.md               Guía para el usuario final
   una línea silencia las pistas y viceversa. `LoadedTrack::replaced` (atómico, lo pone
   `buildSamplers` cuando el trigger está en modo "solo el sonido" y tiene banco) silencia la
   pista como un mute aparte del del usuario.
+- Grabación de la entrada (`processInput`, antes de la canción): `setRecorder (RecordSetup)`
+  publica un puntero atómico a una de dos configuraciones alternas (writer, canales de entrada
+  entre los activos, escucha y su par) y espera con `waitForCallback` (`callbackDepth`) a que
+  termine el callback en curso, igual que `clearRecorder`: al volver, el `ThreadedWriter` ya no
+  se usa y la UI lo destruye. El callback copia los canales al writer (`write` no bloquea; si la
+  cola se llena cuenta `droppedSamples`), guarda en `recordStartPosition` la posición del
+  transporte del primer bloque grabado, mide `inputPeak` y suma la entrada al par de escucha
+  con rampa por bloque (`monitorSmooth`, que también la apaga al dejar de grabar).
+  `audioDeviceAboutToStart` guarda `numInputs` y las latencias de entrada y salida.
+  El fader maestro se aplica también a la escucha (y aunque no haya canción cargada).
 - Fader maestro: `masterGain` se aplica con rampa a todas las salidas al final del callback
   (`applyMasterAndMeter`), que además mide pico (`takeOutputPeak`) y RMS (`getOutputRms`) por
   canal de salida, hasta `maxMeteredOutputs`.
@@ -421,7 +446,9 @@ Secuencias/
 - Triggers: por stem, `trigger`: `{ enabled, keepAudio (false = solo suena el trigger), sound
   ("banco:<nombre>" o "vst:<n>"), note (MIDI, para instrumentos), thresholdDb,
   sensitivity, minMs, gainDb, muted, outputPair }` (`TriggerSettings`), y `songTime` (la pista
-  ya está en la línea de tiempo del arreglo: no pasa por los clips; para grabaciones). Los
+  ya está en la línea de tiempo del arreglo: `arrangement::render` la copia tal cual en vez de
+  pasarla por los clips; lo llevan las grabaciones, `<nombre>.wav` en la carpeta de la
+  canción, `Library::newRecordingFile`). Los
   bancos viven en `<raíz>/_bancos/<nombre>/*.wav` (`Library::listBanks`, `bankFolder`;
   `load()` no los toma como canción; `exportAll` los copia).
 - Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
@@ -621,6 +648,24 @@ Pasos de `run()`:
   `saveCurrentMix` guarda el canal del sampler en `trigger`. La caché de bancos (`BankCache`) se vacía al importar.
   `--captura --trigger=<banco>` activa el trigger de la batería.
 
+### 5.4g Recorder (grabación de entradas)
+- `recorder::writeAligned (cruda, muestraInicial, salida, formatos)`: copia la toma cruda de
+  modo que su primera muestra caiga en `muestraInicial` de la canción (silencio delante si es
+  positiva; recorte si es negativa). `compensation (latEntrada, latSalida, extraMs, sr)` es lo
+  que la toma llega tarde respecto de lo que oyó el músico. `saveBank (grabación, sr, carpeta)`
+  = `sliceHits` + `writeWav` como `golpe-NN.wav`.
+- En `MainComponent`: `recordDialog (aBanco, pista)` (`ensureInputsEnabled` activa las dos
+  primeras entradas con `setAudioDeviceSetup` si no hay ninguna; lista entradas mono y pares
+  estéreo entre las activas; escucha por un par de salida o "No escuchar"; compensación extra),
+  `startRecording` (wav temporal de 24 bits en `<tmp>/secuencias_grabacion`, `ThreadedWriter`
+  con 8 s de cola, `setRecorder`, y `play()` si es una pista), el Timer muestra "GRABANDO
+  m:ss · entrada N dB" y cierra la toma cuando la canción se detiene, `stopRecording` (lee
+  posición inicial, muestras y latencia, `clearRecorder`, destruye el writer, y en `loaderPool`
+  alinea con `startPos - compensation` o corta el banco), `recordingFinished` (agrega el
+  `StemInfo` con `songTime` a la canción de origen, por carpeta, y recarga si es la actual; o
+  vacía la caché de bancos y asigna el banco al trigger de la pista). Cambiar de canción cierra
+  y guarda la toma; cerrar la app la descarta.
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -748,6 +793,10 @@ Pasos de `run()`:
   siguiente canción.
 - Probado con tests y en Xvfb (sin tarjeta de sonido real); falta probar con interfaces
   multicanal reales.
+- Grabación: la alineación confía en las latencias que informa el dispositivo (con PipeWire
+  o ALSA suelen ser correctas; si no, está la compensación extra en ms). Saltar con el cabezal
+  durante una toma desalinea lo grabado después del salto (la toma se alinea por su inicio).
+  Solo con tempo y tono originales; cerrar la app descarta la toma en curso.
 
 ## 8. Hoja de ruta acordada (vista DAW)
 
@@ -798,6 +847,14 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.4.1 (grabación de entradas, punto 2)**: `RecordSetup` / `setRecorder` /
+  `processInput` en el motor (cola sin bloqueo, escucha con rampa, latencias, `callbackDepth`),
+  `Recorder` (`writeAligned`, `saveBank`, `compensation`), `LoadedTrack::songTime` respetado
+  por `arrangement::render`, botón "Grabar" y diálogo (`recordDialog`, `ensureInputsEnabled`,
+  `startRecording`, `stopRecording`, `recordingFinished`), "Grabar golpes como banco nuevo..."
+  en el menú del trigger, casilla del trigger en el mezclador con los modos suena sola / solo
+  el trigger / ambas (`keepAudio`, `LoadedTrack::replaced`), nota MIDI por pista, "Audio" con
+  hasta 32 entradas.
 - **v0.4.0 (triggers y sampler, punto 1 del plan de estudio en vivo)**: `Triggers`
   (detección de golpes, bancos de muestras), `SamplerLane`/`SamplerSet` en el motor, botón T y
   marcas de golpes en los carriles, canal del sampler en el mezclador, `trigger` por stem en

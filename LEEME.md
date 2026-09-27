@@ -33,6 +33,16 @@ El mismo código sigue compilando en macOS.
   un instrumento VST/AU con la nota MIDI que quieras, por ejemplo 36 = bombo), y el umbral,
   sensibilidad y tiempo mínimo de la detección. Las marcas naranjas al pie del carril
   muestran los golpes detectados y su fuerza.
+- **Grabar** (botón junto al transporte): graba una entrada de tu interfaz como pista nueva de la
+  canción. Eliges la entrada (mono o un par estéreo), el nombre, por qué salida quieres
+  escucharte y, si hace falta, una compensación extra en milisegundos. La canción arranca desde
+  el cabezal; al detener (el mismo botón, Stop o el final de la canción) la toma se agrega como
+  una pista más, ya alineada con la canción (la app descuenta la latencia de la interfaz). Si tu
+  interfaz no tenía entradas activas, la app activa las dos primeras; en "Audio" puedes elegir
+  otras. Para grabar hay que estar en el tempo y tono originales. Para **grabar tu propio bombo
+  para el trigger**: en el menú del trigger de la pista, "Sonido" > "Grabar golpes como banco
+  nuevo...": toca golpes sueltos de suave a fuerte con silencio entre ellos y detén; cada golpe
+  queda como una muestra del banco y el trigger de esa pista pasa a usarlo.
 - **Notas de texto** ("+ Nota" o tecla N, o clic derecho en la fila de notas de la regla):
   un comentario anclado a un punto de la canción, por ejemplo "corte de batería, entra solo
   el bajo" en el compás 111, con los segundos que debe quedarse visible. En la guía de
