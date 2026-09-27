@@ -26,9 +26,12 @@ El mismo código sigue compilando en macOS.
   porque los golpes se detectan de antemano sobre el audio. El banco es una carpeta con wav
   (de suave a fuerte; se importan desde el menú del "T" y pronto se podrán grabar desde la
   app): cada golpe elige la muestra según su fuerza. El sampler aparece como un canal más del
-  mezclador ("Bombo (muestras)"), con fader y salida propia: mutea el bombo original para
-  reemplazarlo o deja ambos para reforzarlo. Clic derecho en la cabecera para elegir el banco
-  y ajustar umbral, sensibilidad y tiempo mínimo; las marcas naranjas al pie del carril
+  mezclador ("Bombo (muestras)"), con fader y salida propia. En el canal del bombo, bajo el
+  fader, una casilla dice qué suena: "Audio" (la pista tal cual), "Trig: <banco>" (solo tu
+  sonido: la pista original se silencia) o "Trig+Audio" (ambas, para reforzar). Un clic en esa
+  casilla (o en el "T") abre el menú: el modo, el sonido (banco grabado o, cuando cargues uno,
+  un instrumento VST/AU con la nota MIDI que quieras, por ejemplo 36 = bombo), y el umbral,
+  sensibilidad y tiempo mínimo de la detección. Las marcas naranjas al pie del carril
   muestran los golpes detectados y su fuerza.
 - **Notas de texto** ("+ Nota" o tecla N, o clic derecho en la fila de notas de la regla):
   un comentario anclado a un punto de la canción, por ejemplo "corte de batería, entra solo

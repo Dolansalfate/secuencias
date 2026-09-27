@@ -435,7 +435,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
 
     for (auto& t : s.tracks)
     {
-        const bool silent = t->muted.load() || (anySolo && ! t->solo.load());
+        const bool silent = t->muted.load() || t->replaced.load() || (anySolo && ! t->solo.load());
         const float target = silent ? 0.0f : t->gain.load();
 
         int l, r;

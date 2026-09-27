@@ -158,9 +158,10 @@ private:
         juce::CriticalSection lock;
         std::map<juce::String, std::shared_ptr<SampleBankData>> banks;   // "nombre@sr"
     };
-    static std::shared_ptr<SamplerSet> buildSamplers (const LoadedSong& rendered, const SongInfo&, double sampleRate,
+    static std::shared_ptr<SamplerSet> buildSamplers (LoadedSong& rendered, const SongInfo&, double sampleRate,
                                                       const juce::File& banksFolder, juce::AudioFormatManager&, BankCache&);
     static std::vector<TriggerSettings> triggersOf (const SongInfo&);
+    static juce::String triggerLabelFor (const TriggerSettings&, bool hasSound, int& mode);   // casilla del mezclador
     void applySamplers (std::shared_ptr<SamplerSet>);   // al motor, al mezclador y a las marcas de la regla
     void syncTriggerMarks();
     void triggerMenu (int track);

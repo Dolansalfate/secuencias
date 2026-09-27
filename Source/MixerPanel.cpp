@@ -62,6 +62,16 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
     };
     addAndMakeVisible (levelBox);
 
+    // Trigger de la pista: si suena por sí misma, si dispara un sonido (banco o VST) o ambas; un clic abre el menú
+    trigBox.setJustificationType (juce::Justification::centred);
+    trigBox.setFont (ui::font (11.0f));
+    trigBox.setMinimumHorizontalScale (0.6f);
+    trigBox.setColour (juce::Label::backgroundColourId, juce::Colours::black.withAlpha (0.25f));
+    trigBox.setColour (juce::Label::textColourId, juce::Colours::grey);
+    trigBox.setText ("Audio", juce::dontSendNotification);
+    trigBox.onClick = [this] { if (onTriggerClicked) onTriggerClicked(); };
+    addAndMakeVisible (trigBox);
+
     muteBtn.setButtonText ("M");
     muteBtn.setClickingTogglesState (true);
     muteBtn.setToggleState (track.muted.load(), juce::dontSendNotification);
@@ -94,6 +104,21 @@ void ChannelStrip::setLevelGain (double db, bool enabled)
     if (levelBox.getText() != text)
         levelBox.setText (text, juce::dontSendNotification);
     levelBox.setColour (juce::Label::textColourId, enabled && std::abs (db) >= 0.05 ? ui::accent : juce::Colours::grey);
+}
+
+void ChannelStrip::setTriggerLabel (const juce::String& text, int mode)
+{
+    if (trigBox.getText() != text)
+        trigBox.setText (text, juce::dontSendNotification);
+    trigBox.setColour (juce::Label::textColourId, mode == 0 ? juce::Colours::grey : mode == 3 ? juce::Colours::orangered : juce::Colours::orange);
+    trigBox.setColour (juce::Label::backgroundColourId, mode == 0 ? juce::Colours::black.withAlpha (0.25f) : juce::Colours::orange.withAlpha (0.15f));
+}
+
+void ChannelStrip::setTriggerBoxVisible (bool visible)
+{
+    trigBoxVisible = visible;
+    trigBox.setVisible (visible);
+    resized();
 }
 
 void ChannelStrip::tick()
@@ -129,6 +154,11 @@ void ChannelStrip::resized()
     r.removeFromBottom (4);
     levelBox.setBounds (r.removeFromBottom (16));
     r.removeFromBottom (2);
+    if (trigBoxVisible)
+    {
+        trigBox.setBounds (r.removeFromBottom (16));
+        r.removeFromBottom (2);
+    }
     meter.setBounds (r.removeFromRight (16).withTrimmedBottom (18));
     r.removeFromRight (2);
     fader.setBounds (r);
@@ -294,12 +324,14 @@ void MixerPanel::setSong (std::shared_ptr<LoadedSong> song)
         int index = 0;
         for (auto& t : song->tracks)
         {
-            auto* strip = strips.add (new ChannelStrip (song, *t, ui::trackColour (index++)));
+            const int trackIndex = index++;
+            auto* strip = strips.add (new ChannelStrip (song, *t, ui::trackColour (trackIndex)));
             if (fillOutputBox)
                 fillOutputBox (strip->outputBox(), t->outputPair.load());
             strip->onChanged = [this] { if (onChanged) onChanged(); };
             const int stem = t->stemIndex;
             strip->onLevelEdited = [this, stem] (double db) { if (onLevelEdited) onLevelEdited (stem, db); };
+            strip->onTriggerClicked = [this, trackIndex] { if (onTriggerClicked) onTriggerClicked (trackIndex); };
             holder.addAndMakeVisible (strip);
         }
     }
@@ -313,12 +345,19 @@ void MixerPanel::setSamplers (std::shared_ptr<SamplerSet> set)
         for (auto& lane : set->lanes)
         {
             auto* strip = samplerStrips.add (new ChannelStrip (set, lane->control, juce::Colours::orange));
+            strip->setTriggerBoxVisible (false);
             if (fillOutputBox)
                 fillOutputBox (strip->outputBox(), lane->control.outputPair.load());
             strip->onChanged = [this] { if (onChanged) onChanged(); };
             holder.addAndMakeVisible (strip);
         }
     resized();
+}
+
+void MixerPanel::setTriggerLabel (int track, const juce::String& text, int mode)
+{
+    if (juce::isPositiveAndBelow (track, strips.size()))
+        strips[track]->setTriggerLabel (text, mode);
 }
 
 void MixerPanel::setLevelGains (const std::vector<double>& dbPerStem, bool enabled)

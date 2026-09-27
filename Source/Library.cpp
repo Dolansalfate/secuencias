@@ -401,6 +401,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                 {
                     auto& t = si.trigger;
                     t.enabled     = (bool) tg.getProperty ("enabled", false);
+                    t.keepAudio   = (bool) tg.getProperty ("keepAudio", false);
                     t.sound       = tg.getProperty ("sound", "").toString();
                     t.note        = juce::jlimit (0, 127, (int) tg.getProperty ("note", 36));
                     t.thresholdDb = juce::jlimit (-80.0, 0.0, (double) tg.getProperty ("thresholdDb", -30.0));
@@ -558,6 +559,7 @@ bool Library::saveSong (const SongInfo& s) const
         {
             auto* tg = new juce::DynamicObject();
             tg->setProperty ("enabled", st.trigger.enabled);
+            tg->setProperty ("keepAudio", st.trigger.keepAudio);
             tg->setProperty ("sound", st.trigger.sound);
             tg->setProperty ("note", st.trigger.note);
             tg->setProperty ("thresholdDb", st.trigger.thresholdDb);

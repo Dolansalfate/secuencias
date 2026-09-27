@@ -90,6 +90,12 @@ modelo que usa Moises).
   fuerza (capas de suave a fuerte, alternando vecinas) y suena en un canal propio del
   mezclador ("<pista> (muestras)", naranja: fader, mute, solo, salida y medidor, guardados en
   `trigger` de la pista). Las marcas naranjas al pie del carril muestran los golpes y su fuerza.
+  En el canal del mezclador, bajo el fader, la casilla del trigger dice qué suena: "Audio"
+  (la pista por sí misma), "Trig: <banco>" (solo el sonido del trigger: la pista queda
+  silenciada, `LoadedTrack::replaced`) o "Trig+Audio: <banco>" (ambas); un clic abre el mismo
+  menú que el botón T: los tres modos, el sonido (bancos grabados o importados; instrumentos
+  VST/AU cuando haya), la nota MIDI que se enviará a un instrumento (mapa de batería General
+  MIDI o cualquier nota) y los ajustes de detección.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -330,7 +336,9 @@ LEEME.md               Guía para el usuario final
   posición coincide (tras un salto se relocaliza con búsqueda binaria; los que quedaron atrás
   no suenan), en 16 voces prealocadas (se roba la más avanzada), ganancia 0,5 + 0,5 × velocidad,
   mezcla en `laneL/laneR`, envolvente global, salida al par de la línea y medidores. El solo de
-  una línea silencia las pistas y viceversa.
+  una línea silencia las pistas y viceversa. `LoadedTrack::replaced` (atómico, lo pone
+  `buildSamplers` cuando el trigger está en modo "solo el sonido" y tiene banco) silencia la
+  pista como un mute aparte del del usuario.
 - Fader maestro: `masterGain` se aplica con rampa a todas las salidas al final del callback
   (`applyMasterAndMeter`), que además mide pico (`takeOutputPeak`) y RMS (`getOutputRms`) por
   canal de salida, hasta `maxMeteredOutputs`.
@@ -410,7 +418,8 @@ Secuencias/
   dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. Todo lo demás
   (tiempos, acordes, marcadores, secciones de tempo, nivelado) está en la línea de tiempo de
   la canción, no en la del audio original.
-- Triggers: por stem, `trigger`: `{ enabled, sound ("banco:<nombre>" o "vst:<n>"), note, thresholdDb,
+- Triggers: por stem, `trigger`: `{ enabled, keepAudio (false = solo suena el trigger), sound
+  ("banco:<nombre>" o "vst:<n>"), note (MIDI, para instrumentos), thresholdDb,
   sensitivity, minMs, gainDb, muted, outputPair }` (`TriggerSettings`), y `songTime` (la pista
   ya está en la línea de tiempo del arreglo: no pasa por los clips; para grabaciones). Los
   bancos viven en `<raíz>/_bancos/<nombre>/*.wav` (`Library::listBanks`, `bankFolder`;
@@ -605,9 +614,11 @@ Pasos de `run()`:
 - En `MainComponent`: `buildSamplers (renderizado, info, sr, carpetaBancos, formatos, caché)`
   corre en el hilo de carga al final de cada render (y solo eso, reutilizando `currentSong`,
   cuando únicamente cambian los triggers: `renderedTriggers`); `applySamplers` lo entrega al
-  motor y al mezclador; `syncTriggerMarks` pinta las marcas y los botones T; `triggerMenu`,
-  `setTriggerEnabled`, `importBankFor`, `triggerSettingsDialog`; `saveCurrentMix` guarda el
-  canal del sampler en `trigger`. La caché de bancos (`BankCache`) se vacía al importar.
+  motor y al mezclador; `syncTriggerMarks` pinta las marcas, los botones T y la casilla del
+  trigger de cada canal (`MixerPanel::setTriggerLabel`, texto de `triggerLabelFor`);
+  `triggerMenu` (desde el T, la cabecera del carril o la casilla del mezclador:
+  `onTriggerClicked`), `setTriggerEnabled`, `importBankFor`, `triggerSettingsDialog`;
+  `saveCurrentMix` guarda el canal del sampler en `trigger`. La caché de bancos (`BankCache`) se vacía al importar.
   `--captura --trigger=<banco>` activa el trigger de la batería.
 
 ### 5.5 UI (MainComponent)

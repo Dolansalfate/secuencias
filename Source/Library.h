@@ -51,6 +51,7 @@ struct SongNote
 struct TriggerSettings
 {
     bool enabled = false;
+    bool keepAudio = false;      // con el trigger activo, ¿sigue sonando la pista? (false = solo el sonido del trigger)
     juce::String sound;          // "banco:<nombre>" (sampler interno) o "vst:<n>" (instrumento del rack)
     int note = 36;               // nota MIDI para instrumentos
     double thresholdDb = -30.0;  // nivel mínimo de un golpe

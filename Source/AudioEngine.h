@@ -29,6 +29,7 @@ struct LoadedTrack
     WaveformCache waveform;
     std::atomic<float> gain { 1.0f };
     std::atomic<bool> muted { false }, solo { false };
+    std::atomic<bool> replaced { false };     // su trigger la reemplaza: no suena (aparte del mute del usuario)
     std::atomic<int> outputPair { 0 };
     // Medidores post-fader: pico máximo desde la última lectura de la UI (exchange (0)) y RMS del último bloque
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f }, rmsL { 0.0f }, rmsR { 0.0f };

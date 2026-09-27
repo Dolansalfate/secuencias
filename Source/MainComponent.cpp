@@ -318,6 +318,7 @@ MainComponent::MainComponent()
     timeline.onLaneHeaderMenu = [this] (int track) { triggerMenu (track); };
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
     mixer.onLevelEdited = [this] (int stem, double db) { stemLevelEdited (stem, db); };
+    mixer.onTriggerClicked = [this] (int track) { triggerMenu (track); };
     mixer.onClickChanged = [this] (bool on, float db, int pair)
     {
         if (auto* s = currentInfo())
@@ -2142,12 +2143,13 @@ std::vector<TriggerSettings> MainComponent::triggersOf (const SongInfo& info)
     return out;
 }
 
-std::shared_ptr<SamplerSet> MainComponent::buildSamplers (const LoadedSong& rendered, const SongInfo& info, double sr,
+std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, const SongInfo& info, double sr,
                                                           const juce::File& banksFolder, juce::AudioFormatManager& formats, BankCache& cache)
 {
     auto set = std::make_shared<SamplerSet>();
     for (auto& t : rendered.tracks)
     {
+        t->replaced = false;
         if (! juce::isPositiveAndBelow (t->stemIndex, (int) info.stems.size()))
             continue;
         const auto& st = info.stems[(size_t) t->stemIndex];
@@ -2183,9 +2185,32 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (const LoadedSong& rend
         lane->control.smoothedGain = lane->control.gain.load();
         lane->control.muted = tg.muted;
         lane->control.outputPair = tg.outputPair;
+        // La pista deja de sonar solo si su trigger tiene un sonido que dar (si no, se oiría nada sin aviso)
+        t->replaced = ! tg.keepAudio && bank != nullptr;
         set->lanes.push_back (std::move (lane));
     }
     return set;
+}
+
+juce::String MainComponent::triggerLabelFor (const TriggerSettings& tg, bool hasSound, int& mode)
+{
+    if (! tg.enabled)
+    {
+        mode = 0;
+        return "Audio";
+    }
+    juce::String sound;
+    if (tg.sound.startsWith ("banco:"))
+        sound = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
+    else if (tg.sound.startsWith ("vst:"))
+        sound = "VST " + juce::MidiMessage::getMidiNoteName (tg.note, true, true, 3);
+    if (sound.isEmpty() || ! hasSound)
+    {
+        mode = 3;
+        return tr ("Trig: sin sonido");
+    }
+    mode = tg.keepAudio ? 2 : 1;
+    return (tg.keepAudio ? "Trig+Audio: " : "Trig: ") + sound;
 }
 
 void MainComponent::applySamplers (std::shared_ptr<SamplerSet> set)
@@ -2209,12 +2234,22 @@ void MainComponent::syncTriggerMarks()
         const bool has = juce::isPositiveAndBelow (t->stemIndex, (int) info->stems.size());
         states.push_back (has && info->stems[(size_t) t->stemIndex].trigger.enabled);
         std::vector<TimelineView::TriggerMark> m;
+        bool hasSound = false;
         if (samplers != nullptr)
             for (auto& lane : samplers->lanes)
                 if (lane->stemIndex == t->stemIndex)
+                {
+                    hasSound = lane->bank != nullptr;
                     for (auto& e : lane->events)
                         m.push_back ({ (double) e.sample / sr, e.velocity });
+                }
         marks.push_back (std::move (m));
+        if (has)
+        {
+            int mode = 0;
+            const auto text = triggerLabelFor (info->stems[(size_t) t->stemIndex].trigger, hasSound, mode);
+            mixer.setTriggerLabel ((int) states.size() - 1, text, mode);
+        }
     }
     timeline.setTriggerStates (states);
     timeline.setTriggerMarks (marks);
@@ -2258,18 +2293,43 @@ void MainComponent::triggerMenu (int track)
             if (lane->stemIndex == stem)
                 detected = (int) lane->events.size();
 
+    // Notas MIDI habituales de una batería (General MIDI; Addictive Drums usa el mismo mapa básico)
+    struct DrumNote { int note; const char* name; };
+    static const DrumNote drumNotes[] = { { 36, "Bombo" }, { 38, "Caja" }, { 37, "Aro (side stick)" }, { 42, "Hi-hat cerrado" },
+                                          { 44, "Hi-hat pedal" }, { 46, "Hi-hat abierto" }, { 41, "Tom bajo" }, { 45, "Tom medio" },
+                                          { 48, "Tom alto" }, { 49, "Crash" }, { 57, "Crash 2" }, { 51, "Ride" },
+                                          { 53, "Campana del ride" }, { 55, "Splash" }, { 52, "China" } };
+
     juce::PopupMenu m;
-    m.addSectionHeader (tr ("Trigger de ") + st.name + (detected >= 0 ? " (" + juce::String (detected) + tr (" golpes)") : juce::String()));
-    m.addItem (1, tr ("Trigger activado"), tg.sound.isNotEmpty(), tg.enabled);
+    m.addSectionHeader (st.name + (detected >= 0 ? ": " + juce::String (detected) + tr (" golpes detectados") : juce::String()));
+    m.addItem (10, tr ("Suena por sí misma (sin trigger)"), true, ! tg.enabled);
+    m.addItem (11, tr ("Es trigger: suena solo el sonido elegido"), true, tg.enabled && ! tg.keepAudio);
+    m.addItem (12, tr ("Trigger y audio: suenan ambas"), true, tg.enabled && tg.keepAudio);
+    m.addSeparator();
     juce::PopupMenu sound;
     const auto banks = library.listBanks();
+    sound.addSectionHeader (tr ("Bancos de muestras grabadas"));
     for (int i = 0; i < banks.size(); ++i)
-        sound.addItem (100 + i, tr ("Banco: ") + banks[i], true, tg.sound == "banco:" + banks[i]);
+        sound.addItem (100 + i, banks[i], true, tg.sound == "banco:" + banks[i]);
     if (banks.isEmpty())
-        sound.addItem (99, tr ("(no hay bancos de muestras todavía)"), false);
-    sound.addSeparator();
+        sound.addItem (99, tr ("(no hay bancos todavía)"), false);
     sound.addItem (2, tr ("Importar muestras (wav) como banco nuevo..."));
-    m.addSubMenu (tr ("Sonido"), sound);
+    sound.addSeparator();
+    sound.addSectionHeader (tr ("Instrumentos VST / AU"));
+    sound.addItem (299, tr ("(sin instrumentos cargados)"), false);
+    juce::String soundName = tr ("sin sonido");
+    if (tg.sound.startsWith ("banco:"))
+        soundName = tg.sound.fromFirstOccurrenceOf ("banco:", false, false);
+    else if (tg.sound.startsWith ("vst:"))
+        soundName = "VST";
+    m.addSubMenu (tr ("Sonido: ") + soundName, sound);
+    juce::PopupMenu notes;
+    for (size_t i = 0; i < std::size (drumNotes); ++i)
+        notes.addItem (200 + drumNotes[i].note, juce::String (drumNotes[i].name) + "  (" + juce::MidiMessage::getMidiNoteName (drumNotes[i].note, true, true, 3)
+                                                    + ", " + juce::String (drumNotes[i].note) + ")", true, tg.note == drumNotes[i].note);
+    notes.addSeparator();
+    notes.addItem (250, tr ("Otra nota (0 a 127)..."));
+    m.addSubMenu (tr ("Nota MIDI (para instrumentos VST): ") + juce::MidiMessage::getMidiNoteName (tg.note, true, true, 3) + " (" + juce::String (tg.note) + ")", notes);
     m.addItem (3, tr ("Ajustes de detección... (umbral ") + juce::String (tg.thresholdDb, 0) + " dB, sensibilidad " + juce::String (tg.sensitivity, 1) + ")");
     m.addSeparator();
     m.addItem (4, tr ("Quitar el trigger de esta pista"), tg.enabled || tg.sound.isNotEmpty());
@@ -2282,8 +2342,15 @@ void MainComponent::triggerMenu (int track)
         if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
             return;
         auto& t = inf->stems[(size_t) stem].trigger;
-        if (result == 1)
-            t.enabled = ! t.enabled;
+        bool chooseSound = false;
+        if (result == 10)
+            t.enabled = false;
+        else if (result == 11 || result == 12)
+        {
+            t.enabled = true;
+            t.keepAudio = result == 12;
+            chooseSound = t.sound.isEmpty();
+        }
         else if (result == 2)
         {
             importBankFor (track);
@@ -2304,11 +2371,36 @@ void MainComponent::triggerMenu (int track)
             t.sound = "banco:" + banks[result - 100];
             t.enabled = true;
         }
+        else if (result >= 200 && result < 200 + 128)
+            t.note = result - 200;
+        else if (result == 250)
+        {
+            askText (tr ("Nota MIDI (0 a 127; 36 = bombo, 38 = caja)"), juce::String (t.note), [this, stem] (const juce::String& text)
+            {
+                auto* in2 = currentInfo();
+                if (in2 == nullptr || ! juce::isPositiveAndBelow (stem, (int) in2->stems.size()))
+                    return;
+                in2->stems[(size_t) stem].trigger.note = juce::jlimit (0, 127, text.getIntValue());
+                library.saveSong (*in2);
+                syncTriggerMarks();
+            });
+            return;
+        }
         else
             return;
         library.saveSong (*inf);
         syncTriggerMarks();
         requestRender();
+        if (chooseSound)
+        {
+            // Falta el sonido: se vuelve a abrir el menú para elegirlo en «Sonido»
+            sepLabel.setText (tr ("Elige el sonido del trigger en «Sonido»"), juce::dontSendNotification);
+            juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<MainComponent> (this), track]
+            {
+                if (sp != nullptr)
+                    sp->triggerMenu (track);
+            });
+        }
     });
 }
 

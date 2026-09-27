@@ -802,6 +802,8 @@ int main()
         si.stems.push_back (stem ("Bateria", "drums.wav"));
         si.stems[0].songTime = true;
         si.stems[0].trigger.enabled = true;
+        si.stems[0].trigger.keepAudio = true;
+        si.stems[0].trigger.note = 38;
         si.stems[0].trigger.sound = "banco:BomboPrueba";
         si.stems[0].trigger.thresholdDb = -24.0;
         si.stems[0].trigger.sensitivity = 1.5;
@@ -816,7 +818,8 @@ int main()
         CHECK (back != nullptr && back->stems.size() == 1 && back->stems[0].songTime && back->stems[0].trigger.enabled
                && back->stems[0].trigger.sound == "banco:BomboPrueba" && std::abs (back->stems[0].trigger.thresholdDb + 24.0) < 1.0e-9
                && std::abs (back->stems[0].trigger.sensitivity - 1.5) < 1.0e-9 && std::abs (back->stems[0].trigger.minMs - 55.0) < 1.0e-9
-               && std::abs (back->stems[0].trigger.gainDb + 3.0f) < 1.0e-6f && back->stems[0].trigger.outputPair == 1);
+               && std::abs (back->stems[0].trigger.gainDb + 3.0f) < 1.0e-6f && back->stems[0].trigger.outputPair == 1
+               && back->stems[0].trigger.keepAudio && back->stems[0].trigger.note == 38);
     }
 
     std::cout << "[Separator] bateria en partes: plan, nombres de las partes\n";
@@ -1074,6 +1077,19 @@ int main()
         float muted = 0.0f;
         for (int b = 0; b < 12; ++b) { render (engine, out, 1); muted = std::max (muted, out.peak (0)); }
         CHECK (muted < 1.0e-3f);
+        // Pista reemplazada por su trigger: no suena aunque no esté muteada; al quitar el reemplazo vuelve
+        song->tracks[0]->muted = false;
+        song->tracks[0]->replaced = true;
+        engine.seekSeconds (0.2);
+        render (engine, out, 20);
+        float replacedPeak = 0.0f, restored = 0.0f;
+        for (int b = 0; b < 12; ++b) { render (engine, out, 1); replacedPeak = std::max (replacedPeak, out.peak (0)); }
+        CHECK (replacedPeak < 1.0e-3f);
+        song->tracks[0]->replaced = false;
+        render (engine, out, 20);
+        for (int b = 0; b < 12; ++b) { render (engine, out, 1); restored = std::max (restored, out.peak (0)); }
+        CHECK (restored > 0.01f);
+        song->tracks[0]->muted = true;
         set->lanes[0]->control.muted = false;
         engine.setSamplers (nullptr);
         engine.pause();
