@@ -66,10 +66,11 @@ MainComponent::MainComponent()
         refreshReplaced();
         syncTriggerMarks();
     };
-    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+    juce::Component::SafePointer<MainComponent> safeSelf (this);   // (MSVC no acepta `this` en una init-capture anidada)
+    juce::MessageManager::callAsync ([safeSelf]
     {
-        if (safe != nullptr && safe->rack != nullptr)
-            safe->rack->restore();
+        if (safeSelf != nullptr && safeSelf->rack != nullptr)
+            safeSelf->rack->restore();
     });
 
     library.load();
@@ -2499,7 +2500,8 @@ void MainComponent::triggerMenu (int track)
         {
             // Falta el sonido: se vuelve a abrir el menú para elegirlo en «Sonido»
             sepLabel.setText (tr ("Elige el sonido del trigger en «Sonido»"), juce::dontSendNotification);
-            juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<MainComponent> (this), track]
+            juce::Component::SafePointer<MainComponent> sp (this);
+            juce::MessageManager::callAsync ([sp, track]
             {
                 if (sp != nullptr)
                     sp->triggerMenu (track);
