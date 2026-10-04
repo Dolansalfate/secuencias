@@ -343,6 +343,62 @@ MainComponent::MainComponent()
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
     timeline.onTrigger = [this] (int track, bool on) { setTriggerEnabled (track, on); };
     timeline.onLaneHeaderMenu = [this] (int track) { triggerMenu (track); };
+    // Pistas MIDI: las ediciones llegan en tiempo de reproducción; los golpes se guardan en el de la canción
+    timeline.onMidiAdd = [this] (int m, double seconds, int note)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || ! juce::isPositiveAndBelow (m, (int) info->midiTracks.size()))
+            return;
+        pushUndo();
+        const int i = miditrack::addHit (info->midiTracks[(size_t) m], timeMap.toOriginal (seconds), note, miditrack::defaultVelocity);
+        midiEdited (m, { i });
+    };
+    timeline.onMidiMove = [this] (int m, std::vector<int> hits, double delta, int rowDelta)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || ! juce::isPositiveAndBelow (m, (int) info->midiTracks.size()) || hits.empty())
+            return;
+        auto& mt = info->midiTracks[(size_t) m];
+        double songDelta = delta;
+        if (juce::isPositiveAndBelow (hits.front(), (int) mt.hits.size()))
+        {
+            const double o = mt.hits[(size_t) hits.front()].seconds;
+            songDelta = timeMap.toOriginal (timeMap.toPlayback (o) + delta) - o;
+        }
+        pushUndo();
+        midiEdited (m, miditrack::moveHits (mt, hits, songDelta, rowDelta));
+    };
+    timeline.onMidiVelocity = [this] (int m, std::vector<int> hits, int delta)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || ! juce::isPositiveAndBelow (m, (int) info->midiTracks.size()))
+            return;
+        pushUndo();
+        miditrack::changeVelocity (info->midiTracks[(size_t) m], hits, delta);
+        midiEdited (m, hits);
+    };
+    timeline.onMidiDelete = [this] (int m, std::vector<int> hits)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || ! juce::isPositiveAndBelow (m, (int) info->midiTracks.size()))
+            return;
+        pushUndo();
+        miditrack::removeHits (info->midiTracks[(size_t) m], hits);
+        midiEdited (m, {});
+    };
+    timeline.onMidiMenu = [this] (int m, std::vector<int> hits, int row, double seconds) { midiHitsMenu (m, hits, row, seconds); };
+    timeline.onMidiPadMenu = [this] (int m, int row) { midiPadMenu (m, row); };
+    timeline.onMidiAudition = [this] (int m, int row) { auditionMidiPad (m, row); };
+    timeline.onMidiHeaderMenu = [this] (int m) { midiHeaderMenu (m); };
+    timeline.onMidiMute = [this] (int m, bool muted)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || ! juce::isPositiveAndBelow (m, (int) info->midiTracks.size()))
+            return;
+        info->midiTracks[(size_t) m].muted = muted;
+        midiEdited (m, timeline.getSelectedMidiHits (m));
+    };
+    timeline.snapMidiTime = [this] (int m, double seconds, int note) { return snapMidiTime (m, seconds, note); };
     timeline.levelGainAt = [this] (int stem, double t) { return levelGainAt (stem, t); };
     mixer.onLevelEdited = [this] (int stem, double db) { stemLevelEdited (stem, db); };
     mixer.onTriggerClicked = [this] (int track) { triggerMenu (track); };
@@ -389,7 +445,11 @@ MainComponent::MainComponent()
 
     // --- Mezclador ---
     mixer.fillOutputBox = [this] (juce::ComboBox& box, int pair) { fillOutputBox (box, pair); };
-    mixer.onChanged = [this] { markSongDirty(); };
+    mixer.onChanged = [this]
+    {
+        markSongDirty();
+        refreshReplaced();   // silenciar la única fila que suena devuelve la pista de origen
+    };
     mixer.onMasterGainChanged = [this] (float db)
     {
         engine.setMasterGain (juce::Decibels::decibelsToGain (db, -60.0f));
@@ -694,6 +754,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         setLiveMode (! liveMode);
     else if (key.getModifiers().isCtrlDown() && (code == 'Z' || code == 'z'))
         undoLastEdit();
+    else if ((code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) && timeline.deleteSelectedMidiHits())
+        {}
     else if (code == juce::KeyPress::F12Key)
         showStage (stageWindow == nullptr || ! stageWindow->isVisible());
     else
@@ -1091,6 +1153,7 @@ void MainComponent::saveCurrentMix()
             st.muted = t->muted.load();
             st.outputPair = t->outputPair.load();
         }
+        pullMidiControls();
         if (samplers != nullptr)
             for (auto& lane : samplers->lanes)
                 if (juce::isPositiveAndBelow (lane->stemIndex, (int) info->stems.size()))
@@ -2168,6 +2231,7 @@ std::vector<TimelineView::ClipView> MainComponent::mappedClips() const
 
 void MainComponent::pushUndo()
 {
+    pullMidiControls();   // el estado guardado lleva los canales de las filas como están ahora
     if (auto* info = currentInfo())
     {
         undoStack.push_back (*info);
@@ -2190,6 +2254,39 @@ void MainComponent::undoLastEdit()
     }
     restored.stems = info->stems;   // la mezcla (faders, mute, salidas) no se deshace
     restored.name = info->name;
+    // Tampoco lo que no pasa por pushUndo en las pistas MIDI: la mezcla de las filas, sus nombres y sonidos, el nombre de la
+    // pista y sus silencios. Se toma de la pista actual con el mismo origen (la n-ésima con ese archivo) y de su fila con la
+    // misma nota; lo que no tiene pareja (una fila quitada que vuelve, una nota cambiada) queda como se guardó
+    pullMidiControls();
+    for (size_t i = 0; i < restored.midiTracks.size(); ++i)
+    {
+        auto& mt = restored.midiTracks[i];
+        int nth = 0;
+        for (size_t j = 0; j < i; ++j)
+            nth += restored.midiTracks[j].sourceFile == mt.sourceFile ? 1 : 0;
+        const MidiTrack* now = nullptr;
+        for (auto& candidate : info->midiTracks)
+            if (candidate.sourceFile == mt.sourceFile && nth-- == 0)
+            {
+                now = &candidate;
+                break;
+            }
+        if (now == nullptr)
+            continue;
+        mt.name = now->name;
+        mt.muted = now->muted;
+        mt.muteSource = now->muteSource;
+        for (auto& pad : mt.pads)
+            for (auto& nowPad : now->pads)
+                if (nowPad.note == pad.note)
+                {
+                    pad.name = nowPad.name;
+                    pad.sound = nowPad.sound;
+                    pad.gainDb = nowPad.gainDb;
+                    pad.muted = nowPad.muted;
+                    pad.outputPair = nowPad.outputPair;
+                }
+    }
     *info = restored;
     refreshFromInfo();
     sepLabel.setText (tr ("Edición deshecha"), juce::dontSendNotification);
@@ -2208,6 +2305,8 @@ void MainComponent::refreshFromInfo()
     updateBeatGrid();
     showChordAndKey (engine.getPositionSeconds());
     updateLoopRegion();
+    applyMidiTracks();
+    syncTriggerMarks();
     requestRender();
 }
 
@@ -2219,14 +2318,38 @@ void MainComponent::arrangementEdited()
     library.saveSong (*info);
     syncTimelineMarkers();
     tempoControlsFromSong();
+    applyMidiTracks();   // los golpes ya se movieron con los tramos: la vista y sus índices los siguen al instante
     requestRender();
+}
+
+bool MainComponent::arrangementReady()
+{
+    auto* info = currentInfo();
+    if (info != nullptr && sameClips (info->clips, renderedClips))
+        return true;
+    sepLabel.setText (tr ("El arreglo se está preparando: prueba en un momento"), juce::dontSendNotification);
+    return false;
+}
+
+bool MainComponent::isMidiSource (const SongInfo& info, const StemInfo& stem)
+{
+    for (auto& mt : info.midiTracks)
+        if (mt.sourceFile.isNotEmpty() && mt.sourceFile == stem.fileName)
+            return true;
+    return false;
 }
 
 std::vector<TriggerSettings> MainComponent::triggersOf (const SongInfo& info)
 {
+    // Un stem del que salió una pista MIDI no dispara en vivo (la pista MIDI lo reemplaza); cuenta como apagado
+    // para que crear o quitar la pista MIDI vuelva a armar los triggers
     std::vector<TriggerSettings> out;
     for (auto& st : info.stems)
+    {
         out.push_back (st.trigger);
+        if (isMidiSource (info, st))
+            out.back().enabled = false;
+    }
     return out;
 }
 
@@ -2243,7 +2366,7 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
         const auto& tg = st.trigger;
         const bool isBank = tg.sound.startsWith ("banco:");
         const bool isInstrument = tg.sound.startsWith ("vst:");
-        if (! tg.enabled || (! isBank && ! isInstrument))
+        if (! tg.enabled || (! isBank && ! isInstrument) || isMidiSource (info, st))
             continue;
         const auto bankName = isBank ? tg.sound.fromFirstOccurrenceOf ("banco:", false, false) : juce::String();
         std::shared_ptr<SampleBankData> bank;
@@ -2311,7 +2434,7 @@ void MainComponent::applySamplers (std::shared_ptr<SamplerSet> set)
     samplers = std::move (set);
     engine.setSamplers (samplers);
     mixer.setSamplers (samplers);
-    refreshReplaced();
+    applyMidiTracks();   // setSong descarta también las pistas MIDI; y el mapa de tempo pudo cambiar
     syncTriggerMarks();
 }
 
@@ -2330,7 +2453,20 @@ void MainComponent::refreshReplaced()
             for (auto& lane : samplers->lanes)
                 if (lane->stemIndex == t->stemIndex)
                     has = lane->instrumentId >= 0 ? (rack != nullptr && rack->has (lane->instrumentId)) : lane->bank != nullptr;
-        t->replaced = tg.enabled && ! tg.keepAudio && has;
+        // Una pista MIDI de este stem lo calla si alguna de sus filas suena de verdad (banco cargado o instrumento presente)
+        bool midiReplaces = false;
+        if (midiSamplers != nullptr)
+            for (auto& lane : midiSamplers->lanes)
+            {
+                if (padForLane (*info, *lane) == nullptr)
+                    continue;   // línea de otra canción o de una fila que ya no está
+                const auto& mt = info->midiTracks[(size_t) lane->midiTrack];
+                if (mt.muted || ! mt.muteSource || mt.sourceFile.isEmpty() || mt.sourceFile != info->stems[(size_t) t->stemIndex].fileName)
+                    continue;
+                const bool canSound = lane->instrumentId >= 0 ? (rack != nullptr && rack->has (lane->instrumentId)) : lane->bank != nullptr;
+                midiReplaces = midiReplaces || (canSound && ! lane->control.muted.load());
+            }
+        t->replaced = (tg.enabled && ! tg.keepAudio && has) || midiReplaces;
     }
 }
 
@@ -2345,7 +2481,7 @@ void MainComponent::syncTriggerMarks()
     for (auto& t : currentSong->tracks)
     {
         const bool has = juce::isPositiveAndBelow (t->stemIndex, (int) info->stems.size());
-        states.push_back (has && info->stems[(size_t) t->stemIndex].trigger.enabled);
+        states.push_back (has && info->stems[(size_t) t->stemIndex].trigger.enabled && ! isMidiSource (*info, info->stems[(size_t) t->stemIndex]));
         std::vector<TimelineView::TriggerMark> m;
         bool hasSound = false;
         juce::String instrumentName;
@@ -2367,7 +2503,13 @@ void MainComponent::syncTriggerMarks()
         if (has)
         {
             int mode = 0;
-            const auto text = triggerLabelFor (info->stems[(size_t) t->stemIndex].trigger, hasSound, instrumentName, mode);
+            auto text = triggerLabelFor (info->stems[(size_t) t->stemIndex].trigger, hasSound, instrumentName, mode);
+            for (auto& mt : info->midiTracks)
+                if (mt.sourceFile.isNotEmpty() && mt.sourceFile == info->stems[(size_t) t->stemIndex].fileName)
+                {
+                    text = (mt.muteSource && ! mt.muted ? "MIDI: " : "MIDI+Audio: ") + mt.name;
+                    mode = mt.muteSource && ! mt.muted ? 1 : 2;
+                }
             mixer.setTriggerLabel ((int) states.size() - 1, text, mode);
         }
     }
@@ -2384,6 +2526,14 @@ void MainComponent::setTriggerEnabled (int track, bool on)
     if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
         return;
     auto& tg = info->stems[(size_t) stem].trigger;
+    if (on && isMidiSource (*info, info->stems[(size_t) stem]))
+    {
+        // La pista MIDI de este stem reemplaza al trigger en vivo: sus sonidos se eligen en sus filas
+        syncTriggerMarks();
+        sepLabel.setText (tr ("Esta pista ya tiene una pista MIDI que reemplaza al trigger: elige el sonido con clic derecho en sus filas"),
+                          juce::dontSendNotification);
+        return;
+    }
     if (on && tg.sound.isEmpty())
     {
         // Sin sonido asignado todavía: elegirlo primero
@@ -2395,6 +2545,41 @@ void MainComponent::setTriggerEnabled (int track, bool on)
     library.saveSong (*info);
     syncTriggerMarks();
     requestRender();
+}
+
+// Notas de batería General MIDI que ofrecen los menús de nota (trigger y filas de pistas MIDI)
+static const int midiDrumNotes[] = { 36, 38, 37, 40, 42, 44, 46, 41, 43, 45, 47, 48, 50, 49, 57, 51, 53, 55, 52, 54,
+                                     56, 60, 61, 62, 63, 64, 65, 66, 69, 70, 73, 74, 75, 76 };
+
+// Notas de un menú de nota: las de batería General MIDI (sirven también para Addictive Drums puesto en su mapa General
+// MIDI) y, en un submenú, el mapa "AD2 Standard" de Addictive Drums 2 por grupos. Ids = noteMenuBase + nota (lejos de
+// los demás ids de esos menús); `enabled` (si está) dice si una nota se puede elegir. La nota actual queda marcada.
+static constexpr int noteMenuBase = 1000;
+
+static void addNoteItems (juce::PopupMenu& menu, int current, const std::function<bool (int)>& enabled)
+{
+    const auto label = [] (int n, const juce::String& name)
+    {
+        return name + "  (" + juce::MidiMessage::getMidiNoteName (n, true, true, 3) + ", " + juce::String (n) + ")";
+    };
+    menu.addSectionHeader (tr ("General MIDI"));
+    for (int n : midiDrumNotes)
+        menu.addItem (noteMenuBase + n, label (n, miditrack::drumNoteName (n)), enabled == nullptr || enabled (n), n == current);
+    juce::PopupMenu ad2;
+    ad2.addSectionHeader (tr ("Su mapa «AD2 Standard» (compruébalo con Escuchar)"));
+    for (auto& group : miditrack::addictiveDrumsMap())
+    {
+        juce::PopupMenu sub;
+        bool hasCurrent = false;
+        for (auto& nn : group.notes)
+        {
+            sub.addItem (noteMenuBase + nn.note, label (nn.note, tr (nn.name)), enabled == nullptr || enabled (nn.note), nn.note == current);
+            hasCurrent = hasCurrent || nn.note == current;
+        }
+        ad2.addSubMenu (tr (group.name), sub, true, nullptr, hasCurrent);
+    }
+    menu.addSeparator();
+    menu.addSubMenu (tr ("Addictive Drums 2"), ad2);
 }
 
 void MainComponent::triggerMenu (int track)
@@ -2412,13 +2597,6 @@ void MainComponent::triggerMenu (int track)
         for (auto& lane : samplers->lanes)
             if (lane->stemIndex == stem)
                 detected = (int) lane->events.size();
-
-    // Notas MIDI habituales de una batería (General MIDI; Addictive Drums usa el mismo mapa básico)
-    struct DrumNote { int note; const char* name; };
-    static const DrumNote drumNotes[] = { { 36, "Bombo" }, { 38, "Caja" }, { 37, "Aro (side stick)" }, { 42, "Hi-hat cerrado" },
-                                          { 44, "Hi-hat pedal" }, { 46, "Hi-hat abierto" }, { 41, "Tom bajo" }, { 45, "Tom medio" },
-                                          { 48, "Tom alto" }, { 49, "Crash" }, { 57, "Crash 2" }, { 51, "Ride" },
-                                          { 53, "Campana del ride" }, { 55, "Splash" }, { 52, "China" } };
 
     juce::PopupMenu m;
     m.addSectionHeader (st.name + (detected >= 0 ? ": " + juce::String (detected) + tr (" golpes detectados") : juce::String()));
@@ -2456,14 +2634,14 @@ void MainComponent::triggerMenu (int track)
                         ? rack->nameOf (tg.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue()) : tr ("instrumento ausente");
     m.addSubMenu (tr ("Sonido: ") + soundName, sound);
     juce::PopupMenu notes;
-    for (size_t i = 0; i < std::size (drumNotes); ++i)
-        notes.addItem (200 + drumNotes[i].note, juce::String (drumNotes[i].name) + "  (" + juce::MidiMessage::getMidiNoteName (drumNotes[i].note, true, true, 3)
-                                                    + ", " + juce::String (drumNotes[i].note) + ")", true, tg.note == drumNotes[i].note);
+    addNoteItems (notes, tg.note, {});
     notes.addSeparator();
     notes.addItem (250, tr ("Otra nota (0 a 127)..."));
     m.addSubMenu (tr ("Nota MIDI (para instrumentos VST): ") + juce::MidiMessage::getMidiNoteName (tg.note, true, true, 3) + " (" + juce::String (tg.note) + ")", notes);
+    m.addItem (6, tr ("Escuchar (un golpe con este sonido)"), tg.enabled && tg.sound.isNotEmpty() && ! isMidiSource (*info, st));
     m.addItem (3, tr ("Ajustes de detección... (umbral ") + juce::String (tg.thresholdDb, 0) + " dB, sensibilidad " + juce::String (tg.sensitivity, 1) + ")");
     m.addSeparator();
+    m.addItem (400, tr ("Crear pista MIDI con estos golpes (para corregirlos a mano)"), arrangedSong != nullptr);
     m.addItem (4, tr ("Quitar el trigger de esta pista"), tg.enabled || tg.sound.isNotEmpty());
 
     const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
@@ -2512,6 +2690,11 @@ void MainComponent::triggerMenu (int track)
             recordDialog (true, track);
             return;
         }
+        else if (result == 400)
+        {
+            createMidiTrack (track);
+            return;
+        }
         else if (result == 4)
         {
             t.enabled = false;
@@ -2522,8 +2705,13 @@ void MainComponent::triggerMenu (int track)
             t.sound = "banco:" + banks[result - 100];
             t.enabled = true;
         }
-        else if (result >= 200 && result < 200 + 128)
-            t.note = result - 200;
+        else if (result >= noteMenuBase && result < noteMenuBase + 128)
+            t.note = result - noteMenuBase;
+        else if (result == 6)
+        {
+            auditionTrigger (stem);
+            return;
+        }
         else if (result == 250)
         {
             askText (tr ("Nota MIDI (0 a 127; 36 = bombo, 38 = caja)"), juce::String (t.note), [this, stem] (const juce::String& text)
@@ -2558,45 +2746,20 @@ void MainComponent::triggerMenu (int track)
 
 void MainComponent::importBankFor (int track)
 {
-    pickFiles (tr ("Elige los wav de los golpes (de suave a fuerte, o varios parecidos)"),
-               juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
-               juce::File::getSpecialLocation (juce::File::userMusicDirectory), Library::audioFilePatterns(),
-               [this, track] (const juce::Array<juce::File>& files)
+    importBank ([this, track] (const juce::String& bankName)
     {
-        if (files.isEmpty())
+        auto* inf = currentInfo();
+        if (inf == nullptr || currentSong == nullptr || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
             return;
-        askText (tr ("Nombre del banco de muestras"), files[0].getParentDirectory().getFileName(), [this, track, files] (const juce::String& name)
-        {
-            auto* inf = currentInfo();
-            if (inf == nullptr || currentSong == nullptr || name.trim().isEmpty() || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()))
-                return;
-            const auto folder = library.bankFolder (name.trim());
-            folder.createDirectory();
-            int copied = 0;
-            for (auto& f : files)
-                if (Library::isAudioFile (f) && f.copyFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
-                    ++copied;
-            if (copied == 0)
-            {
-                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Banco de muestras"), tr ("No se pudo copiar ningún archivo."));
-                return;
-            }
-            {
-                const juce::ScopedLock sl (bankCache.lock);
-                bankCache.banks.clear();   // el banco cambió: se vuelve a cargar
-            }
-            const int stem = currentSong->tracks[(size_t) track]->stemIndex;
-            if (juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
-            {
-                auto& t = inf->stems[(size_t) stem].trigger;
-                t.sound = "banco:" + folder.getFileName();
-                t.enabled = true;
-                library.saveSong (*inf);
-                syncTriggerMarks();
-                requestRender();
-            }
-            sepLabel.setText (tr ("Banco «") + folder.getFileName() + tr ("»: ") + juce::String (copied) + tr (" muestras"), juce::dontSendNotification);
-        });
+        const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+        if (! juce::isPositiveAndBelow (stem, (int) inf->stems.size()))
+            return;
+        auto& t = inf->stems[(size_t) stem].trigger;
+        t.sound = "banco:" + bankName;
+        t.enabled = true;
+        library.saveSong (*inf);
+        syncTriggerMarks();
+        requestRender();
     });
 }
 
@@ -3089,6 +3252,794 @@ void MainComponent::setInstrumentForCapture (const juce::String& path)
         safe->library.saveSong (*info);
         safe->requestRender();
     });
+}
+
+//==============================================================================
+// Pistas MIDI: los golpes de un stem congelados y editables, con un sonido por fila
+
+int MainComponent::trackIndexForFile (const juce::String& fileName)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || fileName.isEmpty())
+        return -1;
+    for (size_t k = 0; k < currentSong->tracks.size(); ++k)
+    {
+        const int stem = currentSong->tracks[k]->stemIndex;
+        if (juce::isPositiveAndBelow (stem, (int) info->stems.size()) && info->stems[(size_t) stem].fileName == fileName)
+            return (int) k;
+    }
+    return -1;
+}
+
+std::shared_ptr<SampleBankData> MainComponent::bankFor (const juce::String& bankName)
+{
+    const double sr = engine.getSampleRate();
+    const auto key = bankName + "@" + juce::String (sr);
+    {
+        const juce::ScopedLock sl (bankCache.lock);
+        auto it = bankCache.banks.find (key);
+        if (it != bankCache.banks.end())
+            return it->second;
+    }
+    auto bank = triggers::loadBank (library.bankFolder (bankName), sr, formatManager);
+    if (bank != nullptr)
+    {
+        const juce::ScopedLock sl (bankCache.lock);
+        bankCache.banks[key] = bank;
+    }
+    return bank;
+}
+
+juce::String MainComponent::soundLabel (const juce::String& sound)
+{
+    if (sound.startsWith ("banco:"))
+        return sound.fromFirstOccurrenceOf ("banco:", false, false);
+    if (sound.startsWith ("vst:"))
+    {
+        const auto name = rack != nullptr ? rack->nameOf (sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue()) : juce::String();
+        return name.isNotEmpty() ? name : tr ("instrumento ausente");
+    }
+    return tr ("sin sonido");
+}
+
+MidiPad* MainComponent::padForLane (SongInfo& info, const SamplerLane& lane) const
+{
+    if (info.folder != midiSamplersFolder || ! juce::isPositiveAndBelow (lane.midiTrack, (int) info.midiTracks.size()))
+        return nullptr;
+    auto& mt = info.midiTracks[(size_t) lane.midiTrack];
+    if (mt.sourceFile != lane.midiSource || ! juce::isPositiveAndBelow (lane.midiPad, (int) mt.pads.size()))
+        return nullptr;
+    auto& pad = mt.pads[(size_t) lane.midiPad];
+    return pad.note == lane.note ? &pad : nullptr;
+}
+
+void MainComponent::pullMidiControls()
+{
+    // Lo que se movió en el mezclador (fader, mute, salida) pasa a las filas antes de rehacer las líneas. Solo a la fila de
+    // la que salió cada línea: tras quitar una fila o una pista, o al cambiar de canción, los índices ya no son los mismos
+    auto* info = currentInfo();
+    if (info == nullptr || midiSamplers == nullptr)
+        return;
+    for (auto& lane : midiSamplers->lanes)
+        if (auto* pad = padForLane (*info, *lane))
+        {
+            const float g = lane->control.gain.load();
+            pad->gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
+            pad->muted = lane->control.muted.load();
+            pad->outputPair = lane->control.outputPair.load();
+        }
+}
+
+void MainComponent::applyMidiTracks()
+{
+    auto* info = currentInfo();
+    // El solo no se guarda: se conserva por pista y nota mientras se rehacen las líneas
+    std::vector<std::pair<juce::String, int>> soloed;
+    if (midiSamplers != nullptr && info != nullptr)
+        for (auto& lane : midiSamplers->lanes)
+            if (lane->control.solo.load() && padForLane (*info, *lane) != nullptr)
+                soloed.push_back ({ info->midiTracks[(size_t) lane->midiTrack].name, lane->note });
+    pullMidiControls();
+    if (info == nullptr || currentSong == nullptr)
+    {
+        midiSamplers.reset();
+        midiSamplersFolder = juce::File();
+        engine.setMidiSamplers (nullptr);
+        mixer.setMidiSamplers (nullptr);
+        timeline.setMidiLanes ({});
+        return;
+    }
+    const double sr = engine.getSampleRate();
+    auto toPlayback = [this] (double t) { return timeMap.toPlayback (t); };
+    auto set = std::make_shared<SamplerSet>();
+    std::vector<TimelineView::MidiLaneView> views;
+    for (size_t m = 0; m < info->midiTracks.size(); ++m)
+    {
+        const auto& mt = info->midiTracks[m];
+        TimelineView::MidiLaneView view;
+        view.name = mt.name;
+        view.muted = mt.muted;
+        view.afterTrack = trackIndexForFile (mt.sourceFile);
+        for (auto& pad : mt.pads)
+            view.pads.push_back ({ pad.name, pad.note, soundLabel (pad.sound), pad.muted });
+        for (auto& h : mt.hits)
+            view.hits.push_back ({ toPlayback (h.seconds), h.note, h.velocity });
+        views.push_back (std::move (view));
+
+        // Una pista silenciada conserva sus líneas (sin disparar y con el canal a 0 con rampa): así lo que sonaba se
+        // apaga sin corte en vez de seguir desde el conjunto anterior
+        for (size_t p = 0; p < mt.pads.size(); ++p)
+        {
+            const auto& pad = mt.pads[p];
+            const bool isBank = pad.sound.startsWith ("banco:"), isInstrument = pad.sound.startsWith ("vst:");
+            if (! isBank && ! isInstrument)
+                continue;
+            auto lane = std::make_unique<SamplerLane>();
+            lane->name = mt.name + tr (" · ") + pad.name;
+            lane->stemIndex = -1;
+            lane->midiTrack = (int) m;
+            lane->midiPad = (int) p;
+            lane->midiSource = mt.sourceFile;
+            lane->silenced = mt.muted;
+            lane->rawVelocity = true;
+            lane->note = pad.note;
+            lane->events = miditrack::eventsForNote (mt, pad.note, sr, toPlayback);
+            if (isBank)
+                lane->bank = bankFor (pad.sound.fromFirstOccurrenceOf ("banco:", false, false));
+            else
+                lane->instrumentId = pad.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue();
+            lane->control.name = lane->name;
+            lane->control.stemIndex = -1;
+            lane->control.gain = pad.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (pad.gainDb);
+            lane->control.smoothedGain = lane->control.gain.load();
+            lane->control.muted = pad.muted;
+            lane->control.outputPair = pad.outputPair;
+            for (auto& s : soloed)
+                if (s.first == mt.name && s.second == pad.note)
+                    lane->control.solo = true;
+            set->lanes.push_back (std::move (lane));
+        }
+    }
+    midiSamplers = set;
+    midiSamplersFolder = info->folder;
+    // El trigger en vivo de un stem con pista MIDI deja de disparar ya (el próximo render lo quita del conjunto)
+    if (samplers != nullptr)
+        for (auto& lane : samplers->lanes)
+            lane->superseded = juce::isPositiveAndBelow (lane->stemIndex, (int) info->stems.size())
+                               && isMidiSource (*info, info->stems[(size_t) lane->stemIndex]);
+    engine.setMidiSamplers (set);
+    mixer.setMidiSamplers (set);
+    timeline.setMidiLanes (views);
+    refreshReplaced();
+}
+
+void MainComponent::midiEdited (int midiTrack, const std::vector<int>& selection)
+{
+    auto* info = currentInfo();
+    if (info == nullptr)
+        return;
+    if (juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        info->midiTracks[(size_t) midiTrack].sortHits();
+    library.saveSong (*info);
+    applyMidiTracks();
+    syncTriggerMarks();
+    if (juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        timeline.selectMidiHits (midiTrack, selection);
+}
+
+void MainComponent::createMidiTrack (int track)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr || arrangedSong == nullptr
+        || ! juce::isPositiveAndBelow (track, (int) currentSong->tracks.size()) || ! arrangementReady())
+        return;
+    const int stem = currentSong->tracks[(size_t) track]->stemIndex;
+    if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+        return;
+    const LoadedTrack* source = nullptr;
+    for (auto& t : arrangedSong->tracks)
+        if (t->stemIndex == stem)
+            source = t.get();
+    if (source == nullptr)
+        return;
+    // Los golpes se detectan sobre el arreglo (la línea de tiempo de la canción, sin estirar)
+    const auto& st = info->stems[(size_t) stem];
+    const double sr = engine.getSampleRate();
+    const auto events = triggers::detect (source->buffer, sr, st.trigger.thresholdDb, st.trigger.sensitivity, st.trigger.minMs);
+    pushUndo();
+    info->midiTracks.push_back (miditrack::fromDetection (events, sr, st));   // reemplaza al trigger en vivo de este stem (triggersOf)
+    library.saveSong (*info);
+    requestRender();   // los triggers en vivo cambiaron
+    midiEdited ((int) info->midiTracks.size() - 1, {});
+    sepLabel.setText (tr ("Pista MIDI «") + info->midiTracks.back().name + tr ("»: ") + juce::String ((int) events.size())
+                          + tr (" golpes. Doble clic agrega, arrastrar mueve, Alt + arrastre cambia la fuerza, clic derecho para más"),
+                      juce::dontSendNotification);
+}
+
+double MainComponent::snapMidiTime (int midiTrack, double seconds, int)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        return seconds;
+    const int mode = cutMode();
+    if (mode == 2)
+        return miditrack::snapToSubdivision (mappedAnalysis(), seconds, 4);   // a la semicorchea más cercana
+    if (mode == 3)
+    {
+        // A la transiente de la pista de origen (la batería separada, por ejemplo), a menos de 50 ms
+        const int lane = trackIndexForFile (info->midiTracks[(size_t) midiTrack].sourceFile);
+        const double onset = lane >= 0 ? onsetNear (timeMap.toOriginal (seconds), lane, 0.05) : -1.0;
+        return onset >= 0.0 ? timeMap.toPlayback (onset) : seconds;
+    }
+    return seconds;
+}
+
+void MainComponent::importBank (std::function<void (const juce::String& bankName)> onDone)
+{
+    pickFiles (tr ("Elige los wav de los golpes (de suave a fuerte, o varios parecidos)"),
+               juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+               juce::File::getSpecialLocation (juce::File::userMusicDirectory), Library::audioFilePatterns(),
+               [this, onDone] (const juce::Array<juce::File>& files)
+    {
+        if (files.isEmpty())
+            return;
+        askText (tr ("Nombre del banco de muestras"), files[0].getParentDirectory().getFileName(), [this, files, onDone] (const juce::String& name)
+        {
+            if (name.trim().isEmpty())
+                return;
+            const auto folder = library.bankFolder (name.trim());
+            folder.createDirectory();
+            int copied = 0;
+            for (auto& f : files)
+                if (Library::isAudioFile (f) && f.copyFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(), f.getFileExtension(), false)))
+                    ++copied;
+            if (copied == 0)
+            {
+                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Banco de muestras"), tr ("No se pudo copiar ningún archivo."));
+                return;
+            }
+            {
+                const juce::ScopedLock sl (bankCache.lock);
+                bankCache.banks.clear();   // el banco cambió: se vuelve a cargar
+            }
+            sepLabel.setText (tr ("Banco «") + folder.getFileName() + tr ("»: ") + juce::String (copied) + tr (" muestras"), juce::dontSendNotification);
+            if (onDone)
+                onDone (folder.getFileName());
+        });
+    });
+}
+
+
+void MainComponent::midiHeaderMenu (int midiTrack)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        return;
+    const auto& mt = info->midiTracks[(size_t) midiTrack];
+    const bool hasSource = trackIndexForFile (mt.sourceFile) >= 0;
+    juce::PopupMenu m;
+    m.addSectionHeader (mt.name + tr (" · ") + juce::String ((int) mt.hits.size()) + tr (" golpes"));
+    m.addItem (1, tr ("Renombrar..."));
+    m.addItem (2, tr ("Silenciar la pista de origen mientras suena"), hasSource, mt.muteSource);
+    m.addItem (3, tr ("Agregar una fila (otro sonido)..."));
+    m.addItem (5, tr ("Elegir todos los golpes"), ! mt.hits.empty());
+    m.addSeparator();
+    m.addItem (4, tr ("Volver a detectar toda la pista (reemplaza todos los golpes)"), hasSource);
+    m.addItem (6, tr ("Eliminar la pista MIDI"));
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)), [safe, midiTrack] (int result)
+    {
+        auto* self = safe.getComponent();
+        auto* inf = self != nullptr ? self->currentInfo() : nullptr;
+        if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (midiTrack, (int) inf->midiTracks.size()))
+            return;
+        auto& track = inf->midiTracks[(size_t) midiTrack];
+        if (result == 1)
+            self->askText (tr ("Nombre de la pista MIDI"), track.name, [safe, midiTrack] (const juce::String& name)
+            {
+                auto* s2 = safe.getComponent();
+                auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+                if (in2 == nullptr || name.trim().isEmpty() || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size()))
+                    return;
+                in2->midiTracks[(size_t) midiTrack].name = name.trim();
+                s2->midiEdited (midiTrack, s2->timeline.getSelectedMidiHits (midiTrack));
+            });
+        else if (result == 2)
+        {
+            track.muteSource = ! track.muteSource;
+            self->midiEdited (midiTrack, self->timeline.getSelectedMidiHits (midiTrack));
+        }
+        else if (result == 3)
+            self->midiHeaderMenuAddPad (midiTrack);
+        else if (result == 4)
+        {
+            const int lane = self->trackIndexForFile (track.sourceFile);
+            if (lane < 0 || self->arrangedSong == nullptr || ! juce::isPositiveAndBelow (lane, (int) self->arrangedSong->tracks.size())
+                || ! self->arrangementReady())
+                return;
+            const auto& src = *self->arrangedSong->tracks[(size_t) lane];
+            const int stem = src.stemIndex;
+            const auto tg = juce::isPositiveAndBelow (stem, (int) inf->stems.size()) ? inf->stems[(size_t) stem].trigger : TriggerSettings();
+            const double sr = self->engine.getSampleRate();
+            const auto events = triggers::detect (src.buffer, sr, tg.thresholdDb, tg.sensitivity, tg.minMs);
+            self->pushUndo();
+            miditrack::replaceRange (track, 0.0, std::numeric_limits<double>::max(), events, sr, -1);
+            self->midiEdited (midiTrack, {});
+            self->sepLabel.setText (tr ("Golpes detectados de nuevo: ") + juce::String ((int) events.size()) + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+        }
+        else if (result == 5)
+        {
+            std::vector<int> all;
+            for (int i = 0; i < (int) track.hits.size(); ++i)
+                all.push_back (i);
+            self->timeline.selectMidiHits (midiTrack, all);
+        }
+        else if (result == 6)
+        {
+            juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, tr ("¿Eliminar la pista MIDI?"),
+                tr ("«") + track.name + tr ("» y sus ") + juce::String ((int) track.hits.size()) + tr (" golpes se eliminan (Ctrl+Z deshace)."),
+                "Eliminar", "Cancelar", self, juce::ModalCallbackFunction::create ([safe, midiTrack] (int ok)
+                {
+                    auto* s2 = safe.getComponent();
+                    auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+                    if (in2 == nullptr || ok == 0 || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size()))
+                        return;
+                    s2->pushUndo();
+                    in2->midiTracks.erase (in2->midiTracks.begin() + midiTrack);
+                    s2->midiEdited (-1, {});
+                    s2->requestRender();   // el trigger en vivo del stem vuelve (triggersOf cambió)
+                }));
+        }
+    });
+}
+
+void MainComponent::midiPadMenu (int midiTrack, int padIndex)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        return;
+    const auto& mt = info->midiTracks[(size_t) midiTrack];
+    if (! juce::isPositiveAndBelow (padIndex, (int) mt.pads.size()))
+        return;
+    const auto& pad = mt.pads[(size_t) padIndex];
+
+    juce::PopupMenu m;
+    m.addSectionHeader (pad.name + " (" + juce::MidiMessage::getMidiNoteName (pad.note, true, true, 3) + ", " + juce::String (pad.note) + tr (") · ") + soundLabel (pad.sound));
+    // Sonido: bancos grabados o importados, e instrumentos del rack
+    juce::PopupMenu sound;
+    const auto banks = library.listBanks();
+    sound.addSectionHeader (tr ("Bancos de muestras grabadas"));
+    for (int i = 0; i < banks.size(); ++i)
+        sound.addItem (100 + i, banks[i], true, pad.sound == "banco:" + banks[i]);
+    if (banks.isEmpty())
+        sound.addItem (99, tr ("(no hay bancos todavía)"), false);
+    sound.addItem (2, tr ("Importar muestras (wav) como banco nuevo..."));
+    sound.addSeparator();
+    sound.addSectionHeader (tr ("Instrumentos ") + InstrumentRack::formatsAvailable());
+    std::vector<int> instrumentIds;
+    if (rack != nullptr)
+        for (auto& slot : rack->getSlots())
+        {
+            instrumentIds.push_back (slot.id);
+            sound.addItem (300 + (int) instrumentIds.size() - 1, slot.description.name + (slot.lane == nullptr ? tr (" (no cargado)") : juce::String()),
+                           true, pad.sound == "vst:" + juce::String (slot.id));
+        }
+    sound.addItem (298, tr ("Añadir o buscar instrumentos..."));
+    sound.addSeparator();
+    sound.addItem (297, tr ("Sin sonido"), true, pad.sound.isEmpty());
+    m.addSubMenu (tr ("Sonido: ") + soundLabel (pad.sound), sound);
+    // Nota (la que recibe un instrumento; con un banco solo distingue la fila)
+    juce::PopupMenu notes;
+    addNoteItems (notes, pad.note, [&mt, padIndex] (int n)
+    {
+        const int owner = miditrack::padIndexForNote (mt, n);
+        return owner < 0 || owner == padIndex;   // dos filas no comparten nota
+    });
+    notes.addSeparator();
+    notes.addItem (499, tr ("Otra nota (0 a 127)..."));
+    m.addSubMenu (tr ("Nota: ") + juce::String (pad.note), notes);
+    m.addItem (14, tr ("Escuchar (un golpe con este sonido y esta nota)"), pad.sound.isNotEmpty());
+    m.addItem (10, tr ("Renombrar la fila..."));
+    m.addItem (11, tr ("Silenciar la fila"), true, pad.muted);
+    m.addItem (12, tr ("Elegir todos los golpes de esta fila"));
+    m.addItem (13, tr ("Agregar una fila (otro sonido)..."));
+    if (mt.pads.size() > 1)
+    {
+        juce::PopupMenu remove;
+        for (int j = 0; j < (int) mt.pads.size(); ++j)
+            if (j != padIndex)
+                remove.addItem (600 + j, tr ("y pasar sus golpes a «") + mt.pads[(size_t) j].name + tr ("»"));
+        remove.addItem (699, tr ("y borrar sus golpes"));
+        m.addSubMenu (tr ("Quitar esta fila"), remove);
+    }
+
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [safe, midiTrack, padIndex, banks, instrumentIds] (int result)
+    {
+        auto* self = safe.getComponent();
+        auto* inf = self != nullptr ? self->currentInfo() : nullptr;
+        if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (midiTrack, (int) inf->midiTracks.size()))
+            return;
+        auto& track = inf->midiTracks[(size_t) midiTrack];
+        if (! juce::isPositiveAndBelow (padIndex, (int) track.pads.size()))
+            return;
+        auto& p = track.pads[(size_t) padIndex];
+        auto setSound = [safe, midiTrack, padIndex] (const juce::String& s)
+        {
+            auto* s2 = safe.getComponent();
+            auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+            if (in2 == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size())
+                || ! juce::isPositiveAndBelow (padIndex, (int) in2->midiTracks[(size_t) midiTrack].pads.size()))
+                return;
+            in2->midiTracks[(size_t) midiTrack].pads[(size_t) padIndex].sound = s;
+            s2->midiEdited (midiTrack, s2->timeline.getSelectedMidiHits (midiTrack));
+        };
+        if (result >= 100 && result < 100 + banks.size())
+            setSound ("banco:" + banks[result - 100]);
+        else if (result >= 300 && result < 300 + (int) instrumentIds.size())
+            setSound ("vst:" + juce::String (instrumentIds[(size_t) (result - 300)]));
+        else if (result == 297)
+            setSound ({});
+        else if (result == 2)
+            self->importBank ([setSound] (const juce::String& bank) { setSound ("banco:" + bank); });
+        else if (result == 298)
+            self->instrumentsMenu();
+        else if (result >= noteMenuBase && result < noteMenuBase + 128)
+        {
+            const int n = result - noteMenuBase;
+            const int owner = miditrack::padIndexForNote (track, n);
+            if (owner >= 0 && owner != padIndex)
+                return;
+            self->pushUndo();
+            for (auto& h : track.hits)
+                if (h.note == p.note)
+                    h.note = n;   // los golpes de la fila siguen en ella
+            p.note = n;
+            self->midiEdited (midiTrack, self->timeline.getSelectedMidiHits (midiTrack));
+        }
+        else if (result == 499)
+            self->askText (tr ("Nota MIDI de la fila (0 a 127)"), juce::String (p.note), [safe, midiTrack, padIndex] (const juce::String& text)
+            {
+                auto* s2 = safe.getComponent();
+                auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+                if (in2 == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size()))
+                    return;
+                auto& tr2 = in2->midiTracks[(size_t) midiTrack];
+                if (! juce::isPositiveAndBelow (padIndex, (int) tr2.pads.size()))
+                    return;
+                const int n = juce::jlimit (0, 127, text.getIntValue());
+                const int owner = miditrack::padIndexForNote (tr2, n);
+                if (owner >= 0 && owner != padIndex)
+                {
+                    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Nota MIDI"),
+                                                            tr ("Esa nota ya la usa la fila «") + tr2.pads[(size_t) owner].name + tr ("»."));
+                    return;
+                }
+                s2->pushUndo();
+                for (auto& h : tr2.hits)
+                    if (h.note == tr2.pads[(size_t) padIndex].note)
+                        h.note = n;
+                tr2.pads[(size_t) padIndex].note = n;
+                s2->midiEdited (midiTrack, s2->timeline.getSelectedMidiHits (midiTrack));
+            });
+        else if (result == 10)
+            self->askText (tr ("Nombre de la fila"), p.name, [safe, midiTrack, padIndex] (const juce::String& name)
+            {
+                auto* s2 = safe.getComponent();
+                auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+                if (in2 == nullptr || name.trim().isEmpty() || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size())
+                    || ! juce::isPositiveAndBelow (padIndex, (int) in2->midiTracks[(size_t) midiTrack].pads.size()))
+                    return;
+                in2->midiTracks[(size_t) midiTrack].pads[(size_t) padIndex].name = name.trim();
+                s2->midiEdited (midiTrack, s2->timeline.getSelectedMidiHits (midiTrack));
+            });
+        else if (result == 11)
+        {
+            p.muted = ! p.muted;
+            // El canal del mezclador también (si no, al rehacer las líneas se volvería a tomar su mute)
+            if (self->midiSamplers != nullptr)
+                for (auto& lane : self->midiSamplers->lanes)
+                    if (self->padForLane (*inf, *lane) == &p)
+                        lane->control.muted = p.muted;
+            self->midiEdited (midiTrack, self->timeline.getSelectedMidiHits (midiTrack));
+        }
+        else if (result == 12)
+        {
+            std::vector<int> rowHits;
+            for (int i = 0; i < (int) track.hits.size(); ++i)
+                if (track.hits[(size_t) i].note == p.note)
+                    rowHits.push_back (i);
+            self->timeline.selectMidiHits (midiTrack, rowHits);
+        }
+        else if (result == 13)
+            self->midiHeaderMenuAddPad (midiTrack);
+        else if (result == 14)
+            self->auditionMidiPad (midiTrack, padIndex);
+        else if (result >= 600 && result <= 699)
+        {
+            const int target = result == 699 ? -1 : result - 600;
+            self->pushUndo();
+            miditrack::removePad (track, padIndex, target >= 0 && target < (int) track.pads.size() ? track.pads[(size_t) target].note : -1);
+            self->midiEdited (midiTrack, {});
+        }
+    });
+}
+
+void MainComponent::auditionMidiPad (int midiTrack, int padIndex)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size())
+        || ! juce::isPositiveAndBelow (padIndex, (int) info->midiTracks[(size_t) midiTrack].pads.size()))
+        return;
+    const auto& mt = info->midiTracks[(size_t) midiTrack];
+    const auto& pad = mt.pads[(size_t) padIndex];
+    const auto row = tr ("La fila «") + pad.name + tr ("»");
+    juce::String why;
+    if (pad.sound.isEmpty())
+        why = row + tr (" no tiene sonido: elígelo con clic derecho en su nombre");
+    else if (mt.muted || pad.muted)
+        why = row + tr (" está silenciada");
+    else if (pad.sound.startsWith ("vst:") && (rack == nullptr || ! rack->has (pad.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue())))
+        why = row + tr (" usa un instrumento que no está cargado");
+    if (why.isNotEmpty())
+    {
+        sepLabel.setText (why, juce::dontSendNotification);
+        return;
+    }
+    engine.audition (-1, midiTrack, padIndex, miditrack::defaultVelocity);
+    sepLabel.setText (tr ("Escuchar: «") + pad.name + tr ("», nota ") + juce::String (pad.note) + " ("
+                          + juce::MidiMessage::getMidiNoteName (pad.note, true, true, 3) + tr (") en ") + soundLabel (pad.sound),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::auditionTrigger (int stem)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+        return;
+    const auto& st = info->stems[(size_t) stem];
+    const auto& tg = st.trigger;
+    bool hasLane = false;
+    if (samplers != nullptr)
+        for (auto& lane : samplers->lanes)
+            hasLane = hasLane || (lane->stemIndex == stem && lane->midiTrack < 0);
+    juce::String why;
+    if (isMidiSource (*info, st))
+        why = tr ("El trigger de «") + st.name + tr ("» lo reemplaza su pista MIDI: escucha sus filas");
+    else if (! tg.enabled || tg.sound.isEmpty())
+        why = tr ("El trigger de «") + st.name + tr ("» está apagado o sin sonido");
+    else if (tg.sound.startsWith ("vst:") && (rack == nullptr || ! rack->has (tg.sound.fromFirstOccurrenceOf ("vst:", false, false).getIntValue())))
+        why = tr ("El instrumento del trigger no está cargado");
+    else if (! hasLane)
+        why = tr ("El trigger se está preparando: prueba en un momento");
+    if (why.isNotEmpty())
+    {
+        sepLabel.setText (why, juce::dontSendNotification);
+        return;
+    }
+    engine.audition (stem, -1, -1, miditrack::defaultVelocity);
+    sepLabel.setText (tr ("Escuchar: trigger de «") + st.name + tr ("», nota ") + juce::String (tg.note) + tr (" en ") + soundLabel (tg.sound),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::midiHeaderMenuAddPad (int midiTrack)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        return;
+    auto& track = info->midiTracks[(size_t) midiTrack];
+    int note = -1;
+    for (int candidate : { 63, 62, 64, 60, 61, 65, 66, 56, 70, 73, 75, 36, 38, 45, 42 })
+        if (note < 0 && miditrack::padIndexForNote (track, candidate) < 0)
+            note = candidate;
+    for (int candidate = 35; note < 0 && candidate < 128; ++candidate)
+        if (miditrack::padIndexForNote (track, candidate) < 0)
+            note = candidate;
+    if (note < 0)
+        return;
+    pushUndo();
+    MidiPad pad;
+    pad.name = miditrack::drumNoteName (note);
+    pad.note = note;
+    track.pads.push_back (pad);
+    const int newPad = (int) track.pads.size() - 1;
+    midiEdited (midiTrack, timeline.getSelectedMidiHits (midiTrack));
+    sepLabel.setText (tr ("Fila «") + pad.name + tr ("» agregada: elige su sonido"), juce::dontSendNotification);
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::MessageManager::callAsync ([safe, midiTrack, newPad] { if (auto* s2 = safe.getComponent()) s2->midiPadMenu (midiTrack, newPad); });
+}
+
+void MainComponent::midiHitsMenu (int midiTrack, std::vector<int> hits, int row, double seconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) info->midiTracks.size()))
+        return;
+    const auto& mt = info->midiTracks[(size_t) midiTrack];
+    const bool hasBeats = info->analysis.beats.size() >= 2;
+    juce::PopupMenu m;
+    if (juce::isPositiveAndBelow (row, (int) mt.pads.size()))
+        m.addItem (1, tr ("Agregar un golpe aquí (") + mt.pads[(size_t) row].name + ")");
+    if (! hits.empty())
+    {
+        m.addSectionHeader (juce::String ((int) hits.size()) + (hits.size() == 1 ? tr (" golpe elegido") : tr (" golpes elegidos")));
+        m.addItem (2, tr ("Eliminar (Supr)"));
+        juce::PopupMenu toRow;
+        for (int j = 0; j < (int) mt.pads.size(); ++j)
+            toRow.addItem (100 + j, mt.pads[(size_t) j].name + " (" + juce::String (mt.pads[(size_t) j].note) + ")");
+        m.addSubMenu (tr ("Pasar a la fila"), toRow, mt.pads.size() > 1);
+        juce::PopupMenu vel;
+        vel.addItem (200, tr ("Más fuerte (+10)"));
+        vel.addItem (201, tr ("Más suave (-10)"));
+        vel.addSeparator();
+        const int fixed[] = { 127, 110, 100, 80, 60, 40 };
+        for (int k = 0; k < 6; ++k)
+            vel.addItem (210 + k, juce::String (fixed[k]));
+        vel.addItem (220, tr ("Otra..."));
+        m.addSubMenu (tr ("Fuerza (velocidad MIDI)"), vel);
+        juce::PopupMenu quant;
+        quant.addItem (301, tr ("A los tiempos"));
+        quant.addItem (302, tr ("A las corcheas"));
+        quant.addItem (303, tr ("A los tresillos"));
+        quant.addItem (304, tr ("A las semicorcheas"));
+        m.addSubMenu (tr ("Cuantizar"), quant, hasBeats);
+    }
+    m.addSeparator();
+    m.addItem (5, tr ("Elegir todos los golpes de esta fila"), juce::isPositiveAndBelow (row, (int) mt.pads.size()));
+    m.addItem (6, tr ("Elegir todos los golpes"));
+    const bool hasSource = trackIndexForFile (mt.sourceFile) >= 0;
+    m.addItem (7, hits.empty() ? tr ("Volver a detectar esta fila entre los marcadores de alrededor")
+                               : tr ("Volver a detectar esta fila en el tramo elegido"),
+               hasSource && juce::isPositiveAndBelow (row, (int) mt.pads.size()));
+
+    const double songSeconds = timeMap.toOriginal (seconds);
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [safe, midiTrack, hits, row, seconds, songSeconds] (int result)
+    {
+        auto* self = safe.getComponent();
+        auto* inf = self != nullptr ? self->currentInfo() : nullptr;
+        if (inf == nullptr || result == 0 || ! juce::isPositiveAndBelow (midiTrack, (int) inf->midiTracks.size()))
+            return;
+        auto& track = inf->midiTracks[(size_t) midiTrack];
+        const bool rowOk = juce::isPositiveAndBelow (row, (int) track.pads.size());
+        if (result == 1 && rowOk)
+        {
+            const int note = track.pads[(size_t) row].note;
+            const double t = self->timeMap.toOriginal (self->snapMidiTime (midiTrack, seconds, note));
+            self->pushUndo();
+            const int i = miditrack::addHit (track, t, note, miditrack::defaultVelocity);
+            self->midiEdited (midiTrack, { i });
+        }
+        else if (result == 2)
+        {
+            self->pushUndo();
+            miditrack::removeHits (track, hits);
+            self->midiEdited (midiTrack, {});
+        }
+        else if (result >= 100 && result < 100 + (int) track.pads.size())
+        {
+            self->pushUndo();
+            self->midiEdited (midiTrack, miditrack::setNote (track, hits, track.pads[(size_t) (result - 100)].note));
+        }
+        else if (result == 200 || result == 201)
+        {
+            self->pushUndo();
+            miditrack::changeVelocity (track, hits, result == 200 ? 10 : -10);
+            self->midiEdited (midiTrack, hits);
+        }
+        else if (result >= 210 && result < 216)
+        {
+            const int fixed[] = { 127, 110, 100, 80, 60, 40 };
+            self->pushUndo();
+            miditrack::setVelocity (track, hits, fixed[result - 210]);
+            self->midiEdited (midiTrack, hits);
+        }
+        else if (result == 220)
+            self->askText (tr ("Fuerza (velocidad MIDI, 1 a 127)"), juce::String (miditrack::defaultVelocity), [safe, midiTrack, hits] (const juce::String& text)
+            {
+                auto* s2 = safe.getComponent();
+                auto* in2 = s2 != nullptr ? s2->currentInfo() : nullptr;
+                if (in2 == nullptr || ! juce::isPositiveAndBelow (midiTrack, (int) in2->midiTracks.size()))
+                    return;
+                s2->pushUndo();
+                miditrack::setVelocity (in2->midiTracks[(size_t) midiTrack], hits, juce::jlimit (1, 127, text.getIntValue()));
+                s2->midiEdited (midiTrack, hits);
+            });
+        else if (result >= 301 && result <= 304)
+        {
+            const int subdivisions[] = { 1, 2, 3, 4 };
+            self->pushUndo();
+            self->midiEdited (midiTrack, miditrack::quantize (track, hits, inf->analysis, subdivisions[result - 301]));
+        }
+        else if (result == 5 && rowOk)
+        {
+            std::vector<int> rowHits;
+            for (int i = 0; i < (int) track.hits.size(); ++i)
+                if (track.hits[(size_t) i].note == track.pads[(size_t) row].note)
+                    rowHits.push_back (i);
+            self->timeline.selectMidiHits (midiTrack, rowHits);
+        }
+        else if (result == 6)
+        {
+            std::vector<int> all;
+            for (int i = 0; i < (int) track.hits.size(); ++i)
+                all.push_back (i);
+            self->timeline.selectMidiHits (midiTrack, all);
+        }
+        else if (result == 7 && rowOk)
+        {
+            // Tramo: el de los golpes elegidos, o entre los marcadores que rodean el clic (o toda la canción)
+            double from = 0.0, to = std::numeric_limits<double>::max();
+            if (! hits.empty())
+            {
+                from = std::numeric_limits<double>::max();
+                to = 0.0;
+                for (int i : hits)
+                    if (juce::isPositiveAndBelow (i, (int) track.hits.size()))
+                    {
+                        from = juce::jmin (from, track.hits[(size_t) i].seconds - 0.05);
+                        to = juce::jmax (to, track.hits[(size_t) i].seconds + 0.05);
+                    }
+            }
+            else
+                for (auto& mk : inf->markers)
+                {
+                    if (mk.seconds <= songSeconds)
+                        from = mk.seconds;
+                    else
+                    {
+                        to = mk.seconds;
+                        break;
+                    }
+                }
+            const int lane = self->trackIndexForFile (track.sourceFile);
+            if (lane < 0 || self->arrangedSong == nullptr || ! juce::isPositiveAndBelow (lane, (int) self->arrangedSong->tracks.size()) || to <= from
+                || ! self->arrangementReady())
+                return;
+            const auto& src = *self->arrangedSong->tracks[(size_t) lane];
+            const auto tg = juce::isPositiveAndBelow (src.stemIndex, (int) inf->stems.size()) ? inf->stems[(size_t) src.stemIndex].trigger : TriggerSettings();
+            const double sr = self->engine.getSampleRate();
+            const auto events = triggers::detect (src.buffer, sr, tg.thresholdDb, tg.sensitivity, tg.minMs);
+            self->pushUndo();
+            miditrack::replaceRange (track, juce::jmax (0.0, from), to, events, sr, track.pads[(size_t) row].note);
+            self->midiEdited (midiTrack, {});
+            self->sepLabel.setText (tr ("Fila detectada de nuevo en el tramo (Ctrl+Z deshace)"), juce::dontSendNotification);
+        }
+    });
+}
+
+void MainComponent::createMidiTrackForCapture()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || currentSong == nullptr)
+        return;
+    for (int k = 0; k < (int) currentSong->tracks.size(); ++k)
+    {
+        const int stem = currentSong->tracks[(size_t) k]->stemIndex;
+        if (! juce::isPositiveAndBelow (stem, (int) info->stems.size()))
+            continue;
+        const auto& st = info->stems[(size_t) stem];
+        if (! (Analyzer::isDrumsTrack (st.name, st.fileName) || st.name.containsIgnoreCase ("tom") || st.name.containsIgnoreCase ("bombo")))
+            continue;
+        createMidiTrack (k);
+        // Para la captura: una segunda fila (conga) con los golpes de 5 a 10 s de la canción
+        auto& mt = info->midiTracks.back();
+        MidiPad conga;
+        conga.name = miditrack::drumNoteName (63);
+        conga.note = 63;
+        mt.pads.push_back (conga);
+        std::vector<int> moved;
+        for (int i = 0; i < (int) mt.hits.size(); ++i)
+            if (mt.hits[(size_t) i].seconds >= 5.0 && mt.hits[(size_t) i].seconds < 10.0)
+                moved.push_back (i);
+        const auto selection = miditrack::setNote (mt, moved, 63);
+        midiEdited ((int) info->midiTracks.size() - 1, selection);
+        return;
+    }
 }
 
 //==============================================================================
@@ -4292,8 +5243,9 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     m.addItem (11, tr ("Copiar tramo"), idx >= 0);
     m.addItem (12, tr ("Duplicar tramo (pegar a continuación)"), idx >= 0);
     juce::String pegarEn = formatTime (timeMap.toPlayback (t));
-    m.addItem (13, tr ("Pegar insertando en ") + pegarEn + (clipboard.valid ? juce::String::formatted (" (%.1f s)", clipboard.clip.length()) : juce::String()), clipboard.valid);
-    m.addItem (14, tr ("Pegar encima en ") + pegarEn, clipboard.valid);
+    const bool canPaste = clipboard.valid && clipboard.folder == info->folder;   // un tramo es del audio de su canción
+    m.addItem (13, tr ("Pegar insertando en ") + pegarEn + (canPaste ? juce::String::formatted (" (%.1f s)", clipboard.clip.length()) : juce::String()), canPaste);
+    m.addItem (14, tr ("Pegar encima en ") + pegarEn, canPaste);
     m.addSeparator();
     m.addItem (8, tr ("Deshacer la última edición (Ctrl+Z)"), ! undoStack.empty());
     m.addItem (9, tr ("Restaurar el audio original (sin cortes)"), ! info->clips.empty());
@@ -4325,7 +5277,13 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
                     return;
                 pushUndo();
                 arrangement::ensureClips (s->clips, sourceLength);
-                arrangement::moveClip (s->clips, idx, ms / 1000.0, result == 3);
+                if (juce::isPositiveAndBelow (idx, (int) s->clips.size()))
+                {
+                    const auto c = s->clips[(size_t) idx];
+                    const double delta = juce::jmax (ms / 1000.0, -c.position);   // lo que moveClip mueve de verdad
+                    arrangement::moveClip (s->clips, idx, ms / 1000.0, result == 3);
+                    arrangement::moveMidiHits (*s, c.position, result == 3 ? std::numeric_limits<double>::max() : c.end(), delta);
+                }
                 arrangementEdited();
             });
             return;
@@ -4346,14 +5304,21 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         {
             const int nb = inf->analysis.nearestBeat (cl[(size_t) idx].position, 0.5);
             if (nb >= 0)
-                arrangement::moveClip (cl, idx, inf->analysis.beats[(size_t) nb].seconds - cl[(size_t) idx].position, false);
+            {
+                const auto c = cl[(size_t) idx];
+                const double d = inf->analysis.beats[(size_t) nb].seconds - c.position;
+                arrangement::moveClip (cl, idx, d, false);
+                arrangement::moveMidiHits (*inf, c.position, c.end(), juce::jmax (d, -c.position));
+            }
         }
         else if (result == 5)
             arrangement::joinWithPrevious (cl, idx);
         else if (result == 6 || result == 7)
         {
             double from = 0.0, length = 0.0;
-            arrangement::removeClip (cl, idx, result == 7, from, length);
+            if (result == 6 && juce::isPositiveAndBelow (idx, (int) cl.size()))
+                arrangement::removeMidiHits (*inf, cl[(size_t) idx].position, cl[(size_t) idx].end());   // dejando silencio
+            arrangement::removeClip (cl, idx, result == 7, from, length);   // cerrando el hueco: shiftGrid mueve los golpes
             if (result == 7 && length > 0.0)
             {
                 arrangement::shiftGrid (*inf, from, -length);
@@ -4361,7 +5326,10 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
             }
         }
         else if (result == 9)
+        {
+            arrangement::midiHitsToSource (*inf, inf->clips);   // cada golpe vuelve al audio original que sonaba bajo él
             inf->clips.clear();
+        }
         else
         {
             undoStack.pop_back();
@@ -4385,8 +5353,10 @@ void MainComponent::copyClip (int index)
         return;
     const auto& c = clips[(size_t) index];
     clipboard.valid = true;
+    clipboard.folder = info->folder;
     clipboard.clip = c;
     clipboard.grid = arrangement::copyGrid (info->analysis, c.position, c.end());   // la grilla que se ve sobre ese tramo
+    arrangement::copyMidiHits (*info, c.position, c.end(), clipboard.grid);          // y los golpes de las pistas MIDI
     // Secciones de tempo del rango: la vigente al inicio y las que empiezan dentro, relativas al tramo
     clipboard.regions.clear();
     const int first = info->tempoRegionAt (c.position);
@@ -4401,7 +5371,7 @@ void MainComponent::copyClip (int index)
 void MainComponent::pasteClipboard (double at, bool insert)
 {
     auto* info = currentInfo();
-    if (info == nullptr || sourceSong == nullptr || ! clipboard.valid)
+    if (info == nullptr || sourceSong == nullptr || ! clipboard.valid || clipboard.folder != info->folder)
         return;
     const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
     if (cutMode() == 2)
@@ -4413,6 +5383,7 @@ void MainComponent::pasteClipboard (double at, bool insert)
     if (! insert)
     {
         arrangement::pasteClip (info->clips, clipboard.clip, at, false);
+        arrangement::pasteMidiHits (*info, clipboard.grid, at);
         arrangementEdited();
         sepLabel.setText (tr ("Tramo pegado encima en ") + formatTime (timeMap.toPlayback (at)), juce::dontSendNotification);
         return;
@@ -4423,8 +5394,9 @@ void MainComponent::pasteClipboard (double at, bool insert)
     const double dstBpm = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].origBpm : 0.0;
     const double dstPlay = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].playBpm : 0.0;
     arrangement::pasteClip (info->clips, clipboard.clip, at, true);
-    arrangement::shiftGrid (*info, at, len);                 // abre el hueco en tiempos, acordes, marcadores y secciones
+    arrangement::shiftGrid (*info, at, len);                 // abre el hueco en tiempos, acordes, marcadores, secciones y golpes MIDI
     arrangement::pasteGrid (info->analysis, clipboard.grid, at);
+    arrangement::pasteMidiHits (*info, clipboard.grid, at);
     if (! clipboard.regions.empty() && dstBpm > 0.0)
     {
         // El tramo trae sus secciones de tempo; después de él vuelve el tempo de destino. Las vecinas iguales se unen.
@@ -4513,7 +5485,9 @@ void MainComponent::clipDragged (double playbackSeconds, double delta, int lane)
         return;
     pushUndo();
     info->clips = clips;
+    const auto moved = info->clips[(size_t) idx];
     arrangement::moveClip (info->clips, idx, d0, false);
+    arrangement::moveMidiHits (*info, moved.position, moved.end(), juce::jmax (d0, -moved.position));
     arrangementEdited();
     sepLabel.setText (juce::String::formatted ("Tramo desplazado %+.0f ms", d0 * 1000.0) + note, juce::dontSendNotification);
 }
@@ -4594,7 +5568,11 @@ void MainComponent::editForCapture (double cutSeconds, double moveMs)
     arrangement::cutAt (info->clips, cutSeconds, sourceLength);
     const int idx = arrangement::clipAt (info->clips, cutSeconds + 0.001);
     if (idx >= 0 && std::abs (moveMs) > 0.0)
+    {
+        const auto c = info->clips[(size_t) idx];
         arrangement::moveClip (info->clips, idx, moveMs / 1000.0, false);
+        arrangement::moveMidiHits (*info, c.position, c.end(), juce::jmax (moveMs / 1000.0, -c.position));
+    }
     arrangementEdited();
 }
 

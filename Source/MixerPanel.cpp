@@ -357,6 +357,24 @@ void MixerPanel::setSamplers (std::shared_ptr<SamplerSet> set)
     resized();
 }
 
+void MixerPanel::setMidiSamplers (std::shared_ptr<SamplerSet> set)
+{
+    midiStrips.clear();
+    if (set != nullptr)
+        for (auto& lane : set->lanes)
+        {
+            if (lane->instrumentId >= 0 || lane->silenced)
+                continue;   // suena por el canal del instrumento, o su pista MIDI está silenciada
+            auto* strip = midiStrips.add (new ChannelStrip (set, lane->control, juce::Colour (0xff9ccc65)));
+            strip->setTriggerBoxVisible (false);
+            if (fillOutputBox)
+                fillOutputBox (strip->outputBox(), lane->control.outputPair.load());
+            strip->onChanged = [this] { if (onChanged) onChanged(); };
+            holder.addAndMakeVisible (strip);
+        }
+    resized();
+}
+
 void MixerPanel::setInstruments (std::shared_ptr<InstrumentSet> set)
 {
     instrumentStrips.clear();
@@ -399,6 +417,8 @@ void MixerPanel::refreshOutputs()
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
     for (auto* strip : samplerStrips)
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
+    for (auto* strip : midiStrips)
+        fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
     for (auto* strip : instrumentStrips)
         fillOutputBox (strip->outputBox(), strip->getTrack().outputPair.load());
     fillOutputBox (click.outputBox(), juce::jmax (0, click.outputBox().getSelectedId() - 1));
@@ -409,6 +429,8 @@ void MixerPanel::tick (AudioEngine& engine)
     for (auto* strip : strips)
         strip->tick();
     for (auto* strip : samplerStrips)
+        strip->tick();
+    for (auto* strip : midiStrips)
         strip->tick();
     for (auto* strip : instrumentStrips)
         strip->tick();
@@ -432,15 +454,18 @@ void MixerPanel::resized()
 
     const int gap = 6;
     const int h = juce::jmax (150, view.getHeight() - view.getScrollBarThickness() - 2);
-    const int total = strips.size() + samplerStrips.size() + instrumentStrips.size();
+    const int total = strips.size() + samplerStrips.size() + midiStrips.size() + instrumentStrips.size();
     holder.setSize (juce::jmax (1, total * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0)
-                                     + (instrumentStrips.size() > 0 ? gap * 2 : 0)), h);
+                                     + (midiStrips.size() > 0 ? gap * 2 : 0) + (instrumentStrips.size() > 0 ? gap * 2 : 0)), h);
     for (int i = 0; i < strips.size(); ++i)
         strips[i]->setBounds (i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
     int x0 = strips.size() * (ChannelStrip::width + gap) + gap * 2;   // los samplers, algo separados
     for (int i = 0; i < samplerStrips.size(); ++i)
         samplerStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
-    x0 += samplerStrips.size() * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0);   // y los instrumentos
+    x0 += samplerStrips.size() * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0);   // las pistas MIDI
+    for (int i = 0; i < midiStrips.size(); ++i)
+        midiStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
+    x0 += midiStrips.size() * (ChannelStrip::width + gap) + (midiStrips.size() > 0 ? gap * 2 : 0);   // y los instrumentos
     for (int i = 0; i < instrumentStrips.size(); ++i)
         instrumentStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
 }

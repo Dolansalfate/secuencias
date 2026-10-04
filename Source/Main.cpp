@@ -43,6 +43,7 @@ public:
                 captureMixSources.addTokens (commandLine.fromFirstOccurrenceOf ("--mixfuentes=", false, false)
                                                         .upToFirstOccurrenceOf (" ", false, false).unquoted(), ",", "");
             captureMixSegments = hasFlag ("--mixtramos");
+            captureMidiTrack = hasFlag ("--pistamidi");
             if (commandLine.contains ("--mixcancion="))
                 captureMixCreate = commandLine.fromFirstOccurrenceOf ("--mixcancion=", false, false).getIntValue();
             if (commandLine.contains ("--posicion="))
@@ -93,6 +94,7 @@ public:
             if (captureTriggerBank.isNotEmpty()) mc->setTriggerForCapture (captureTriggerBank);
             if (captureInstrument.isNotEmpty()) mc->setInstrumentForCapture (captureInstrument);
             if (captureMix.isNotEmpty()) mc->openMixForCapture (captureMix, captureMixSources, captureMixSegments, captureMixCreate);
+            if (captureMidiTrack) mc->createMidiTrackForCapture();
             if (captureSeparate) mc->separateCurrentSong();
             if (captureSeparateDrums) mc->separateDrumsOfCurrentSong();
             if (captureSelector) mc->openImportPickerForCapture();   // el selector de archivos dentro de la ventana
@@ -183,7 +185,7 @@ private:
     juce::File captureFile, captureStageFile;
     juce::String captureTriggerBank, captureInstrument, captureMix;
     juce::StringArray captureMixSources;
-    bool captureMixSegments = false;
+    bool captureMixSegments = false, captureMidiTrack = false;
     int captureMixCreate = 0;
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;
     bool captureDrumParts = false, captureSeparateDrums = false;

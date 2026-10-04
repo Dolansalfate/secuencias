@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Secuencias VERSION 0.6.0 LANGUAGES C CXX)
+project(Secuencias VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +46,7 @@ set(SECUENCIAS_CORE_SOURCES
     Source/Triggers.cpp
     Source/Recorder.cpp
     Source/MixProject.cpp
+    Source/MidiTracks.cpp
     Source/Stretcher.cpp)
 
 set(SECUENCIAS_COMMON_DEFINITIONS

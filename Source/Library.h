@@ -62,6 +62,39 @@ struct TriggerSettings
     int outputPair = 0;
 };
 
+// Pista MIDI: los golpes de un stem (detectados por el trigger y congelados) como notas editables, para
+// corregir a mano lo que separó la IA. Cada fila ("pad") es un sonido: los golpes con su nota disparan un
+// banco de muestras o un instrumento del rack con esa nota. Tiempos en la línea de tiempo de la canción
+// (la del arreglo, como los tiempos del análisis y los marcadores).
+struct MidiPad
+{
+    juce::String name;          // "Tom", "Conga"
+    int note = 36;              // los golpes con esta nota suenan con este sonido
+    juce::String sound;         // "banco:<nombre>" o "vst:<id>"; vacío = sin sonido
+    float gainDb = 0.0f;        // canal del mezclador (los bancos; un VST suena por el canal del instrumento)
+    bool muted = false;
+    int outputPair = 0;
+};
+
+struct MidiHit
+{
+    double seconds = 0.0;
+    int note = 36;
+    int velocity = 100;         // 1..127
+};
+
+struct MidiTrack
+{
+    juce::String name;          // "Toms (MIDI)"
+    juce::String sourceFile;    // archivo del stem del que salió (para volver a detectar y silenciarlo); vacío = ninguno
+    bool muteSource = true;     // mientras suena la pista MIDI, el stem de origen se calla
+    bool muted = false;         // toda la pista MIDI
+    std::vector<MidiPad> pads;  // filas, en el orden en que se muestran
+    std::vector<MidiHit> hits;  // ordenados por tiempo
+
+    void sortHits();
+};
+
 struct StemInfo
 {
     juce::String name;       // nombre visible
@@ -155,6 +188,7 @@ struct SongInfo
     std::vector<TempoRegion> tempoRegions;   // ordenadas; vacío = un solo tramo con el tempo del análisis o del click
     std::vector<Clip> clips;                 // arreglo del audio; vacío = el audio original entero
     std::vector<SongNote> notes;             // notas de texto, ordenadas por tiempo
+    std::vector<MidiTrack> midiTracks;       // pistas MIDI (golpes congelados y editables)
     std::vector<SongMarker> markers;  // siempre ordenados por tiempo
     std::vector<StemInfo> stems;
 

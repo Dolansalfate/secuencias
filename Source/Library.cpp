@@ -9,6 +9,11 @@ void SongInfo::sortMarkers()
                [] (const SongMarker& a, const SongMarker& b) { return a.seconds < b.seconds; });
 }
 
+void MidiTrack::sortHits()
+{
+    std::stable_sort (hits.begin(), hits.end(), [] (const MidiHit& a, const MidiHit& b) { return a.seconds < b.seconds; });
+}
+
 void SongInfo::sortNotes()
 {
     std::stable_sort (notes.begin(), notes.end(), [] (const SongNote& a, const SongNote& b) { return a.seconds < b.seconds; });
@@ -392,6 +397,38 @@ SongInfo Library::readSong (const juce::File& folder) const
             }
         s.sortNotes();
 
+        if (auto* arr = json.getProperty ("midiTracks", juce::var()).getArray())
+            for (auto& m : *arr)
+            {
+                MidiTrack mt;
+                mt.name       = m.getProperty ("name", "MIDI").toString();
+                mt.sourceFile = m.getProperty ("source", "").toString();
+                mt.muteSource = (bool) m.getProperty ("muteSource", true);
+                mt.muted      = (bool) m.getProperty ("muted", false);
+                if (auto* pads = m.getProperty ("pads", juce::var()).getArray())
+                    for (auto& p : *pads)
+                    {
+                        MidiPad pad;
+                        pad.name       = p.getProperty ("name", "").toString();
+                        pad.note       = juce::jlimit (0, 127, (int) p.getProperty ("note", 36));
+                        pad.sound      = p.getProperty ("sound", "").toString();
+                        pad.gainDb     = juce::jlimit (-60.0f, 12.0f, (float) (double) p.getProperty ("gainDb", 0.0));
+                        pad.muted      = (bool) p.getProperty ("muted", false);
+                        pad.outputPair = juce::jmax (0, (int) p.getProperty ("outputPair", 0));
+                        mt.pads.push_back (pad);
+                    }
+                if (auto* hits = m.getProperty ("hits", juce::var()).getArray())
+                    for (auto& h : *hits)
+                        if (auto* t = h.getArray(); t != nullptr && t->size() >= 3)
+                        {
+                            const double sec = (double) (*t)[0];
+                            if (std::isfinite (sec) && sec >= 0.0)
+                                mt.hits.push_back ({ sec, juce::jlimit (0, 127, (int) (*t)[1]), juce::jlimit (1, 127, (int) (*t)[2]) });
+                        }
+                mt.sortHits();
+                s.midiTracks.push_back (mt);
+            }
+
         const auto clips = json.getProperty ("clips", juce::var());
         if (auto* arr = clips.getArray())
             for (auto& c : *arr)
@@ -522,6 +559,36 @@ bool Library::saveSong (const SongInfo& s) const
             notes.add (juce::var (no));
         }
         obj->setProperty ("notes", notes);
+    }
+    if (! s.midiTracks.empty())
+    {
+        juce::Array<juce::var> tracks;
+        for (auto& mt : s.midiTracks)
+        {
+            auto* m = new juce::DynamicObject();
+            m->setProperty ("name", mt.name);
+            m->setProperty ("source", mt.sourceFile);
+            m->setProperty ("muteSource", mt.muteSource);
+            m->setProperty ("muted", mt.muted);
+            juce::Array<juce::var> pads, hits;
+            for (auto& p : mt.pads)
+            {
+                auto* po = new juce::DynamicObject();
+                po->setProperty ("name", p.name);
+                po->setProperty ("note", p.note);
+                po->setProperty ("sound", p.sound);
+                po->setProperty ("gainDb", (double) p.gainDb);
+                po->setProperty ("muted", p.muted);
+                po->setProperty ("outputPair", p.outputPair);
+                pads.add (juce::var (po));
+            }
+            for (auto& h : mt.hits)
+                hits.add (juce::Array<juce::var> { h.seconds, h.note, h.velocity });
+            m->setProperty ("pads", pads);
+            m->setProperty ("hits", hits);
+            tracks.add (juce::var (m));
+        }
+        obj->setProperty ("midiTracks", tracks);
     }
 
     if (! s.clips.empty())

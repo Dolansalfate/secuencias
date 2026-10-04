@@ -58,7 +58,18 @@ struct SamplerLane
     std::shared_ptr<const SampleBankData> bank;
     int instrumentId = -1;                       // >= 0: los golpes van como notas MIDI al instrumento del rack con ese id
     int note = 36;                               // nota MIDI que se envía
-    // Solo hilo de audio
+    // Pistas MIDI: `velocity` de los eventos es la velocidad MIDI / 127, que a un instrumento va tal cual (el trigger
+    // en vivo le manda 0,25 + 0,75 · fuerza). Con banco se deshace esa curva (fuerza = (v/127 − 0,25) / 0,75, acotada
+    // a 0..1), así un golpe congelado con velocityFromStrength elige la misma capa y suena igual que el trigger en
+    // vivo; las velocidades 1 a 32 son la capa y el nivel más suaves.
+    bool rawVelocity = false;
+    int midiTrack = -1, midiPad = -1;            // de qué pista MIDI y fila viene (-1 = trigger en vivo de un stem)
+    juce::String midiSource;                     // archivo de origen de esa pista MIDI (reconocer la fila en un relevo y en la UI)
+    bool silenced = false;                       // su pista MIDI está silenciada: no dispara y su canal baja a 0 con rampa
+    // Trigger en vivo de un stem que acaba de recibir una pista MIDI: deja de disparar al instante (la UI lo pone; el
+    // conjunto sin esta línea llega con el próximo render), así ningún golpe suena dos veces mientras tanto
+    std::atomic<bool> superseded { false };
+    // Solo hilo de audio. lastPos es la última muestra mirada (posición + pre-roll o latencia)
     size_t nextEvent = 0;
     juce::int64 lastPos = -2;
     int lastHit = -1;
@@ -67,6 +78,7 @@ struct SamplerLane
         const juce::AudioBuffer<float>* buffer = nullptr;
         int pos = 0;
         float gain = 0.0f;
+        bool audition = false;                   // "Escuchar": suena aunque el transporte esté detenido (sin la envolvente)
     };
     Voice voices[16];
 };
@@ -74,6 +86,15 @@ struct SamplerLane
 struct SamplerSet
 {
     std::vector<std::unique_ptr<SamplerLane>> lanes;
+
+    // Relevo sin cortes (setSamplers / setMidiSamplers con la canción sonando, por ejemplo al editar un golpe):
+    // `previous` es el conjunto al que reemplaza. La primera vez que el hilo de audio ve este conjunto, cada línea
+    // toma de la equivalente del anterior (misma pista, fila e instrumento) hasta dónde miró y, si usa el mismo
+    // banco, sus voces sonando; lo que no pasa (sonido cambiado, fila quitada) sigue sonando desde el anterior hasta
+    // apagarse o hasta el cambio siguiente (se guarda un solo eslabón). `previous` lo ponen y lo sueltan
+    // setMidiSamplers / setSamplers (la UI), nunca el hilo de audio.
+    std::shared_ptr<SamplerSet> previous;
+    bool adopted = false;   // bajo songLock: ya sonó (el relevo se hizo)
 };
 
 // Instrumento VST3/AU del rack (punto 3): el plugin ya preparado, su buffer de trabajo y su cola
@@ -97,6 +118,13 @@ struct InstrumentLane
         int remaining = 0;
     };
     PendingOff offs[64];
+    // "Escuchar" (solo hilo de audio): mientras auditionHold > 0 la salida del plugin pasa aunque el transporte esté
+    // detenido; auditionGate es esa compuerta con rampa (sube en 256 muestras, baja en 300 ms)
+    int auditionHold = 0;
+    float auditionGate = 0.0f;
+    // La nota de "Escuchar" sale cuando la compuerta ya abrió (256 muestras menos la latencia): el ataque entero
+    int auditionNoteIn = -1, auditionNote = 0;
+    float auditionVelocity = 0.0f;
 };
 
 struct InstrumentSet
@@ -159,7 +187,8 @@ public:
     bool isPlaying() const       { return playing.load(); }
 
     // true cuando el fundido global llegó a 0 (tras pause/stop ya no sale audio de la canción).
-    bool isSilent() const        { return currentFade.load() <= 0.0f; }
+    // También espera a que se apague lo de "Escuchar" (pause y stop lo funden en ~6 ms).
+    bool isSilent() const        { return currentFade.load() <= 0.0f && ! auditionActive.load(); }
 
     void seekSeconds (double);
     double getPositionSeconds() const;
@@ -180,12 +209,25 @@ public:
     void setSongGain (float linear)    { songGain = juce::jmax (0.0f, linear); }
     // Ganancia por tramo (nivelado dentro de la canción), aplicada a las pistas y no al click
     void setGainCurve (std::shared_ptr<const GainCurve>);   // nullptr = sin nivelado
-    void setSamplers (std::shared_ptr<SamplerSet>);          // nullptr = sin triggers; se cambia bajo songLock
+    // nullptr = sin triggers; se cambia bajo songLock. Un conjunto que reemplaza a otro con la canción sonando toma
+    // su estado en el hilo de audio (SamplerSet::previous): las voces que suenan siguen y ningún golpe se repite.
+    void setSamplers (std::shared_ptr<SamplerSet>);
     std::shared_ptr<SamplerSet> getSamplers() const          { return samplers; }
+    // Las líneas de las pistas MIDI van en un conjunto aparte: se rehacen al instante al editar un golpe, sin
+    // volver a detectar los triggers en vivo. Mismo trato que setSamplers (setSong también lo descarta).
+    void setMidiSamplers (std::shared_ptr<SamplerSet>);
+    std::shared_ptr<SamplerSet> getMidiSamplers() const      { return midiSamplers; }
     // Instrumentos del rack: independientes de la canción (setSong no los toca); el conjunto anterior
     // se libera fuera del lock, en el hilo que llama (la UI), donde pueden morir los plugins quitados.
     void setInstruments (std::shared_ptr<InstrumentSet>);
     std::shared_ptr<InstrumentSet> getInstruments() const    { return instruments; }
+    // "Escuchar": un golpe de una línea del sampler ahora mismo, aunque el transporte esté detenido. midiTrack < 0 = el
+    // trigger en vivo del stem `stemIndex`; si no, la fila `midiPad` de esa pista MIDI. Con banco suena la muestra de
+    // esa velocidad (1..127, la misma curva que un golpe de pista MIDI); con instrumento, la nota de la línea va al
+    // plugin (que además la puede "aprender", como el Learn de Addictive Drums) y su salida pasa unos 3 s. Sale por el
+    // canal de la línea (fader, mute, solo y salida). Sin memoria dinámica: una petición pendiente por vez (gana la
+    // última); si la línea no existe (sin sonido) no pasa nada.
+    void audition (int stemIndex, int midiTrack, int midiPad, int velocity);
 
     // Medidores de las salidas del dispositivo (después del fader maestro)
     float takeOutputPeak (int channel);         // pico desde la última lectura; 0 si el canal no existe
@@ -245,6 +287,7 @@ private:
     std::shared_ptr<const BeatGrid> beatGrid;   // también bajo songLock
     std::shared_ptr<const GainCurve> gainCurve; // también bajo songLock
     std::shared_ptr<SamplerSet> samplers;       // también bajo songLock
+    std::shared_ptr<SamplerSet> midiSamplers;   // también bajo songLock (pistas MIDI)
     std::shared_ptr<InstrumentSet> instruments; // también bajo songLock; no lo toca setSong
     float levelSmooth = 1.0f;                   // ganancia por tramo suavizada (hilo de audio)
     std::atomic<float> songGain { 1.0f };
@@ -280,4 +323,10 @@ private:
     std::vector<float> levelGain;            // ganancia de nivelado por muestra
     std::vector<int> levelSegment;           // tramo del nivelado en el que cae cada muestra
     std::vector<float> laneL, laneR;         // mezcla de las voces de una línea del sampler
+    std::vector<float> auditionL, auditionR; // sus voces de "Escuchar" (sin la envolvente del transporte)
+    std::atomic<juce::uint64> auditionRequest { 0 };   // petición de audition empaquetada (0 = ninguna)
+    std::atomic<bool> auditionCancel { false };         // pause/stop: fundir lo de "Escuchar"
+    std::atomic<bool> auditionActive { false };         // queda algo de "Escuchar" sonando (voces o compuerta abierta)
+    float auditionLevel = 1.0f;                         // fundido de "Escuchar" (hilo de audio, bajo songLock)
+    bool auditionFading = false;
 };

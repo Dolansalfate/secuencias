@@ -130,6 +130,7 @@ public:
     void setSong (std::shared_ptr<LoadedSong>);   // nullptr = sin canales
     void setSamplers (std::shared_ptr<SamplerSet>);   // canales de los triggers (sampler), después de las pistas
     void setInstruments (std::shared_ptr<InstrumentSet>);   // canales de los instrumentos del rack, al final
+    void setMidiSamplers (std::shared_ptr<SamplerSet>);     // canales de las filas de las pistas MIDI con banco (tras los samplers)
     void refreshOutputs();                        // cambió el dispositivo: rehacer los ComboBox de salida
     // Nivelado por pista del tramo actual: dB por stemIndex (vacío o sin nivelado = "--")
     void setLevelGains (const std::vector<double>& dbPerStem, bool enabled);
@@ -142,7 +143,7 @@ public:
 private:
     juce::Viewport view;
     juce::Component holder;
-    juce::OwnedArray<ChannelStrip> strips, samplerStrips, instrumentStrips;
+    juce::OwnedArray<ChannelStrip> strips, samplerStrips, midiStrips, instrumentStrips;
     ClickStrip click;
     MasterStrip master;
 };

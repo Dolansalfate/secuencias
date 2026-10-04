@@ -51,6 +51,35 @@ public:
         float velocity = 1.0f;
     };
     void setTriggerMarks (const std::vector<std::vector<TriggerMark>>& perTrack);   // golpes detectados (tiempo de reproducción)
+
+    // Pistas MIDI (golpes congelados y editables, una fila por sonido), en tiempo de reproducción. Cada una
+    // va bajo el carril de su pista de origen (afterTrack = índice de pista en la canción cargada; -1 = al final).
+    struct MidiLaneView
+    {
+        juce::String name;
+        int afterTrack = -1;
+        bool muted = false;
+        struct Pad
+        {
+            juce::String name;
+            int note = 36;
+            juce::String sound;        // texto corto del sonido ("Bombo grabado", "Addictive Drums", "sin sonido")
+            bool muted = false;
+        };
+        std::vector<Pad> pads;
+        struct Hit
+        {
+            double seconds = 0.0;
+            int note = 36;
+            int velocity = 100;        // 1..127
+        };
+        std::vector<Hit> hits;         // mismo orden (e índices) que MidiTrack::hits
+    };
+    void setMidiLanes (const std::vector<MidiLaneView>&);   // conserva la selección de cada pista si sus índices siguen existiendo
+    void selectMidiHits (int midiTrack, const std::vector<int>& hits);   // selección tras una edición (reemplaza la anterior)
+    std::vector<int> getSelectedMidiHits (int midiTrack) const;
+    bool deleteSelectedMidiHits();   // Supr: avisa onMidiDelete de la pista con selección; false si no había ninguna
+
     void zoomToFit();
 
     std::function<void (double seconds)> onSeek;
@@ -64,6 +93,18 @@ public:
     std::function<void (double seconds, double deltaSeconds, int lane)> onClipDragged; // Shift + arrastre sobre un carril: mover el tramo
     std::function<void (int track, bool state)> onMute, onSolo, onTrigger;
     std::function<void (int track)> onLaneHeaderMenu;   // clic derecho en la cabecera de un carril (trigger)
+    // Pistas MIDI (índices de golpe = índices en MidiLaneView::hits; tiempos de reproducción)
+    std::function<void (int midiTrack, double seconds, int note)> onMidiAdd;                                   // doble clic en un hueco de una fila
+    std::function<void (int midiTrack, std::vector<int> hits, double deltaSeconds, int rowDelta)> onMidiMove;  // arrastre de golpes elegidos (el arrastrado primero)
+    std::function<void (int midiTrack, std::vector<int> hits, int velocityDelta)> onMidiVelocity;              // Alt + arrastre vertical
+    std::function<void (int midiTrack, std::vector<int> hits)> onMidiDelete;                                   // Supr o menú
+    std::function<void (int midiTrack, std::vector<int> hits, int padRow, double seconds)> onMidiMenu;       // clic derecho en el contenido
+    std::function<void (int midiTrack, int padRow)> onMidiPadMenu;                                            // clic derecho en el nombre de una fila
+    std::function<void (int midiTrack, int padRow)> onMidiAudition;                                           // botón "Escuchar" de una fila
+    std::function<void (int midiTrack)> onMidiHeaderMenu;                                                     // clic derecho en el título de la pista MIDI
+    std::function<void (int midiTrack, bool muted)> onMidiMute;                                               // botón M de la pista MIDI
+    // Ajuste de un golpe que se agrega o se mueve (el dueño aplica el modo de corte); sin callback, libre
+    std::function<double (int midiTrack, double seconds, int note)> snapMidiTime;
     // Ganancia de nivelado (lineal) de un stem en un instante de reproducción, para dibujar la onda como sonará
     std::function<float (int stemIndex, double seconds)> levelGainAt;
     void refreshWaveforms();   // cambió el nivelado: volver a dibujar las ondas
@@ -79,8 +120,11 @@ public:
 private:
     class Ruler;
     class Lane;
+    class MidiLane;
     class Overlay;
 
+    void layoutLanes();                                       // carriles de audio y pistas MIDI dentro de laneHolder
+    void clearMidiSelectionExcept (const MidiLane* keep);     // la selección de golpes vive en una sola pista MIDI
     double lengthSeconds() const;
     int contentWidth() const        { return juce::jmax (1, getWidth() - headerWidth - gutter); }
     double visibleSeconds() const   { return contentWidth() / pixelsPerSecond; }
@@ -116,6 +160,8 @@ private:
     juce::Viewport laneView;                       // desplazamiento vertical cuando hay muchas pistas
     juce::Component laneHolder;
     juce::OwnedArray<Lane> lanes;
+    juce::OwnedArray<MidiLane> midiLanes;          // una por MidiLaneView, en el orden de setMidiLanes
+    bool midiNewRender = false;                    // setSong desde el último setMidiLanes: los tiempos pudieron cambiar todos
     std::unique_ptr<Overlay> overlay;
     juce::ScrollBar scrollBar { false };
     juce::Label emptyLabel;

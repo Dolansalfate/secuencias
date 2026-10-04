@@ -16,6 +16,7 @@
 #include "Instruments.h"
 #include "MixProject.h"
 #include "MixEditor.h"
+#include "MidiTracks.h"
 #include <map>
 
 class MarkerButton;
@@ -63,6 +64,7 @@ public:
     // crea la canción (createMode 1 = separar con IA, 2 = sin separar)
     void openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode);
     bool isMixBusy() const;   // la captura espera a que termine lo que pidió del mix
+    void createMidiTrackForCapture();   // pista MIDI de la batería, con una fila de conga y los golpes de 5 a 10 s en ella
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
@@ -181,6 +183,29 @@ private:
     void importBankFor (int track);
     void triggerSettingsDialog (int track);
 
+    // Pistas MIDI: golpes congelados y editables (una fila por sonido), en SongInfo::midiTracks
+    void applyMidiTracks();                                   // a la vista, al motor y al mezclador (al instante)
+    void pullMidiControls();                                  // fader, mute y salida de los canales de las filas a SongInfo
+    // La fila de `info` de la que salió una línea de midiSamplers: misma canción, pista (índice y archivo de origen), fila
+    // y nota; nullptr si ya no existe (otra canción, fila quitada, nota cambiada)
+    MidiPad* padForLane (SongInfo& info, const SamplerLane& lane) const;
+    bool arrangementReady();                                  // el arreglo que suena es el de SongInfo (si no, avisa y false)
+    static bool isMidiSource (const SongInfo&, const StemInfo&);   // de este stem salió una pista MIDI (reemplaza su trigger en vivo)
+    void midiEdited (int midiTrack, const std::vector<int>& selection);   // guardar, aplicar y conservar la selección
+    void createMidiTrack (int track);                         // desde el menú del trigger de una pista
+    void midiHeaderMenu (int midiTrack);
+    void midiHeaderMenuAddPad (int midiTrack);
+    void midiPadMenu (int midiTrack, int padIndex);
+    // "Escuchar": un golpe de la fila (o del trigger del stem) ya, aunque esté detenido; avisa qué sonó o por qué no
+    void auditionMidiPad (int midiTrack, int padIndex);
+    void auditionTrigger (int stem);
+    void midiHitsMenu (int midiTrack, std::vector<int> hits, int row, double playbackSeconds);
+    double snapMidiTime (int midiTrack, double playbackSeconds, int note);   // según el modo de corte
+    int trackIndexForFile (const juce::String& fileName);     // pista cargada con ese archivo, o -1
+    std::shared_ptr<SampleBankData> bankFor (const juce::String& bankName);   // de la caché, o se carga
+    juce::String soundLabel (const juce::String& sound);
+    void importBank (std::function<void (const juce::String& bankName)> onDone);
+
     // Grabación de entradas (punto 2): una pista nueva alineada con la canción, o golpes para un banco
     struct Recording
     {
@@ -251,6 +276,7 @@ private:
     struct ClipClipboard
     {
         bool valid = false;
+        juce::File folder;                  // canción de la que se copió (solo se pega en ella: los tramos son de su audio)
         Clip clip;
         arrangement::GridSlice grid;
         std::vector<TempoRegion> regions;   // secciones de tempo del rango, con inicio relativo al tramo
@@ -319,7 +345,9 @@ private:
     std::shared_ptr<LoadedSong> sourceSong;    // los archivos originales, para volver a renderizar
     std::shared_ptr<LoadedSong> arrangedSong;  // el arreglo (tramos colocados), en la línea de tiempo de la canción
     std::vector<Clip> renderedClips;           // tramos con los que se renderizó lo que suena
+    juce::File midiSamplersFolder;             // canción para la que se armaron las líneas de midiSamplers
     std::shared_ptr<SamplerSet> samplers;      // triggers de lo que suena
+    std::shared_ptr<SamplerSet> midiSamplers;  // filas con sonido de las pistas MIDI de lo que suena
     std::vector<TriggerSettings> renderedTriggers;
     BankCache bankCache;
     Recording recording;

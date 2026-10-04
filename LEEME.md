@@ -33,6 +33,20 @@ El mismo código sigue compilando en macOS.
   un instrumento VST/AU con la nota MIDI que quieras, por ejemplo 36 = bombo), y el umbral,
   sensibilidad y tiempo mínimo de la detección. Las marcas naranjas al pie del carril
   muestran los golpes detectados y su fuerza.
+- **Pistas MIDI (corregir a mano los golpes)**: en el menú del trigger de una pista (el "T" o la
+  casilla del trigger en el mezclador), "Crear pista MIDI con estos golpes". Aparece bajo esa pista
+  una pista con los golpes detectados, como un editor de batería: cada fila es un sonido (un banco
+  de muestras tuyas o un instrumento como Addictive Drums, con su nota). Así corriges lo que separó
+  la IA: por ejemplo, en la pista de toms eliges los golpes que en realidad son congas y con clic
+  derecho > "Pasar a la fila" los mandas a una fila "Conga" con su propio sonido (clic derecho en el
+  título > "Agregar una fila"). Clic elige un golpe (Ctrl o Shift para varios, o arrastra en un hueco
+  para elegir con un rectángulo), arrastrar lo mueve, Alt + arrastre hacia arriba o abajo cambia su
+  fuerza, doble clic agrega uno, Supr borra; el menú del clic derecho también cuantiza y vuelve a
+  detectar un tramo. Mientras la pista MIDI suena, la pista original se calla (se puede cambiar en el
+  menú del título). Ctrl+Z deshace. El triángulo a la izquierda de cada fila toca un golpe de esa
+  fila, también con la canción detenida. Con Addictive Drums sirve para enlazar una pieza sin buscar
+  números: en su ventana MIDI Mapping aprieta "Learn" en la pieza (por ejemplo la conga de un Flexi)
+  y luego el triángulo de la fila.
 - **Grabar** (botón junto al transporte): dos destinos en el mismo diálogo. **Pista nueva**:
   graba una entrada de tu interfaz como pista de la canción, que se suma a la mezcla. **Banco de
   muestras**: grabas golpes sueltos (de suave a fuerte, con silencio entre ellos) que no quedan
@@ -65,8 +79,11 @@ El mismo código sigue compilando en macOS.
   eliges uno: aparece como un canal lila en el mezclador, con su fader, salida y medidor; un clic
   en su nombre abre la ventana del plugin para elegir el kit y ajustarlo. Todo eso se recuerda
   entre sesiones. Para que una pista lo dispare: en la casilla del trigger de esa pista (o el "T"),
-  "Sonido" > el instrumento, y en "Nota MIDI" la pieza que quieres (36 bombo, 38 caja, 42 hi-hat
-  cerrado...; Addictive Drums usa el mapa General MIDI). Cada golpe detectado llega al plugin como
+  "Sonido" > el instrumento, y en "Nota MIDI" la pieza que quieres: de la lista General MIDI (36
+  bombo, 38 caja...) o, en el submenú "Addictive Drums 2", de su mapa "AD2 Standard", el que trae
+  por defecto (hi-hat, toms, platillos y los Flexi, donde cada kit pone su percusión). Si en
+  Addictive Drums eliges el mapa General MIDI (ventana MIDI Mapping), usa la lista General MIDI.
+  "Escuchar" en el mismo menú toca un golpe para comprobarlo. Cada golpe detectado llega al plugin como
   una nota con la fuerza del golpe, adelantada la latencia del plugin, así suena exactamente en el
   golpe. Con "Es trigger" la pista original se silencia; con "Trigger y audio" suenan las dos. Un
   mismo instrumento puede recibir varias pistas (bombo a la nota 36, caja a la 38...). Los

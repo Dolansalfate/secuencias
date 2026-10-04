@@ -37,17 +37,43 @@ namespace arrangement
     // dos, y el hueco queda sin acorde). Los tramos de audio no se tocan.
     void shiftGrid (SongInfo&, double fromSeconds, double deltaSeconds);
 
+    // Golpes de las pistas MIDI de un rango, relativos a su inicio (uno por pista MIDI)
+    struct MidiSlice
+    {
+        int track = -1;                   // índice en SongInfo::midiTracks al copiar
+        juce::String name, sourceFile;    // se pegan en la pista con el mismo nombre y origen (la del mismo índice si coincide)
+        std::vector<MidiHit> hits;
+    };
+
     // Grilla de un rango de la canción, relativa a su inicio: los tiempos dentro y los acordes
-    // recortados al rango. Es lo que viaja con un tramo copiado.
+    // recortados al rango. Es lo que viaja con un tramo copiado (con los golpes MIDI, copyMidiHits).
     struct GridSlice
     {
         std::vector<Beat> beats;
         std::vector<Chord> chords;
+        std::vector<MidiSlice> midi;
     };
     GridSlice copyGrid (const Analysis&, double fromSeconds, double toSeconds);
     // Inserta una grilla copiada en `at` (tras abrir el hueco con shiftGrid): tiempos y acordes se
     // suman desplazados y quedan ordenados
     void pasteGrid (Analysis&, const GridSlice&, double at);
+
+    // Golpes de las pistas MIDI: son golpes de un stem, así que van con el audio de los tramos (la grilla no; al
+    // cerrar o abrir un hueco los mueve shiftGrid). Todos dejan los golpes ordenados.
+    // - Mover un tramo: los de [from, to) se corren delta, nunca antes de 0 (to = infinito para "este y los
+    //   siguientes"; delta = lo que el tramo se movió de verdad, que moveClip acota).
+    void moveMidiHits (SongInfo&, double fromSeconds, double toSeconds, double deltaSeconds);
+    // - Eliminar un tramo dejando silencio: los de [from, to) se borran.
+    void removeMidiHits (SongInfo&, double fromSeconds, double toSeconds);
+    // - Volver al audio original (antes de vaciar los tramos): cada golpe pasa al instante del audio original que
+    //   sonaba bajo él (el tramo de arriba, como clipAt); los que caían en un hueco se borran, y las copias que un
+    //   tramo duplicado deja en el mismo instante (misma nota a menos de 1 ms) quedan en una, la más fuerte. Con
+    //   tramos pegados encima, los golpes del tramo de abajo en el solape siguen al de arriba (no se sabe de cuál venían).
+    void midiHitsToSource (SongInfo&, const std::vector<Clip>&);
+    // - Copiar y pegar un tramo: los golpes de [from, to) van en slice.midi (se reemplazan), y pasteMidiHits los suma
+    //   desplazados a `at` (tras abrir el hueco con shiftGrid al pegar insertando; encima de los que hay al pegar encima).
+    void copyMidiHits (const SongInfo&, double fromSeconds, double toSeconds, GridSlice&);
+    void pasteMidiHits (SongInfo&, const GridSlice&, double at);
 
     // Transiente (ataque) más cercana a `aroundSeconds`, buscada en ±`windowSeconds` sobre la
     // envolvente del buffer (bloques de 1 ms): el mayor salto de nivel en 3 ms, con preferencia

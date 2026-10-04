@@ -114,6 +114,27 @@ modelo que usa Moises).
   menú que el botón T: los tres modos, el sonido (bancos grabados o importados; instrumentos
   VST/AU cuando haya), la nota MIDI que se enviará a un instrumento (mapa de batería General
   MIDI o cualquier nota) y los ajustes de detección.
+- **Pistas MIDI** (`MidiTracks`, `SongInfo::midiTracks`): en el menú del trigger de una pista, "Crear
+  pista MIDI con estos golpes" congela los golpes detectados (sobre el arreglo, con los ajustes de
+  detección del trigger) en una pista MIDI editable que aparece bajo esa pista en la vista de
+  arreglo, al estilo de un editor de batería: una fila por sonido ("pad": nombre, nota y sonido,
+  un banco de muestras o un instrumento del rack con esa nota). Sirve para corregir a mano lo que
+  separó la IA (por ejemplo, pasar las congas que cayeron en "Toms" a su propia fila con su propio
+  sonido). Gestos: clic elige (Ctrl o Shift suma), arrastrar mueve en el tiempo y entre filas,
+  Alt + arrastre vertical cambia la fuerza, arrastrar en un hueco elige con un rectángulo, doble
+  clic agrega un golpe, Supr borra, clic derecho abre menús (golpes: eliminar, pasar a otra fila,
+  fuerza, cuantizar a tiempos, corcheas, tresillos o semicorcheas, volver a detectar un tramo;
+  fila: sonido, nota (General MIDI o, en un submenú, el mapa "AD2 Standard" de Addictive Drums 2),
+  escuchar, renombrar, silenciar, agregar o quitar filas; título: renombrar, silenciar
+  la pista de origen, volver a detectar todo, eliminar). Agregar y mover se ajustan según el modo
+  de corte (libre, a la semicorchea o a la transiente de la pista de origen). Cada fila con banco
+  tiene su canal en el mezclador (verde); las de instrumento suenan por el canal del instrumento.
+  Al crearla, la pista MIDI reemplaza al trigger en vivo de esa pista (sin apagarlo: si se elimina
+  la pista MIDI, el trigger vuelve) y la pista de origen se calla mientras la MIDI suena (se puede
+  desactivar). Ctrl+Z deshace las ediciones. El triángulo a la izquierda del nombre de cada fila
+  (o "Escuchar" en su menú) toca un golpe de esa fila aunque la canción esté detenida
+  (`AudioEngine::audition`): sirve para comprobar el sonido y para el "Learn" de Addictive Drums
+  (se aprieta Learn en la pieza, por ejemplo un Flexi con congas, y luego el triángulo).
 - **Grabación de entradas** (botón "Grabar", `Recorder`, `AudioEngine::setRecorder`): graba una
   entrada del dispositivo (mono o par estéreo) **como pista nueva de la canción**: la canción
   arranca desde el cabezal, la entrada se escucha por el par de salida elegido y al detener
@@ -140,7 +161,9 @@ modelo que usa Moises).
   los instrumentos del rack: los golpes de esa pista salen como notas MIDI hacia el plugin (la nota
   de "Nota MIDI", velocidad 0,25 + 0,75 × fuerza del golpe, 50 ms de duración), adelantadas la
   latencia que el plugin declara, así el sonido cae exacto en el golpe. La pista original se
-  silencia o no según el modo (solo trigger / ambas).
+  silencia o no según el modo (solo trigger / ambas). La nota se elige de la lista General MIDI o
+  del mapa "AD2 Standard" de Addictive Drums 2 (el que trae por defecto; su ventana MIDI Mapping
+  también tiene uno General MIDI); "Escuchar" en el mismo menú toca un golpe con ese sonido.
 - **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
   posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
@@ -185,7 +208,8 @@ modelo que usa Moises).
   copia trae los tiempos y acordes de su rango y, si venía de una sección con otro tempo, su
   propia sección de tempo), "Pegar encima" (superpone) y "Duplicar tramo" (pega insertando a
   continuación): con eso se reordena una canción (cortar en los compases, copiar, pegar
-  insertando, eliminar el original cerrando el hueco). La grilla no se mueve con el audio,
+  insertando, eliminar el original cerrando el hueco); el portapapeles solo se pega en la canción
+  donde se copió (`ClipClipboard::folder`: un tramo es un rango de su audio). La grilla no se mueve con el audio,
   salvo al cerrar o abrir un hueco (`shiftGrid`). Los bordes de los tramos se
   dibujan sobre los carriles y los huecos quedan sombreados. Ctrl+Z (o el menú) deshace la
   última edición de audio o de grilla (hasta 30 pasos; la mezcla no se deshace).
@@ -338,6 +362,7 @@ Source/
   Arrangement.h/.cpp   Arreglo: tramos de audio (cortar, mover, eliminar, unir), render a RAM, shiftGrid
   Triggers.h/.cpp      Golpes detectados (detect), bancos de muestras (loadBank, sliceHits, writeWav)
   Recorder.h/.cpp      Grabación: alinear la toma con la canción (writeAligned), banco desde golpes (saveBank)
+  MidiTracks.h/.cpp    Pistas MIDI: golpes congelados desde la detección, edición (mover, fuerza, cuantizar, filas)
   Instruments.h/.cpp   InstrumentRack: plugins VST3/AU (carga, estado, editor, búsqueda) y su entrega al motor
   MixProject.h/.cpp    Armar mix: fuentes, tramos, mix.json, ubicación (layout), render y la canción que resulta
   MixEditor.h/.cpp     Sección "Armar mix": lista de fuentes, vista de la fuente, línea del mix, panel del tramo
@@ -397,6 +422,39 @@ LEEME.md               Guía para el usuario final
   una línea silencia las pistas y viceversa. `LoadedTrack::replaced` (atómico, lo pone
   `buildSamplers` cuando el trigger está en modo "solo el sonido" y tiene banco) silencia la
   pista como un mute aparte del del usuario.
+- Pistas MIDI: `setMidiSamplers (SamplerSet)` es un segundo conjunto de líneas, igual que el de los
+  triggers (bajo `songLock`, `setSong` lo descarta, el solo cuenta para ambos) pero se rehace al
+  instante en cada edición sin volver a detectar los triggers en vivo; `renderChunk` recorre los
+  dos conjuntos en 2b). Sus líneas llevan `rawVelocity` (la velocidad MIDI / 127 va tal cual a un
+  instrumento; con banco se deshace la curva 0,25 + 0,75 del trigger en vivo para elegir la capa y
+  la ganancia, así un golpe congelado suena igual que el trigger que reemplaza), `midiTrack` y `midiPad`.
+- Escuchar (`audition (stem, pistaMidi, fila, velocidad)`): la UI deja una petición empaquetada en un
+  atómico (`auditionRequest`; gana la última) y el callback la toma en 2b): la línea que corresponde
+  (fila de una pista MIDI, o el trigger en vivo del stem) dispara un golpe en la primera muestra del
+  trozo aunque el transporte esté detenido. Con banco, una voz marcada `audition` que se mezcla en
+  `auditionL/R` sin la envolvente del transporte (sí con el fader de la línea); con instrumento, la
+  nota (`auditionNoteIn`: sale en 2c) cuando la compuerta ya abrió, 256 muestras menos la latencia, así
+  el ataque llega entero) y `auditionHold` = 3 s, durante los cuales la compuerta `auditionGate` (sube
+  en 256 muestras, baja en 300 ms) deja pasar la salida del plugin aunque la envolvente esté en 0.
+  Respeta mute y solo; si la línea no existe no pasa nada. `pause` y `stop` piden fundirlo
+  (`auditionCancel`: `auditionLevel` baja a 0 en un trozo y después se sueltan sus voces y se cierran
+  las compuertas) e `isSilent()` espera también a `auditionActive`, así cambiar de canción justo
+  después de escuchar no corta nada; `setSong` deja la compuerta cerrada.
+- Líneas que no disparan: `SamplerLane::silenced` (fila de una pista MIDI silenciada: la línea existe
+  para que su canal baje a 0 con rampa, sin canal en el mezclador) y `superseded` (atómico; la UI lo
+  pone en el trigger en vivo de un stem que acaba de recibir una pista MIDI, hasta que el próximo
+  render lo quite del conjunto: ningún golpe suena dos veces).
+- Relevo de conjuntos sin cortes (`setSamplers` y `setMidiSamplers` con la canción sonando, por
+  ejemplo al editar un golpe): `installSamplerSet` (bajo `songLock`, en la UI) encadena el conjunto
+  nuevo con el que reemplaza (`SamplerSet::previous`, un solo eslabón; lo viejo se suelta fuera del
+  lock, nunca en el hilo de audio). La primera vez que el callback ve el conjunto nuevo,
+  `adoptPlayback` (sin memoria dinámica) pasa a cada línea equivalente (misma pista, fila, nota,
+  archivo de origen e instrumento) hasta dónde miró la anterior y, con el mismo banco, sus voces; las voces que no pasan
+  (sonido cambiado, fila quitada) se terminan de oír desde el anterior en pasadas de solo voces.
+- Anticipación con loop (`lookAhead`): el pre-roll del banco o la latencia del instrumento que pasa
+  del final del loop sigue desde su inicio, así el golpe del inicio suena exacto en cada vuelta; los
+  golpes después del final no suenan mientras el loop siga. Tras un salto, los golpes que ya
+  debían haber empezado su pre-roll suenan enseguida con la voz adelantada lo que llegan tarde.
 - Instrumentos del rack: `setInstruments (InstrumentSet)` bajo `songLock` (`setSong` no lo toca;
   el conjunto anterior se libera fuera del lock en el hilo que llama, la UI, donde pueden morir
   los plugins quitados). Cada `InstrumentLane` lleva el plugin ya preparado con `maxBlockSize`,
@@ -505,6 +563,10 @@ Secuencias/
   canción, `Library::newRecordingFile`). Los
   bancos viven en `<raíz>/_bancos/<nombre>/*.wav` (`Library::listBanks`, `bankFolder`;
   `load()` no los toma como canción; `exportAll` los copia).
+- Pistas MIDI: `midiTracks`: `[{ "name", "source" (archivo del stem de origen), "muteSource", "muted",
+  "pads": [{ "name", "note", "sound", "gainDb", "muted", "outputPair" }], "hits": [[segundos, nota,
+  velocidad], ...] }]` en la línea de tiempo de la canción (`MidiTrack`, `MidiPad`, `MidiHit`; los
+  golpes ordenados con `sortHits`; `shiftGrid` los mueve con los huecos del arreglo).
 - Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
   (`SongNote`, ordenadas por `sortNotes`; las de texto vacío no se guardan).
 - Escritura y tonalidad: `spelling` (0 = según la tonalidad, 1 = sostenidos, 2 = bemoles) y
@@ -748,6 +810,56 @@ Pasos de `run()`:
   instrumentos..." (298). El destructor cierra editores, guarda y destruye el rack después de
   quitar el callback de audio.
 
+### 5.4j Pistas MIDI (golpes congelados y editables)
+- `miditrack::fromDetection (eventos, sr, stem)`: una fila con el sonido y la nota del trigger del
+  stem, golpes con `velocityFromStrength` (la misma velocidad que manda el trigger en vivo a un
+  instrumento: 127 · (0,25 + 0,75 · fuerza)). Edición pura y probada: `addHit`, `removeHits`,
+  `moveHits` (tiempo y filas; devuelve los índices nuevos para conservar la selección),
+  `setNote`, `changeVelocity` / `setVelocity`, `quantize` / `snapToSubdivision` (subdivisiones de
+  los tiempos detectados), `replaceRange` (volver a detectar un tramo), `removePad`,
+  `eventsForNote` (al motor, con el `TimeMap`), `drumNoteName` (General MIDI en español).
+- En `MainComponent`: `applyMidiTracks` arma las vistas (`TimelineView::setMidiLanes`, cada pista
+  bajo su carril de origen, tiempos de reproducción), las líneas (`engine.setMidiSamplers`, una
+  por fila con sonido; bancos por `bankFor`, de la caché) y los canales (`MixerPanel::setMidiSamplers`),
+  y `refreshReplaced` calla la pista de origen si corresponde. Lo llama `applySamplers` (tras cada
+  carga o render, porque `setSong` descarta el conjunto) y `midiEdited` (tras cada edición: guarda,
+  aplica y conserva la selección). `createMidiTrack` detecta sobre `arrangedSong` con los ajustes
+  del trigger y crea la pista; mientras exista una pista MIDI de un stem (`isMidiSource`), su
+  trigger en vivo queda reemplazado sin apagarse (`buildSamplers` lo salta y `triggersOf` lo cuenta
+  como apagado, así crear o quitar la pista MIDI vuelve a armar los triggers, y deshacer devuelve
+  el trigger; hasta ese render, `applyMidiTracks` pone `superseded` en su línea). `pullMidiControls`
+  pasa los canales de las filas a `SongInfo` antes de rehacer las líneas y antes de `pushUndo`, solo
+  a la fila de la que salió cada línea (`padForLane`: la misma canción, `midiSamplersFolder`, y la
+  pista con el mismo origen, fila y nota; tras quitar una fila o una pista, o al cambiar de canción,
+  los índices ya no sirven). `undoLastEdit` conserva lo que no se deshace: la mezcla de las filas,
+  sus nombres y sonidos, el nombre y los silencios de la pista. El solo se conserva por pista y
+  nota. Una pista silenciada arma sus líneas con `silenced`. `arrangementEdited` vuelve a aplicar
+  las pistas MIDI al instante (los golpes ya se movieron con los tramos y los índices de la vista
+  deben seguirlos); crear una pista MIDI y volver a detectar esperan a que el arreglo que suena sea
+  el de `SongInfo` (`arrangementReady`). `refreshReplaced` calla el stem de origen solo si alguna fila suena de verdad.
+  Las ediciones de tramos mueven los golpes con el audio: `arrangement::moveMidiHits` (desplazar,
+  alinear, Shift + arrastre; con el delta que `moveClip` aplica de verdad), `removeMidiHits`
+  (eliminar dejando silencio), `midiHitsToSource` (restaurar el original), `copyMidiHits` /
+  `pasteMidiHits` (copiar, pegar y duplicar); cerrar o abrir huecos los mueve `shiftGrid`. Callbacks de la vista (`onMidiAdd`,
+  `onMidiMove`, `onMidiVelocity`, `onMidiDelete`, menús `midiHitsMenu`, `midiPadMenu`,
+  `midiHeaderMenu`, `snapMidiTime`); cada edición hace `pushUndo` (Ctrl+Z la deshace; `refreshFromInfo`
+  vuelve a aplicar). Supr borra los golpes elegidos. `saveCurrentMix` guarda los canales en los pads.
+  `importBank (alTerminar)` importa un banco para un trigger o para una fila. `--captura --pistamidi`
+  crea la pista MIDI de la batería con una fila de conga. `auditionMidiPad` / `auditionTrigger` piden
+  el golpe al motor y avisan en la barra de estado qué sonó o por qué no (sin sonido, silenciada,
+  instrumento no cargado). Los menús de nota del trigger y de la fila se arman con `addNoteItems`:
+  General MIDI y el submenú "Addictive Drums 2" con `miditrack::addictiveDrumsMap` (el mapa "AD2
+  Standard" por grupos, según el keymap de XLN); ids `noteMenuBase` + nota (1000+, lejos de los demás
+  ids de esos menús).
+- `TimelineView`: la pista MIDI (`MidiLane`) es un carril más del `Viewport` (22 px de título +
+  16 px por fila, hasta 220), con sus gestos y su selección; avisa con índices de
+  `MidiLaneView::hits`. Es opaca y se dibuja en una imagen en caché (`setBufferedToImage`), así el
+  cabezal a 30 Hz no la vuelve a pintar; tras una edición, la selección se reubica por tiempo y
+  nota (`remapSelection`). Clic en el nombre de una fila elige todos sus golpes; los golpes cuya
+  nota no tiene fila se ven en gris en la franja del título. Para mover en el tiempo hay que
+  desplazarse al menos 4 px de lado (si no, solo cambia de fila). El triángulo a la izquierda del
+  nombre de cada fila (`isOnPlayButton`, solo con filas de 11 px o más) llama a `onMidiAudition`.
+
 ### 5.4i MixProject y MixEditor (armar mix antes de separar)
 - Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, sources: [{ name, file, length,
   analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats }] }`),
@@ -940,11 +1052,19 @@ Pasos de `run()`:
   siguiente canción.
 - Probado con tests y en Xvfb (sin tarjeta de sonido real); falta probar con interfaces
   multicanal reales.
+- Pistas MIDI: un banco nuevo se carga en el hilo de mensajes la primera vez que una fila lo usa
+  (un instante con bancos grandes); las voces de un sonido cambiado se cortan si hay otro cambio
+  antes de que se apaguen (hasta 4 s); con un instrumento con latencia, los golpes que caen dentro
+  de esa latencia tras un salto salen juntos, algo tarde. Mover tramos del arreglo mueve los
+  golpes del rango completo del tramo (también los de un hueco dentro de "este y los siguientes").
 - Instrumentos: solo instrumentos (no efectos), una salida estéreo por plugin (las salidas
   múltiples de Addictive Drums se ignoran), sin `AudioPlayHead` (no reciben tempo ni posición),
   solo noteOn/noteOff (sin CC ni aftertouch). La búsqueda de plugins es en el mismo proceso:
   un plugin roto puede cerrar la app durante la búsqueda (a la siguiente queda vetado). Los
-  plugins con latencia se compensan solo en los golpes del trigger.
+  plugins con latencia se compensan solo en los golpes del trigger. Los nombres de las notas no se
+  leen del plugin (VST3 `IUnitInfo` o MIDNAM en AU): hay listas fijas (General MIDI y el mapa "AD2
+  Standard" de Addictive Drums 2, transcrito del keymap de XLN y sin verificar en un AD2 real) y
+  "Escuchar" para comprobar; el contenido de los Flexi depende del kit cargado.
 - Armar mix: cada tramo se estira con una razón constante (conserva el pulso de la grabación
   dentro del tramo; una canción tocada sin click no queda cuantizada); la exactitud de las uniones
   depende del análisis de madmom (los menús de la fuente corrigen tiempos a la mitad, al doble o
@@ -1009,6 +1129,19 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.7.0 (pistas MIDI)**: `MidiTracks` (golpes congelados y editables, filas con sonido propio),
+  `SongInfo::midiTracks` en song.json, `shiftGrid` los mueve, segundo conjunto de líneas en el
+  motor (`setMidiSamplers`, `rawVelocity`), pista MIDI editable en la vista de arreglo, canales
+  por fila en el mezclador, menús de golpes, filas y pista, "Crear pista MIDI con estos golpes"
+  en el menú del trigger, `importBank`, `--captura --pistamidi`. "Escuchar" por fila y en el menú del
+  trigger (`AudioEngine::audition`: voces sin la envolvente del transporte, compuerta del instrumento)
+  y el mapa "AD2 Standard" de Addictive Drums 2 en los menús de nota (`addictiveDrumsMap`, `addNoteItems`).
+  Revisión: canales de las filas por identidad (`padForLane`; no pasan a otra canción ni a otra fila),
+  `superseded` y `silenced` en el motor, relevo por nota y origen, fundido de "Escuchar" con pause y
+  stop (`isSilent` lo espera), nota de "Escuchar" tras abrir la compuerta, la vista MIDI se rehace tras
+  editar tramos, `arrangementReady`, deshacer conserva nombres, sonidos y silencios, restaurar el audio
+  original deja un golpe por instante, el portapapeles de tramos es de su canción, silenciar una fila
+  desde su menú se mantiene, el desplazamiento de varios golpes se convierte con el arrastrado.
 - **v0.6.0 (armar mix antes de separar)**: `MixProject` (fuentes, tramos, `mix.json`, `layout`
   con razón constante por tramo y uniones en la rejilla, fundidos seno/coseno, `render`,
   `describeSong`, `readRange`, `refineToOnset`, `computePeaks`), `MixEditor` (sección con

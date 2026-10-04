@@ -10,11 +10,13 @@
 #include "Music.h"
 #include "Arrangement.h"
 #include "Triggers.h"
+#include "MidiTracks.h"
 #include "Recorder.h"
 #include "Stretcher.h"
 #include "MixProject.h"
 #include <cmath>
 #include <iostream>
+#include <set>
 
 static StemInfo stem (const juce::String& name, const juce::String& file)
 {
@@ -2367,6 +2369,981 @@ int main()
         CHECK (list.size() == 2 && list[0].name == tr ("Alabanza vol.") && list[1].name == tr ("Boda Pérez") && list[1].folder == a);
         CHECK (Library::legalFolderName (tr (" .Mi canción. "), "x") == tr ("Mi canción") && Library::legalFolderName ("...", "Mix") == "Mix");
         CHECK (MixProject::entries (tmp.getChildFile ("no-existe")).empty());
+    }
+
+    std::cout << "[MIDI] pistas MIDI: golpes congelados, edición, song.json, grilla y motor\n";
+    {
+        // Velocidades: las mismas que manda el trigger en vivo a un instrumento (0,25 + 0,75 x fuerza)
+        CHECK (miditrack::velocityFromStrength (1.0f) == 127 && miditrack::velocityFromStrength (0.0f) == 32);
+        CHECK (miditrack::velocityFromStrength (0.4f) == 70);
+        CHECK (miditrack::velocityFromStrength (-3.0f) == 32 && miditrack::velocityFromStrength (7.0f) == 127);
+        CHECK (std::abs (miditrack::strengthFromVelocity (127) - 1.0f) < 1.0e-6f);
+        CHECK (std::abs (miditrack::strengthFromVelocity (51) - 51.0f / 127.0f) < 1.0e-6f);
+        CHECK (miditrack::strengthFromVelocity (500) <= 1.0f && miditrack::strengthFromVelocity (-5) >= 0.0f);
+
+        // Nombres de batería General MIDI
+        CHECK (miditrack::drumNoteName (35) == "Bombo" && miditrack::drumNoteName (36) == "Bombo" && miditrack::drumNoteName (38) == "Caja");
+        CHECK (miditrack::drumNoteName (42) == "Hi-hat cerrado" && miditrack::drumNoteName (47) == "Tom medio");
+        CHECK (miditrack::drumNoteName (63) == "Conga alta" && miditrack::drumNoteName (62) == "Conga alta (tapada)");
+        // Mapa "AD2 Standard" de Addictive Drums 2: notas válidas y sin repetir; bombo 36, caja 38, tom 1 71, Flexi 1 A 47
+        {
+            std::set<int> seen;
+            bool valid = true;
+            auto noteOf = [] (const char* name)
+            {
+                for (auto& group : miditrack::addictiveDrumsMap())
+                    for (auto& nn : group.notes)
+                        if (juce::String (nn.name) == name)
+                            return nn.note;
+                return -1;
+            };
+            for (auto& group : miditrack::addictiveDrumsMap())
+                for (auto& nn : group.notes)
+                    valid = valid && juce::isPositiveAndBelow (nn.note, 128) && seen.insert (nn.note).second;
+            CHECK (valid && seen.size() >= 60);
+            CHECK (noteOf ("Bombo") == 36 && noteOf ("Caja") == 38 && noteOf ("Tom 1") == 71 && noteOf ("Flexi 1 A") == 47);
+        }
+        CHECK (miditrack::drumNoteName (61) == tr ("Bongó bajo") && miditrack::drumNoteName (74) == tr ("Güiro largo"));
+        CHECK (miditrack::drumNoteName (77) == "Bloque de madera" && miditrack::drumNoteName (56) == "Cencerro");
+        CHECK (miditrack::drumNoteName (20) == "Nota 20" && miditrack::drumNoteName (100) == "Nota 100");
+
+        // Pista MIDI desde los golpes detectados en los toms (desordenados y uno antes de 0)
+        StemInfo toms = stem ("Toms", "drums_toms.wav");
+        toms.trigger.note = 47;
+        toms.trigger.sound = "banco:Toms";
+        toms.trigger.keepAudio = false;
+        toms.trigger.gainDb = -4.0f;
+        toms.trigger.outputPair = 1;
+        const double rate = 48000.0;
+        const std::vector<TriggerEvent> detected = { { 96000, 0.5f }, { 24000, 1.0f }, { 48000, 0.0f }, { -10, 1.0f } };
+        const auto fresh = miditrack::fromDetection (detected, rate, toms);
+        CHECK (fresh.name == "Toms (MIDI)" && fresh.sourceFile == "drums_toms.wav" && fresh.muteSource && ! fresh.muted);
+        CHECK (fresh.pads.size() == 1 && fresh.pads[0].name == "Toms" && fresh.pads[0].note == 47 && fresh.pads[0].sound == "banco:Toms");
+        CHECK (fresh.pads.size() == 1 && std::abs (fresh.pads[0].gainDb + 4.0f) < 1.0e-6f && fresh.pads[0].outputPair == 1 && ! fresh.pads[0].muted);
+        CHECK (fresh.hits.size() == 3);
+        if (fresh.hits.size() == 3)
+        {
+            CHECK (std::abs (fresh.hits[0].seconds - 0.5) < 1.0e-12 && std::abs (fresh.hits[1].seconds - 1.0) < 1.0e-12
+                   && std::abs (fresh.hits[2].seconds - 2.0) < 1.0e-12);
+            CHECK (fresh.hits[0].velocity == 127 && fresh.hits[1].velocity == 32 && fresh.hits[2].velocity == 79);
+            CHECK (fresh.hits[0].note == 47 && fresh.hits[1].note == 47 && fresh.hits[2].note == 47);
+        }
+        toms.trigger.keepAudio = true;
+        const auto keep = miditrack::fromDetection ({}, rate, toms);
+        CHECK (! keep.muteSource && keep.hits.empty() && keep.pads.size() == 1);
+        CHECK (miditrack::fromDetection (detected, 0.0, toms).hits.empty());
+
+        // Pista de trabajo: toms (47), conga (63) y timbal (65), más un golpe (40) sin fila
+        MidiTrack base;
+        base.name = "Toms (MIDI)";
+        base.pads.resize (3);
+        base.pads[0].name = "Toms";
+        base.pads[0].note = 47;
+        base.pads[0].sound = "banco:Toms";
+        base.pads[1].name = "Conga";
+        base.pads[1].note = 63;
+        base.pads[1].sound = "banco:Conga";
+        base.pads[2].name = "Timbal";
+        base.pads[2].note = 65;
+        base.pads[2].sound = "vst:3";
+        base.hits = { { 0.5, 47, 100 }, { 1.0, 47, 60 }, { 1.5, 63, 90 }, { 2.0, 65, 120 }, { 2.5, 40, 80 } };
+        CHECK (miditrack::padIndexForNote (base, 47) == 0 && miditrack::padIndexForNote (base, 63) == 1);
+        CHECK (miditrack::padIndexForNote (base, 65) == 2 && miditrack::padIndexForNote (base, 40) == -1);
+        auto isSorted = [] (const MidiTrack& track)
+        {
+            for (size_t i = 1; i < track.hits.size(); ++i)
+                if (track.hits[i].seconds < track.hits[i - 1].seconds)
+                    return false;
+            return true;
+        };
+
+        // Golpes de una nota para el motor, en tiempo de reproducción
+        {
+            auto t = base;
+            t.hits.push_back ({ 3.0, 47, 127 });
+            const auto ev = miditrack::eventsForNote (t, 47, 1000.0, [] (double s) { return s * 2.0 - 1.2; });
+            CHECK (ev.size() == 2);   // el de 0,5 s cae antes de 0 y no va
+            if (ev.size() == 2)
+            {
+                CHECK (ev[0].sample == 800 && ev[1].sample == 4800);
+                CHECK (std::abs (ev[0].velocity - 60.0f / 127.0f) < 1.0e-6f && std::abs (ev[1].velocity - 1.0f) < 1.0e-6f);
+            }
+            const auto reversed = miditrack::eventsForNote (t, 47, 1000.0, [] (double s) { return 10.0 - s; });
+            CHECK (reversed.size() == 3);   // ordenados por muestra aunque el mapa los invierta
+            if (reversed.size() == 3)
+                CHECK (reversed[0].sample == 7000 && reversed[1].sample == 9000 && reversed[2].sample == 9500);
+            const auto plain = miditrack::eventsForNote (t, 63, 100.0, {});   // sin mapa: tiempo tal cual
+            CHECK (plain.size() == 1 && plain[0].sample == 150 && std::abs (plain[0].velocity - 90.0f / 127.0f) < 1.0e-6f);
+            CHECK (miditrack::eventsForNote (t, 50, 1000.0, {}).empty() && miditrack::eventsForNote (t, 47, 0.0, {}).empty());
+        }
+
+        // Agregar un golpe: queda ordenado, tiempo y velocidad acotados
+        {
+            auto t = base;
+            CHECK (miditrack::addHit (t, 1.2, 63, 100) == 2 && t.hits.size() == 6 && t.hits[2].note == 63);
+            CHECK (miditrack::addHit (t, -1.0, 47, 500) == 0 && std::abs (t.hits[0].seconds) < 1.0e-12 && t.hits[0].velocity == 127);
+            CHECK (miditrack::addHit (t, 1.0, 64, 0) == 3 && t.hits[3].note == 64 && t.hits[3].velocity == 1);   // tras el que ya estaba en 1 s
+            CHECK (isSorted (t) && t.hits.size() == 8);
+        }
+
+        // Borrar golpes: índices repetidos o fuera de rango se ignoran
+        {
+            auto t = base;
+            miditrack::removeHits (t, { 4, 0, 0, -3, 12 });
+            CHECK (t.hits.size() == 3 && std::abs (t.hits[0].seconds - 1.0) < 1.0e-12 && std::abs (t.hits[2].seconds - 2.0) < 1.0e-12);
+            miditrack::removeHits (t, {});
+            CHECK (t.hits.size() == 3);
+        }
+
+        // Mover golpes en el tiempo y entre filas; la selección devuelta sigue a los golpes movidos
+        {
+            auto t = base;
+            auto sel = miditrack::moveHits (t, { 0, 1, 1, 9 }, 1.2, 1);   // los toms, una fila abajo: conga
+            CHECK (sel == std::vector<int> ({ 1, 3 }));
+            CHECK (isSorted (t) && t.hits.size() == 5);
+            CHECK (std::abs (t.hits[1].seconds - 1.7) < 1.0e-9 && t.hits[1].note == 63 && t.hits[1].velocity == 100);
+            CHECK (std::abs (t.hits[3].seconds - 2.2) < 1.0e-9 && t.hits[3].note == 63 && t.hits[3].velocity == 60);
+            // Nunca antes de 0; la fila se acota a la última; un golpe sin fila conserva su nota
+            sel = miditrack::moveHits (t, { 0, 4 }, -3.0, 5);
+            CHECK (sel == std::vector<int> ({ 0, 1 }));
+            CHECK (std::abs (t.hits[0].seconds) < 1.0e-12 && t.hits[0].note == 65 && std::abs (t.hits[1].seconds) < 1.0e-12 && t.hits[1].note == 40);
+            sel = miditrack::moveHits (t, { 2 }, 0.0, -2);   // de la conga (fila 1) dos filas arriba: se queda en los toms (fila 0)
+            CHECK (sel == std::vector<int> ({ 2 }) && t.hits[2].note == 47);
+            CHECK (miditrack::moveHits (t, { -1, 5 }, 1.0, 1).empty());
+            // Hacia atrás, pasando por delante de otros golpes
+            auto u = base;
+            sel = miditrack::moveHits (u, { 3 }, -1.8, 0);
+            CHECK (sel == std::vector<int> ({ 0 }) && std::abs (u.hits[0].seconds - 0.2) < 1.0e-9 && u.hits[0].note == 65 && isSorted (u));
+        }
+
+        // Cambiar la nota y la velocidad
+        {
+            auto t = base;
+            const auto sel = miditrack::setNote (t, { 3, 1, 7 }, 63);
+            CHECK (sel == std::vector<int> ({ 1, 3 }) && t.hits[1].note == 63 && t.hits[3].note == 63 && t.hits[0].note == 47);
+            miditrack::setNote (t, { 0 }, 300);
+            CHECK (t.hits[0].note == 127);
+
+            auto v = base;
+            miditrack::changeVelocity (v, { 0, 3, 42 }, 20);
+            CHECK (v.hits[0].velocity == 120 && v.hits[3].velocity == 127 && v.hits[1].velocity == 60);
+            miditrack::changeVelocity (v, { 1 }, -100);
+            CHECK (v.hits[1].velocity == 1);
+            miditrack::setVelocity (v, { 2, -1 }, 0);
+            CHECK (v.hits[2].velocity == 1);
+            miditrack::setVelocity (v, { 2 }, 64);
+            CHECK (v.hits[2].velocity == 64 && v.hits[4].velocity == 80);
+        }
+
+        // Subdivisiones de los tiempos detectados y cuantizar
+        {
+            Analysis a;
+            a.beats = { { 1.0, 1 }, { 1.5, 2 }, { 2.0, 3 }, { 3.0, 4 } };   // intervalos de 0,5 y 1 s
+            auto snap = [&a] (double seconds, int sub) { return miditrack::snapToSubdivision (a, seconds, sub); };
+            CHECK (std::abs (snap (1.2, 1) - 1.0) < 1.0e-9 && std::abs (snap (1.3, 1) - 1.5) < 1.0e-9);
+            CHECK (std::abs (snap (1.2, 2) - 1.25) < 1.0e-9 && std::abs (snap (1.2, 4) - 1.25) < 1.0e-9);
+            CHECK (std::abs (snap (1.16, 4) - 1.125) < 1.0e-9);
+            CHECK (std::abs (snap (2.3, 3) - (2.0 + 1.0 / 3.0)) < 1.0e-9 && std::abs (snap (2.1, 3) - 2.0) < 1.0e-9);   // tresillos
+            CHECK (std::abs (snap (1.99, 2) - 2.0) < 1.0e-12);   // el final del intervalo es el tiempo siguiente
+            CHECK (std::abs (snap (1.5, 4) - 1.5) < 1.0e-12 && std::abs (snap (3.0, 2) - 3.0) < 1.0e-12);   // sobre un tiempo
+            CHECK (std::abs (snap (0.3, 2) - 0.25) < 1.0e-9);    // antes del primero: sigue con su intervalo
+            CHECK (std::abs (snap (3.6, 1) - 4.0) < 1.0e-9 && std::abs (snap (3.6, 4) - 3.5) < 1.0e-9);   // después del último
+            CHECK (std::abs (snap (1.3, 0) - 1.5) < 1.0e-9);     // subdivisión inválida = tiempos
+            Analysis one;
+            one.beats = { { 1.0, 1 } };
+            CHECK (std::abs (miditrack::snapToSubdivision (one, 1.37, 4) - 1.37) < 1.0e-12);
+            CHECK (std::abs (miditrack::snapToSubdivision (Analysis(), 0.7, 2) - 0.7) < 1.0e-12);
+
+            MidiTrack q;
+            q.pads = base.pads;
+            q.hits = { { 1.06, 47, 100 }, { 1.08, 63, 90 }, { 1.9, 47, 80 } };
+            Analysis grid;
+            grid.beats = { { 0.0, 1 }, { 1.0, 2 }, { 2.0, 3 } };
+            const auto qs = miditrack::quantize (q, { 1, 2, 2, 8 }, grid, 4);   // la conga pasa delante del tom de 1,06 s
+            CHECK (qs == std::vector<int> ({ 0, 2 }) && isSorted (q));
+            CHECK (q.hits[0].note == 63 && std::abs (q.hits[0].seconds - 1.0) < 1.0e-9);
+            CHECK (std::abs (q.hits[1].seconds - 1.06) < 1.0e-12 && std::abs (q.hits[2].seconds - 2.0) < 1.0e-9);
+            Analysis lateGrid;   // lo que caería antes de 0 queda en 0
+            lateGrid.beats = { { 0.9, 1 }, { 1.4, 2 } };
+            MidiTrack q2;
+            q2.hits = { { 0.1, 36, 100 } };
+            miditrack::quantize (q2, { 0 }, lateGrid, 1);
+            CHECK (std::abs (q2.hits[0].seconds) < 1.0e-12);
+        }
+
+        // Volver a detectar una ventana
+        {
+            // Solo cambian los golpes de esa nota dentro de [0,8, 2,2); lo de afuera y las otras notas quedan igual
+            auto t = base;
+            const std::vector<TriggerEvent> again = { { 700, 1.0f }, { 900, 0.4f }, { 1200, 1.0f }, { 2200, 1.0f } };
+            miditrack::replaceRange (t, 0.8, 2.2, again, 1000.0, 47);
+            CHECK (t.hits.size() == 6 && isSorted (t));
+            if (t.hits.size() == 6)
+            {
+                CHECK (std::abs (t.hits[0].seconds - 0.5) < 1.0e-12 && t.hits[0].velocity == 100);
+                CHECK (std::abs (t.hits[1].seconds - 0.9) < 1.0e-12 && t.hits[1].note == 47 && t.hits[1].velocity == 70);
+                CHECK (std::abs (t.hits[2].seconds - 1.2) < 1.0e-12 && t.hits[2].velocity == 127);
+                CHECK (t.hits[3].note == 63 && t.hits[4].note == 65 && t.hits[5].note == 40);
+            }
+            // Todas las notas: la ventana se vacía y lo nuevo va con la nota de la primera fila
+            auto u = base;
+            miditrack::replaceRange (u, 1.2, 2.1, { { 1300, 0.0f } }, 1000.0, -1);
+            CHECK (u.hits.size() == 4);
+            if (u.hits.size() == 4)
+                CHECK (u.hits[2].note == 47 && std::abs (u.hits[2].seconds - 1.3) < 1.0e-12 && u.hits[2].velocity == 32 && u.hits[3].note == 40);
+            auto w = base;
+            miditrack::replaceRange (w, 2.0, 2.0, again, 1000.0, -1);   // ventana vacía: nada cambia
+            CHECK (w.hits.size() == 5);
+
+            // Las congas que se pasaron de la fila de los toms a la suya no vuelven a los toms al detectar de nuevo esa
+            // fila (el stem de los toms las sigue teniendo); un golpe junto al borde de la ventana tampoco se duplica
+            MidiTrack moved;
+            moved.pads = base.pads;
+            moved.hits = { { 0.5, 47, 100 }, { 1.0, 63, 90 }, { 1.52, 63, 80 }, { 2.0, 47, 70 }, { 2.22, 47, 60 } };
+            const std::vector<TriggerEvent> stemHits = { { 500, 1.0f }, { 1000, 1.0f }, { 1500, 1.0f }, { 2000, 1.0f }, { 2190, 1.0f } };
+            miditrack::replaceRange (moved, 0.9, 2.2, stemHits, 1000.0, 47);
+            CHECK (moved.hits.size() == 5 && isSorted (moved));
+            int tomHits = 0, congaHits = 0;
+            for (auto& hit : moved.hits)
+            {
+                tomHits += hit.note == 47 ? 1 : 0;
+                congaHits += hit.note == 63 ? 1 : 0;
+            }
+            CHECK (tomHits == 3 && congaHits == 2);   // el tom de 2 s se detecta de nuevo; las congas de 1 y 1,5 s y el tom de 2,19 s (el de 2,22 s) no se duplican
+            if (moved.hits.size() == 5)
+                CHECK (std::abs (moved.hits[3].seconds - 2.0) < 1.0e-12 && moved.hits[3].velocity == 127);
+            // Un golpe nuevo de verdad (lejos de los que quedan) sí entra
+            miditrack::replaceRange (moved, 0.9, 2.2, { { 1250, 0.4f } }, 1000.0, 47);
+            CHECK (moved.hits.size() == 5);
+            if (moved.hits.size() == 5)
+                CHECK (std::abs (moved.hits[2].seconds - 1.25) < 1.0e-12 && moved.hits[2].note == 47 && moved.hits[2].velocity == 70);
+        }
+
+        // Quitar una fila
+        {
+            auto t = base;
+            miditrack::removePad (t, 1, 47);   // la conga: sus golpes pasan a los toms
+            CHECK (t.pads.size() == 2 && t.pads[1].note == 65 && t.hits.size() == 5 && t.hits[2].note == 47);
+            miditrack::removePad (t, 1, 99);   // el timbal: ninguna fila tiene la nota 99, sus golpes se borran
+            CHECK (t.pads.size() == 1 && t.hits.size() == 4 && miditrack::padIndexForNote (t, 65) == -1);
+            bool anyTimbal = false;
+            for (auto& hit : t.hits)
+                anyTimbal = anyTimbal || hit.note == 65;
+            CHECK (! anyTimbal && t.hits.size() == 4 && t.hits[3].note == 40);   // el golpe sin fila no se toca
+            miditrack::removePad (t, 5, 47);
+            miditrack::removePad (t, -1, 47);
+            CHECK (t.pads.size() == 1 && t.hits.size() == 4);
+            // Dos filas con la misma nota: quitar una no toca los golpes
+            auto u = base;
+            MidiPad twin = u.pads[1];
+            twin.name = "Conga 2";
+            u.pads.push_back (twin);
+            miditrack::removePad (u, 1, 47);
+            CHECK (u.pads.size() == 3 && u.hits.size() == 5 && u.hits[2].note == 63);
+        }
+
+        // song.json: ida y vuelta, y valores fuera de rango en un archivo editado a mano
+        {
+            const auto midiRoot = tmp.getChildFile ("midi-lib");
+            SongInfo ms;
+            ms.name = "Cumbia";
+            ms.folder = midiRoot.getChildFile ("Cumbia");
+            ms.folder.createDirectory();
+            writeSine (ms.folder.getChildFile ("drums_toms.wav"), 44100.0, 0.2, 1);
+            ms.stems.push_back (stem ("Toms", "drums_toms.wav"));
+            MidiTrack saved = base;
+            saved.name = tr ("Toms (MIDI) ñ");
+            saved.sourceFile = "drums_toms.wav";
+            saved.muteSource = false;
+            saved.muted = true;
+            saved.pads[1].gainDb = -6.5f;
+            saved.pads[1].muted = true;
+            saved.pads[1].outputPair = 2;
+            ms.midiTracks.push_back (saved);
+            MidiTrack emptyTrack;
+            emptyTrack.name = "Vacia";
+            ms.midiTracks.push_back (emptyTrack);
+            Library ml (midiRoot);
+            CHECK (ml.saveSong (ms));
+            Library ml2 (midiRoot);
+            ml2.load();
+            CHECK (ml2.songs.size() == 1 && ml2.songs[0].midiTracks.size() == 2);
+            if (ml2.songs.size() == 1 && ml2.songs[0].midiTracks.size() == 2)
+            {
+                const auto& b0 = ml2.songs[0].midiTracks[0];
+                CHECK (b0.name == saved.name && b0.sourceFile == "drums_toms.wav" && ! b0.muteSource && b0.muted);
+                CHECK (b0.pads.size() == 3);
+                if (b0.pads.size() == 3)
+                {
+                    CHECK (b0.pads[1].name == "Conga" && b0.pads[1].note == 63 && b0.pads[1].sound == "banco:Conga");
+                    CHECK (std::abs (b0.pads[1].gainDb + 6.5f) < 1.0e-5f && b0.pads[1].muted && b0.pads[1].outputPair == 2);
+                    CHECK (b0.pads[0].name == "Toms" && ! b0.pads[0].muted && b0.pads[2].sound == "vst:3" && b0.pads[2].note == 65);
+                }
+                bool same = b0.hits.size() == saved.hits.size();
+                for (size_t i = 0; same && i < b0.hits.size(); ++i)
+                    same = std::abs (b0.hits[i].seconds - saved.hits[i].seconds) < 1.0e-9 && b0.hits[i].note == saved.hits[i].note
+                           && b0.hits[i].velocity == saved.hits[i].velocity;
+                CHECK (same);
+                const auto& b1 = ml2.songs[0].midiTracks[1];
+                CHECK (b1.name == "Vacia" && b1.pads.empty() && b1.hits.empty() && b1.muteSource && ! b1.muted);
+            }
+
+            const auto rawRoot = tmp.getChildFile ("midi-lib-raro");
+            const auto rara = rawRoot.getChildFile ("Rara");
+            rara.createDirectory();
+            writeSine (rara.getChildFile ("x.wav"), 44100.0, 0.2, 1);
+            rara.getChildFile ("song.json").replaceWithText (
+                R"({"name":"Rara","stems":[{"name":"X","file":"x.wav"}],"midiTracks":[{"name":"M","pads":[{"name":"P","note":300,"gainDb":99,"outputPair":-2}],)"
+                R"("hits":[[1.0,200,0],[-1.0,36,100],[0.5,36,500],[2.0]]}]})");
+            Library raw (rawRoot);
+            raw.load();
+            CHECK (raw.songs.size() == 1 && raw.songs[0].midiTracks.size() == 1);
+            if (raw.songs.size() == 1 && raw.songs[0].midiTracks.size() == 1)
+            {
+                const auto& m = raw.songs[0].midiTracks[0];
+                CHECK (m.muteSource && ! m.muted && m.pads.size() == 1);
+                if (m.pads.size() == 1)
+                    CHECK (m.pads[0].note == 127 && m.pads[0].gainDb <= 12.0f && m.pads[0].outputPair == 0);
+                CHECK (m.hits.size() == 2);   // sin el negativo ni el incompleto, ordenados
+                if (m.hits.size() == 2)
+                    CHECK (std::abs (m.hits[0].seconds - 0.5) < 1.0e-12 && m.hits[0].velocity == 127 && m.hits[1].note == 127 && m.hits[1].velocity == 1);
+            }
+
+            // Una canción guardada antes de las pistas MIDI (sin el campo) se lee sin pistas, y sin pistas no se escribe el campo
+            const auto oldRoot = tmp.getChildFile ("midi-lib-vieja");
+            const auto vieja = oldRoot.getChildFile ("Vieja");
+            vieja.createDirectory();
+            writeSine (vieja.getChildFile ("x.wav"), 44100.0, 0.2, 1);
+            vieja.getChildFile ("song.json").replaceWithText (R"({"name":"Vieja","bpm":100,"stems":[{"name":"X","file":"x.wav"}]})");
+            Library old (oldRoot);
+            old.load();
+            CHECK (old.songs.size() == 1 && old.songs[0].midiTracks.empty() && old.songs[0].stems.size() == 1);
+            if (old.songs.size() == 1)
+            {
+                CHECK (old.saveSong (old.songs[0]));
+                const auto text = vieja.getChildFile ("song.json").loadFileAsString();
+                CHECK (text.isNotEmpty() && ! text.contains ("midiTracks"));
+            }
+        }
+
+        // Cerrar y abrir un hueco en el arreglo mueve los golpes (y borra los del tramo quitado)
+        {
+            SongInfo g;
+            MidiTrack gm;
+            gm.hits = { { 1.0, 36, 100 }, { 2.0, 36, 100 }, { 2.5, 38, 100 }, { 4.0, 36, 90 } };
+            g.midiTracks.push_back (gm);
+            arrangement::shiftGrid (g, 2.0, -1.0);   // se quita [2, 3)
+            const auto& gh = g.midiTracks[0].hits;
+            CHECK (gh.size() == 2 && std::abs (gh[0].seconds - 1.0) < 1.0e-12 && std::abs (gh[1].seconds - 3.0) < 1.0e-12 && gh[1].velocity == 90);
+            arrangement::shiftGrid (g, 1.5, 0.5);    // se abre un hueco de 0,5 s en 1,5 s
+            CHECK (gh.size() == 2 && std::abs (gh[0].seconds - 1.0) < 1.0e-12 && std::abs (gh[1].seconds - 3.5) < 1.0e-12);
+        }
+
+        // Los golpes van con el audio de los tramos: mover, eliminar dejando silencio, volver al original, copiar y pegar
+        {
+            SongInfo a;
+            MidiTrack t;
+            t.name = "Toms (MIDI)";
+            t.sourceFile = "drums_toms.wav";
+            t.hits = { { 0.5, 47, 100 }, { 1.2, 47, 90 }, { 1.8, 63, 80 }, { 3.0, 47, 70 } };
+            a.midiTracks.push_back (t);
+            MidiTrack other;
+            other.name = "Bombo (MIDI)";
+            other.sourceFile = "drums_kick.wav";
+            other.hits = { { 1.5, 36, 110 } };
+            a.midiTracks.push_back (other);
+            auto hitIs = [] (const MidiHit& h, double s, int note) { return std::abs (h.seconds - s) < 1.0e-9 && h.note == note; };
+
+            // Desplazar 40 ms el tramo [1, 2): sus golpes (de todas las pistas) se corren; los de afuera no
+            arrangement::moveMidiHits (a, 1.0, 2.0, 0.04);
+            const auto& ah = a.midiTracks[0].hits;
+            CHECK (ah.size() == 4 && hitIs (ah[0], 0.5, 47) && hitIs (ah[1], 1.24, 47) && hitIs (ah[2], 1.84, 63) && hitIs (ah[3], 3.0, 47));
+            CHECK (hitIs (a.midiTracks[1].hits[0], 1.54, 36));
+            // "Este y los siguientes" hacia antes: nunca antes de 0, y quedan ordenados
+            arrangement::moveMidiHits (a, 2.9, std::numeric_limits<double>::max(), -5.0);
+            CHECK (ah.size() == 4 && hitIs (ah[0], 0.0, 47) && hitIs (ah[1], 0.5, 47));
+            // Eliminar el tramo [1, 1.5) dejando silencio: se borran sus golpes
+            arrangement::removeMidiHits (a, 1.0, 1.5);
+            CHECK (ah.size() == 3 && hitIs (ah[2], 1.84, 63) && a.midiTracks[1].hits.empty() == false);
+            arrangement::removeMidiHits (a, 1.5, 1.6);
+            CHECK (a.midiTracks[1].hits.empty());
+
+            // Volver al audio original: cada golpe al instante del original que sonaba bajo él; los del hueco se van
+            SongInfo r;
+            MidiTrack rt;
+            rt.hits = { { 0.5, 36, 100 }, { 1.5, 36, 100 }, { 2.4, 36, 100 }, { 3.2, 38, 100 } };
+            r.midiTracks.push_back (rt);
+            const std::vector<Clip> arranged = { { 0.0, 1.0, 0.0 }, { 2.0, 3.0, 1.0 }, { 5.0, 6.0, 3.0 } };   // hueco en [2, 3)
+            arrangement::midiHitsToSource (r, arranged);
+            const auto& rh = r.midiTracks[0].hits;
+            CHECK (rh.size() == 3 && hitIs (rh[0], 0.5, 36) && hitIs (rh[1], 2.5, 36) && hitIs (rh[2], 5.2, 38));
+            arrangement::midiHitsToSource (r, {});   // sin tramos ya es el original: nada cambia
+            CHECK (rh.size() == 3 && hitIs (rh[1], 2.5, 36));
+            // Un tramo duplicado: sus golpes caen dos veces en el mismo instante del original y quedan en uno (el más fuerte)
+            SongInfo d2;
+            MidiTrack dt;
+            dt.hits = { { 0.3, 36, 90 }, { 0.3, 38, 80 }, { 1.3, 36, 110 } };
+            d2.midiTracks.push_back (dt);
+            arrangement::midiHitsToSource (d2, { { 0.0, 1.0, 0.0 }, { 0.0, 1.0, 1.0 } });
+            const auto& dh = d2.midiTracks[0].hits;
+            CHECK (dh.size() == 2 && hitIs (dh[0], 0.3, 36) && dh[0].velocity == 110 && hitIs (dh[1], 0.3, 38));
+
+            // Copiar el tramo [1, 2) y pegarlo insertando en 4 s (tras abrir el hueco): los golpes van con la copia
+            SongInfo c;
+            c.midiTracks.push_back (t);   // 0.5, 1.2, 1.8, 3.0
+            arrangement::GridSlice slice;
+            slice.beats.push_back ({ 0.0, 1 });
+            arrangement::copyMidiHits (c, 1.0, 2.0, slice);
+            CHECK (slice.midi.size() == 1 && slice.beats.size() == 1);
+            if (slice.midi.size() == 1)
+                CHECK (slice.midi[0].track == 0 && slice.midi[0].hits.size() == 2 && hitIs (slice.midi[0].hits[0], 0.2, 47)
+                       && hitIs (slice.midi[0].hits[1], 0.8, 63));
+            arrangement::shiftGrid (c, 2.5, 1.0);   // pegar insertando 1 s en 2,5 s: el de 3 s pasa a 4 s
+            arrangement::pasteMidiHits (c, slice, 2.5);
+            const auto& ch = c.midiTracks[0].hits;
+            CHECK (ch.size() == 6 && hitIs (ch[3], 2.7, 47) && hitIs (ch[4], 3.3, 63) && hitIs (ch[5], 4.0, 47));
+            // Pegar encima: se suman a los que hay
+            arrangement::pasteMidiHits (c, slice, 0.0);
+            CHECK (ch.size() == 8 && hitIs (ch[0], 0.2, 47) && hitIs (ch[2], 0.8, 63));
+            // Se pegan en la pista con el mismo nombre y origen aunque haya cambiado de lugar; si no existe, en ninguna
+            SongInfo d;
+            d.midiTracks.push_back (other);
+            d.midiTracks.push_back (t);
+            d.midiTracks[1].hits.clear();
+            arrangement::pasteMidiHits (d, slice, 10.0);
+            CHECK (d.midiTracks[0].hits.size() == 1 && d.midiTracks[1].hits.size() == 2 && hitIs (d.midiTracks[1].hits[0], 10.2, 47));
+            SongInfo e;
+            e.midiTracks.push_back (other);
+            arrangement::pasteMidiHits (e, slice, 1.0);
+            CHECK (e.midiTracks[0].hits.size() == 1);
+            arrangement::copyMidiHits (c, 20.0, 30.0, slice);   // rango sin golpes: el portapapeles queda sin golpes
+            CHECK (slice.midi.empty());
+        }
+
+        // Motor: las líneas de las pistas MIDI (setMidiSamplers) suenan en la muestra exacta y junto con los triggers en vivo
+        {
+            engine.setClick (false, 120.0, 0.0, 0.0f, 0);
+            song->tracks[0]->muted = true;
+            song->tracks[1]->muted = true;
+            auto hitBank = std::make_shared<SampleBankData>();   // un golpe: 100 ms de nivel constante 0,5
+            hitBank->sampleRate = sr;
+            SampleBankData::Hit oneHit;
+            oneHit.buffer.setSize (2, (int) (0.1 * sr));
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < oneHit.buffer.getNumSamples(); ++i)
+                    oneHit.buffer.setSample (ch, i, 0.5f);
+            oneHit.peak = 0.5f;
+            hitBank->hits.push_back (std::move (oneHit));
+
+            // Trigger en vivo: un golpe fuerte en 0,25 s
+            auto liveSet = std::make_shared<SamplerSet>();
+            auto live = std::make_unique<SamplerLane>();
+            live->bank = hitBank;
+            live->events = { { (juce::int64) (0.25 * sr), 1.0f } };
+            live->control.gain = 1.0f;
+            liveSet->lanes.push_back (std::move (live));
+
+            // Pista MIDI: la conga en 0,25 s (junto con el trigger) y sola en una muestra que no cae al inicio de un bloque
+            const juce::int64 exact = 26471;
+            MidiTrack congas;
+            congas.pads.resize (1);
+            congas.pads[0].note = 63;
+            congas.hits = { { 0.25, 63, 127 }, { 0.4, 47, 127 }, { (double) exact / sr, 63, 127 } };   // la nota 47 no tiene línea aquí
+            auto midiSet = std::make_shared<SamplerSet>();
+            auto midiLane = std::make_unique<SamplerLane>();
+            midiLane->bank = hitBank;
+            midiLane->rawVelocity = true;
+            midiLane->midiTrack = 0;
+            midiLane->midiPad = 0;
+            midiLane->events = miditrack::eventsForNote (congas, 63, sr, [] (double s) { return s; });
+            midiLane->control.gain = 1.0f;
+            CHECK (midiLane->events.size() == 2 && midiLane->events.back().sample == exact);
+            auto* midiControl = &midiLane->control;
+            midiSet->lanes.push_back (std::move (midiLane));
+
+            engine.setSamplers (liveSet);
+            engine.setMidiSamplers (midiSet);
+            CHECK (engine.getMidiSamplers() == midiSet && engine.getSamplers() == liveSet);
+            engine.seekSeconds (0.0);
+            engine.play();
+            render (engine, out, 20);   // fundido del salto: queda en ~0,23 s
+            float before = 0.0f, both = 0.0f, between = 0.0f, alone = 0.0f;
+            juce::int64 firstAlone = -1;
+            for (int b = 0; b < 80 && engine.isPlaying(); ++b)
+            {
+                render (engine, out, 1);
+                const auto start = (juce::int64) std::llround (engine.getPositionSeconds() * sr) - block;
+                const double t = (double) start / sr;
+                const float pk = out.peak (0);
+                if (t + block / sr < 0.245) before = std::max (before, pk);
+                if (t > 0.26 && t + block / sr < 0.34) both = std::max (both, pk);
+                if (t > 0.36 && t + block / sr < 0.59) between = std::max (between, pk);
+                if (t > 0.61 && t + block / sr < 0.69) alone = std::max (alone, pk);
+                if (firstAlone < 0 && t > 0.45)
+                    for (int k = 0; k < block; ++k)
+                        if (std::abs (out.data[0][(size_t) k]) > 0.25f)
+                        {
+                            firstAlone = start + k;
+                            break;
+                        }
+            }
+            CHECK (before < 1.0e-4f && between < 1.0e-4f);   // silencio fuera de los golpes (la nota 47 no suena)
+            CHECK (std::abs (both - 1.0f) < 0.02f);          // trigger en vivo + pista MIDI: 0,5 cada uno
+            CHECK (std::abs (alone - 0.5f) < 0.02f);         // velocidad 127 -> fuerza 1 -> ganancia 1
+            CHECK (firstAlone == exact);
+            if (firstAlone != exact)
+                std::cout << "  primer sonido de la pista MIDI en la muestra " << firstAlone << "\n";
+            CHECK (midiControl->peakL.load() > 0.4f);        // medidores de la línea
+
+            // Sin el conjunto en vivo, la pista MIDI suena sola
+            engine.setSamplers (nullptr);
+            engine.seekSeconds (0.0);
+            render (engine, out, 20);
+            float single = 0.0f;
+            for (int b = 0; b < 20 && engine.isPlaying(); ++b)
+            {
+                render (engine, out, 1);
+                const double t = engine.getPositionSeconds() - block / sr;
+                if (t > 0.26 && t + block / sr < 0.34) single = std::max (single, out.peak (0));
+            }
+            CHECK (std::abs (single - 0.5f) < 0.02f);
+            engine.setMidiSamplers (nullptr);
+
+#if defined (SECUENCIAS_TEST_SYNTH)
+            // Hacia un instrumento: la velocidad de la pista MIDI llega tal cual (sin la curva 0,25 + 0,75 x fuerza del trigger en vivo)
+            {
+                juce::VST3PluginFormat vst3;
+                juce::OwnedArray<juce::PluginDescription> found;
+                vst3.findAllTypesForFile (found, SECUENCIAS_TEST_SYNTH);
+                CHECK (found.size() == 1);
+                std::unique_ptr<juce::AudioPluginInstance> plugin;
+                juce::String error;
+                if (found.size() == 1)
+                    plugin = vst3.createInstanceFromDescription (*found[0], sr, block, error);
+                CHECK (plugin != nullptr);
+                if (plugin != nullptr)
+                {
+                    plugin->prepareToPlay (sr, AudioEngine::maxBlockSize);
+                    auto iset = std::make_shared<InstrumentSet>();
+                    auto ilane = std::make_shared<InstrumentLane>();
+                    ilane->id = 9;
+                    ilane->name = "prueba";
+                    ilane->control.gain = 1.0f;
+                    ilane->latency = plugin->getLatencySamples();
+                    ilane->holdSamples = (int) (0.05 * sr);
+                    ilane->work.setSize (2, AudioEngine::maxBlockSize);
+                    ilane->midi.ensureSize (4096);
+                    ilane->plugin = std::move (plugin);
+                    iset->lanes.push_back (ilane);
+                    engine.setInstruments (iset);
+
+                    MidiTrack drums;
+                    drums.pads.resize (1);
+                    drums.pads[0].note = 63;
+                    drums.pads[0].sound = "vst:9";
+                    drums.hits = { { 0.25, 63, 127 }, { 0.6, 63, 51 } };
+                    auto vset = std::make_shared<SamplerSet>();
+                    auto vlane = std::make_unique<SamplerLane>();
+                    vlane->instrumentId = 9;
+                    vlane->note = 63;
+                    vlane->rawVelocity = true;
+                    vlane->midiTrack = 0;
+                    vlane->midiPad = 0;
+                    vlane->events = miditrack::eventsForNote (drums, 63, sr, {});
+                    vset->lanes.push_back (std::move (vlane));
+                    engine.setMidiSamplers (vset);
+                    engine.seekSeconds (0.0);
+                    engine.play();
+                    render (engine, out, 20);
+                    float strong = 0.0f, soft = 0.0f;
+                    for (int b = 0; b < 60 && engine.isPlaying(); ++b)
+                    {
+                        render (engine, out, 1);
+                        const double t = engine.getPositionSeconds() - block / sr;
+                        if (t > 0.26 && t + block / sr < 0.29) strong = std::max (strong, out.peak (0));
+                        if (t > 0.61 && t + block / sr < 0.64) soft = std::max (soft, out.peak (0));
+                    }
+                    CHECK (std::abs (strong - 1.0f) < 0.02f);             // 127 -> nivel 1
+                    CHECK (std::abs (soft - 51.0f / 127.0f) < 0.01f);     // 51 -> 0,40 (el trigger en vivo daría 0,55)
+                    CHECK (ilane->control.peakL.load() > 0.9f);
+                    engine.setMidiSamplers (nullptr);
+                    engine.setInstruments (nullptr);   // aquí muere el plugin (hilo de mensajes)
+                    engine.pause();
+                    render (engine, out, 2);
+                }
+            }
+#endif
+
+            // setSong descarta las líneas de las pistas MIDI, como las del trigger en vivo
+            engine.setSamplers (liveSet);
+            engine.setMidiSamplers (midiSet);
+            engine.setSong (song);
+            CHECK (engine.getMidiSamplers() == nullptr && engine.getSamplers() == nullptr);
+            song->tracks[0]->muted = false;
+            song->tracks[1]->muted = false;
+        }
+
+        // Motor, casos finos: la fuerza con banco, el solo entre conjuntos, el relevo sin cortes y el golpe del inicio del loop
+        {
+            engine.setClick (false, 120.0, 0.0, 0.0f, 0);
+            song->tracks[0]->muted = true;
+            song->tracks[1]->muted = true;
+            // Banco de prueba: una capa por nivel (de suave a fuerte), `preRoll` ceros antes del ataque y después nivel constante
+            auto makeBank = [] (const std::vector<float>& levels, int preRoll, double seconds)
+            {
+                auto b = std::make_shared<SampleBankData>();
+                b->sampleRate = sr;
+                b->preRoll = preRoll;
+                for (float level : levels)
+                {
+                    SampleBankData::Hit h;
+                    h.buffer.setSize (2, preRoll + (int) (seconds * sr));
+                    h.buffer.clear();
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = preRoll; i < h.buffer.getNumSamples(); ++i)
+                            h.buffer.setSample (ch, i, level);
+                    h.peak = level;
+                    b->hits.push_back (std::move (h));
+                }
+                return b;
+            };
+            auto midiLane = [] (std::shared_ptr<SampleBankData> bank, std::vector<TriggerEvent> events, int track, int pad)
+            {
+                auto lane = std::make_unique<SamplerLane>();
+                lane->bank = std::move (bank);
+                lane->rawVelocity = true;
+                lane->midiTrack = track;
+                lane->midiPad = pad;
+                lane->events = std::move (events);
+                lane->control.gain = 1.0f;
+                return lane;
+            };
+            auto setOf = [] (std::unique_ptr<SamplerLane> lane)
+            {
+                auto set = std::make_shared<SamplerSet>();
+                set->lanes.push_back (std::move (lane));
+                return set;
+            };
+            auto at = [] (double seconds) { return (juce::int64) std::llround (seconds * sr); };
+            // Sigue sonando hasta `b` s y devuelve el pico del canal 0 de los bloques que caen enteros en [a, b)
+            auto peakUntil = [&engine, &out] (double a, double b)
+            {
+                float pk = 0.0f;
+                for (int guard = 0; guard < 2000 && engine.isPlaying(); ++guard)
+                {
+                    const double t0 = engine.getPositionSeconds();
+                    if (t0 + block / sr > b)
+                        break;
+                    render (engine, out, 1);
+                    if (t0 >= a)
+                        pk = std::max (pk, out.peak (0));
+                }
+                return pk;
+            };
+
+            // 1) Con banco, un golpe congelado suena como el trigger en vivo que reemplaza: fuerza 0 -> velocidad 32 ->
+            //    la capa más suave y ganancia 0,5 (no la capa del medio con +2 dB); 127 -> la capa fuerte y ganancia 1
+            {
+                auto layers = makeBank ({ 0.2f, 0.4f, 0.8f }, 0, 0.1);
+                auto live = std::make_unique<SamplerLane>();
+                live->bank = layers;
+                live->events = { { at (0.25), 0.0f } };
+                live->control.gain = 1.0f;
+                StemInfo st = stem ("Toms", "drums_toms.wav");
+                st.trigger.note = 47;
+                const auto frozen = miditrack::fromDetection ({ { at (0.45), 0.0f }, { at (0.65), 1.0f } }, sr, st);
+                CHECK (frozen.hits.size() == 2 && frozen.hits[0].velocity == 32 && frozen.hits[1].velocity == 127);
+                engine.setSamplers (setOf (std::move (live)));
+                engine.setMidiSamplers (setOf (midiLane (layers, miditrack::eventsForNote (frozen, 47, sr, {}), 0, 0)));
+                engine.seekSeconds (0.0);
+                engine.play();
+                peakUntil (0.0, 0.26);
+                const float livePeak = peakUntil (0.26, 0.34);
+                peakUntil (0.34, 0.46);
+                const float softPeak = peakUntil (0.46, 0.54);
+                peakUntil (0.54, 0.66);
+                const float strongPeak = peakUntil (0.66, 0.74);
+                CHECK (std::abs (livePeak - 0.1f) < 0.002f);         // capa suave (0,2) x ganancia 0,5
+                CHECK (std::abs (softPeak - livePeak) < 0.002f);     // la pista MIDI suena igual
+                CHECK (std::abs (strongPeak - 0.8f) < 0.01f);
+                if (std::abs (softPeak - livePeak) >= 0.002f)
+                    std::cout << "  trigger en vivo " << livePeak << ", pista MIDI " << softPeak << "\n";
+                engine.setSamplers (nullptr);
+                engine.setMidiSamplers (nullptr);
+                engine.pause();
+                render (engine, out, 2);
+            }
+
+            // 2) El solo cuenta entre las pistas y los dos conjuntos de líneas
+            {
+                auto longBank = makeBank ({ 0.5f }, 0, 1.0);
+                auto live = std::make_unique<SamplerLane>();
+                live->bank = longBank;
+                live->events = { { at (0.1), 1.0f } };
+                live->control.gain = 1.0f;
+                LoadedTrack* liveControl = &live->control;
+                auto pad = midiLane (longBank, { { at (0.1), 1.0f } }, 0, 0);
+                LoadedTrack* padControl = &pad->control;
+                engine.setSamplers (setOf (std::move (live)));
+                engine.setMidiSamplers (setOf (std::move (pad)));
+                song->tracks[0]->muted = false;
+                song->tracks[1]->muted = false;
+                engine.seekSeconds (0.0);
+                engine.play();
+                peakUntil (0.0, 0.2);
+                LoadedTrack* meters[4] = { song->tracks[0].get(), song->tracks[1].get(), liveControl, padControl };
+                auto takePeaks = [&] (float (&peaks)[4])
+                {
+                    peakUntil (0.0, engine.getPositionSeconds() + 0.03);   // rampas de ganancia
+                    for (auto* m : meters)
+                        m->peakL = 0.0f;
+                    peakUntil (0.0, engine.getPositionSeconds() + 0.08);
+                    for (int k = 0; k < 4; ++k)
+                        peaks[k] = meters[k]->peakL.exchange (0.0f);
+                };
+                float all[4], padSolo[4], stemSolo[4];
+                takePeaks (all);
+                padControl->solo = true;
+                takePeaks (padSolo);
+                padControl->solo = false;
+                song->tracks[0]->solo = true;
+                takePeaks (stemSolo);
+                song->tracks[0]->solo = false;
+                CHECK (all[0] > 0.05f && all[1] > 0.05f && all[2] > 0.4f && all[3] > 0.4f);
+                CHECK (padSolo[0] < 1.0e-4f && padSolo[1] < 1.0e-4f && padSolo[2] < 1.0e-4f && padSolo[3] > 0.4f);     // un pad en solo calla stems y triggers
+                CHECK (stemSolo[0] > 0.05f && stemSolo[1] < 1.0e-4f && stemSolo[2] < 1.0e-4f && stemSolo[3] < 1.0e-4f); // un stem en solo calla las filas MIDI
+                song->tracks[0]->muted = true;
+                song->tracks[1]->muted = true;
+                engine.setSamplers (nullptr);
+                engine.setMidiSamplers (nullptr);
+                engine.pause();
+                render (engine, out, 2);
+            }
+
+            // 3) Relevo: rehacer el conjunto de la pista MIDI (cada edición) con una voz sonando no la corta ni la repite
+            {
+                const int pre = (int) (0.002 * sr);
+                auto bankA = makeBank ({ 0.5f }, pre, 0.3);
+                auto bankB = makeBank ({ 0.3f }, pre, 0.3);
+                const std::vector<TriggerEvent> first = { { at (0.25), 1.0f }, { at (1.2), 1.0f } };
+                const std::vector<TriggerEvent> edited = { { at (0.25), 1.0f }, { at (0.7), 1.0f }, { at (1.2), 1.0f } };
+                engine.setMidiSamplers (setOf (midiLane (bankA, first, 0, 0)));
+                engine.seekSeconds (0.0);
+                engine.play();
+                peakUntil (0.0, 0.33);   // la voz del golpe de 0,25 s suena hasta 0,55 s
+                // Una edición (el mismo banco, un golpe nuevo en 0,7 s): la voz sigue igual, sin salto ni un segundo golpe
+                engine.setMidiSamplers (setOf (midiLane (bankA, edited, 0, 0)));
+                const float editJump = maxJump (engine, out, 8);
+                const float editLevel = out.peak (0);
+                CHECK (editJump < 0.01f && std::abs (editLevel - 0.5f) < 0.01f);
+                if (editJump >= 0.01f)
+                    std::cout << "  salto al rehacer el conjunto: " << editJump << "\n";
+                peakUntil (0.45, 0.71);
+                CHECK (std::abs (peakUntil (0.71, 0.9) - 0.5f) < 0.01f);   // el golpe agregado suena
+                // Otro sonido para la fila (otro banco) con la voz de 0,7 s sonando: esa voz termina desde el conjunto
+                // anterior, sin corte, y el golpe que ya sonó no se repite con el banco nuevo
+                engine.setMidiSamplers (setOf (midiLane (bankB, edited, 0, 0)));
+                const float soundJump = maxJump (engine, out, 6);
+                const float soundLevel = out.peak (0);
+                CHECK (soundJump < 0.01f && std::abs (soundLevel - 0.5f) < 0.01f);
+                peakUntil (0.97, 1.21);
+                CHECK (std::abs (peakUntil (1.21, 1.35) - 0.3f) < 0.01f);   // el golpe siguiente ya suena con el banco nuevo
+                // Dos cambios seguidos sin que el hilo de audio alcance a ver el primero: la voz sigue igual
+                engine.setMidiSamplers (setOf (midiLane (bankB, edited, 0, 0)));
+                engine.setMidiSamplers (setOf (midiLane (bankB, edited, 0, 0)));
+                const float twiceJump = maxJump (engine, out, 6);
+                const float twiceLevel = out.peak (0);
+                CHECK (twiceJump < 0.01f && std::abs (twiceLevel - 0.3f) < 0.01f);
+                auto current = engine.getMidiSamplers();
+                CHECK (current != nullptr && current->previous != nullptr && current->previous->previous == nullptr);   // un solo eslabón
+                engine.setMidiSamplers (nullptr);
+                CHECK (current->previous == nullptr);   // el relevo viejo se suelta al cambiar de conjunto (en la UI)
+                engine.pause();
+                render (engine, out, 2);
+            }
+
+            // 4) El golpe justo en el inicio del loop suena en cada vuelta y al saltar a él, con su ataque en el lugar;
+            //    el que está justo en el final no suena mientras el loop siga
+            {
+                const int pre = (int) (0.002 * sr);
+                auto bank = makeBank ({ 0.5f }, pre, 0.05);
+                const juce::int64 ls = at (1.0), le = at (1.5);
+                engine.setMidiSamplers (setOf (midiLane (bank, { { ls, 1.0f }, { le, 1.0f / 127.0f } }, 0, 0)));   // 0,5 y 0,25
+                engine.pause();
+                render (engine, out, 2);
+                engine.seekSeconds ((ls + 0.5) / sr);
+                engine.setLoop ((ls + 0.5) / sr, (le + 0.5) / sr);
+                engine.play();
+                render (engine, out, 1);   // salto al marcador (el golpe está justo ahí)
+                const float atJump = out.peak (0);
+                CHECK (std::abs (atJump - 0.5f) < 0.01f);
+                auto next = (juce::int64) std::llround (engine.getPositionSeconds() * sr);
+                int wraps = 0, exact = 0;
+                float beforeEnd = 0.0f;
+                for (int b = 0; b < 180; ++b)
+                {
+                    render (engine, out, 1);
+                    for (int k = 0; k < block; ++k)
+                    {
+                        const auto pos = next;
+                        const float v = out.data[0][(size_t) k];
+                        if (pos == ls)
+                        {
+                            ++wraps;
+                            exact += std::abs (v - 0.5f) < 0.01f ? 1 : 0;   // el ataque cae justo en el inicio del loop
+                        }
+                        if (pos >= le - 2 * pre)
+                            beforeEnd = std::max (beforeEnd, std::abs (v));
+                        if (++next >= le)
+                            next = ls;
+                    }
+                }
+                CHECK (wraps >= 3 && exact == wraps);
+                CHECK (beforeEnd < 1.0e-4f);
+                if (exact != wraps || beforeEnd >= 1.0e-4f)
+                    std::cout << "  vueltas " << wraps << ", con el golpe del inicio " << exact << ", antes del final " << beforeEnd << "\n";
+                CHECK (std::abs (engine.getPositionSeconds() * sr - (double) next) < 0.5);   // la simulación de la posición sigue al motor
+                engine.clearLoop();
+                engine.pause();
+                render (engine, out, 2);
+                engine.setMidiSamplers (nullptr);
+            }
+
+            // 5) "Escuchar": un golpe de una fila o de un trigger en vivo suena con el transporte detenido, por el canal de
+            //    su línea; una línea que no existe o está silenciada no suena, y el transporte sigue detenido
+            {
+                engine.pause();
+                render (engine, out, 2);
+                auto live = std::make_unique<SamplerLane>();
+                live->bank = makeBank ({ 0.3f }, 0, 0.1);
+                live->stemIndex = 3;
+                live->control.gain = 1.0f;
+                engine.setSamplers (setOf (std::move (live)));
+                auto pad = midiLane (makeBank ({ 0.5f }, 0, 0.1), {}, 2, 1);
+                LoadedTrack* padControl = &pad->control;
+                auto midiSet = setOf (midiLane (makeBank ({ 0.9f }, 0, 0.1), {}, 2, 0));
+                midiSet->lanes.push_back (std::move (pad));
+                engine.setMidiSamplers (midiSet);
+                render (engine, out, 1);
+                CHECK (out.peak (0) < 1.0e-6f);
+                engine.audition (-1, 2, 1, 127);
+                render (engine, out, 1);
+                const float rowPeak = out.peak (0), rowFirst = std::abs (out.data[0][0]);
+                CHECK (std::abs (rowPeak - 0.5f) < 0.002f && std::abs (rowFirst - 0.5f) < 0.002f);   // desde la primera muestra
+                CHECK (padControl->peakL.load() > 0.4f);
+                render (engine, out, 12);   // 0,1 s de muestra: ya terminó
+                CHECK (out.peak (0) < 1.0e-6f);
+                engine.audition (3, -1, -1, 127);   // el trigger en vivo del stem 3
+                render (engine, out, 1);
+                CHECK (std::abs (out.peak (0) - 0.3f) < 0.002f);
+                render (engine, out, 12);
+                engine.audition (-1, 5, 0, 127);    // no hay línea: nada
+                render (engine, out, 1);
+                CHECK (out.peak (0) < 1.0e-6f);
+                padControl->muted = true;
+                render (engine, out, 1);            // la rampa del mute
+                engine.audition (-1, 2, 1, 127);    // silenciada: nada
+                render (engine, out, 1);
+                CHECK (out.peak (0) < 1.0e-6f);
+                render (engine, out, 12);
+                padControl->muted = false;
+                render (engine, out, 1);
+                engine.audition (-1, 2, 1, 32);     // velocidad 32: fuerza 0 -> ganancia 0,5
+                render (engine, out, 1);
+                CHECK (std::abs (out.peak (0) - 0.25f) < 0.002f);
+                CHECK (! engine.isPlaying());
+                if (std::abs (rowPeak - 0.5f) >= 0.002f)
+                    std::cout << "  escuchar la fila: pico " << rowPeak << ", primera muestra " << rowFirst << "\n";
+                render (engine, out, 12);
+                // isSilent() espera a lo de "Escuchar" (cambiar de canción no lo corta); pause lo funde en un bloque
+                engine.audition (-1, 2, 1, 127);
+                render (engine, out, 1);
+                CHECK (! engine.isSilent());
+                engine.pause();
+                render (engine, out, 1);
+                CHECK (engine.isSilent());
+                CHECK (std::abs (out.data[0][0] - 0.5f) < 0.01f && std::abs (out.data[0][(size_t) block - 1]) < 0.01f);   // rampa, sin salto
+                render (engine, out, 1);
+                CHECK (out.peak (0) < 1.0e-6f);
+                engine.setSamplers (nullptr);
+                engine.setMidiSamplers (nullptr);
+
+                // Un trigger en vivo reemplazado por una pista MIDI (superseded) y una línea de una pista silenciada no disparan
+                {
+                    auto sup = std::make_unique<SamplerLane>();
+                    sup->bank = makeBank ({ 0.5f }, 0, 0.05);
+                    sup->events = { { at (0.2), 1.0f } };
+                    sup->control.gain = 1.0f;
+                    sup->superseded = true;
+                    auto sil = midiLane (makeBank ({ 0.5f }, 0, 0.05), { { at (0.2), 1.0f } }, 0, 0);
+                    sil->silenced = true;
+                    engine.setSamplers (setOf (std::move (sup)));
+                    engine.setMidiSamplers (setOf (std::move (sil)));
+                    engine.seekSeconds (0.0);
+                    engine.play();
+                    CHECK (peakUntil (0.0, 0.4) < 1.0e-6f);
+                    engine.pause();
+                    render (engine, out, 2);
+                    engine.setSamplers (nullptr);
+                    engine.setMidiSamplers (nullptr);
+                }
+
+#if defined (SECUENCIAS_TEST_SYNTH)
+                // Hacia un instrumento: la nota sale aunque esté detenido y su salida pasa por la compuerta de "Escuchar"
+                juce::VST3PluginFormat vst3;
+                juce::OwnedArray<juce::PluginDescription> found;
+                vst3.findAllTypesForFile (found, SECUENCIAS_TEST_SYNTH);
+                std::unique_ptr<juce::AudioPluginInstance> plugin;
+                juce::String error;
+                if (found.size() == 1)
+                    plugin = vst3.createInstanceFromDescription (*found[0], sr, block, error);
+                CHECK (plugin != nullptr);
+                if (plugin != nullptr)
+                {
+                    plugin->prepareToPlay (sr, AudioEngine::maxBlockSize);
+                    auto iset = std::make_shared<InstrumentSet>();
+                    auto ilane = std::make_shared<InstrumentLane>();
+                    ilane->id = 4;
+                    ilane->control.gain = 1.0f;
+                    ilane->latency = plugin->getLatencySamples();
+                    ilane->holdSamples = (int) (0.05 * sr);
+                    ilane->work.setSize (2, AudioEngine::maxBlockSize);
+                    ilane->midi.ensureSize (4096);
+                    ilane->plugin = std::move (plugin);
+                    iset->lanes.push_back (ilane);
+                    engine.setInstruments (iset);
+                    auto vlane = std::make_unique<SamplerLane>();
+                    vlane->instrumentId = 4;
+                    vlane->note = 71;
+                    vlane->rawVelocity = true;
+                    vlane->midiTrack = 0;
+                    vlane->midiPad = 0;
+                    engine.setMidiSamplers (setOf (std::move (vlane)));
+                    render (engine, out, 2);
+                    CHECK (out.peak (0) < 1.0e-6f);
+                    engine.audition (-1, 0, 0, 100);
+                    render (engine, out, 1);
+                    // La nota sale cuando la compuerta ya abrió (256 muestras, sin latencia): el ataque llega entero
+                    const int start = AudioEngine::fadeSamples - ilane->latency;
+                    CHECK (std::abs (out.data[0][(size_t) start - 1]) < 1.0e-6f && std::abs (out.data[0][(size_t) start] - 100.0f / 127.0f) < 0.01f);
+                    float level = out.peak (0);
+                    for (int b = 0; b < 3; ++b)
+                    {
+                        render (engine, out, 1);
+                        level = std::max (level, out.peak (0));
+                    }
+                    CHECK (std::abs (level - 100.0f / 127.0f) < 0.01f);   // el sintetizador de prueba suena a la velocidad
+                    CHECK (! engine.isPlaying());
+                    engine.setMidiSamplers (nullptr);
+                    engine.setInstruments (nullptr);
+                    render (engine, out, 2);
+                }
+#endif
+            }
+
+            song->tracks[0]->muted = false;
+            song->tracks[1]->muted = false;
+        }
     }
 
     engine.setSong (nullptr);

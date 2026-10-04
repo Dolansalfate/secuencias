@@ -202,6 +202,16 @@ namespace arrangement
             if (removed (info.notes[(size_t) i].seconds)) info.notes.erase (info.notes.begin() + i);
             else info.notes[(size_t) i].seconds = mapT (info.notes[(size_t) i].seconds);
         }
+        // Golpes de las pistas MIDI: van con el audio al cerrar o abrir un hueco
+        for (auto& mt : info.midiTracks)
+        {
+            for (int i = (int) mt.hits.size(); --i >= 0;)
+            {
+                if (removed (mt.hits[(size_t) i].seconds)) mt.hits.erase (mt.hits.begin() + i);
+                else mt.hits[(size_t) i].seconds = mapT (mt.hits[(size_t) i].seconds);
+            }
+            mt.sortHits();
+        }
         for (int i = (int) info.tempoRegions.size(); --i >= 1;)
         {
             if (removed (info.tempoRegions[(size_t) i].start)) info.tempoRegions.erase (info.tempoRegions.begin() + i);
@@ -234,6 +244,113 @@ namespace arrangement
             a.chords.push_back ({ c.start + at, c.end + at, c.name });
         std::stable_sort (a.beats.begin(), a.beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
         std::stable_sort (a.chords.begin(), a.chords.end(), [] (const Chord& x, const Chord& y) { return x.start < y.start; });
+    }
+
+    namespace
+    {
+        bool inRange (double t, double from, double to)
+        {
+            return t >= from - 1.0e-9 && t < to - 1.0e-9;
+        }
+    }
+
+    void moveMidiHits (SongInfo& info, double from, double to, double delta)
+    {
+        if (! std::isfinite (delta) || std::abs (delta) < 1.0e-12)
+            return;
+        for (auto& mt : info.midiTracks)
+        {
+            for (auto& h : mt.hits)
+                if (inRange (h.seconds, from, to))
+                    h.seconds = std::max (0.0, h.seconds + delta);
+            mt.sortHits();
+        }
+    }
+
+    void removeMidiHits (SongInfo& info, double from, double to)
+    {
+        for (auto& mt : info.midiTracks)
+            mt.hits.erase (std::remove_if (mt.hits.begin(), mt.hits.end(),
+                                           [from, to] (const MidiHit& h) { return inRange (h.seconds, from, to); }),
+                           mt.hits.end());
+    }
+
+    void midiHitsToSource (SongInfo& info, const std::vector<Clip>& clips)
+    {
+        if (clips.empty())
+            return;   // ya es el audio original
+        for (auto& mt : info.midiTracks)
+        {
+            for (int i = (int) mt.hits.size(); --i >= 0;)
+            {
+                auto& h = mt.hits[(size_t) i];
+                const int c = clipAt (clips, h.seconds);
+                if (c < 0)
+                    mt.hits.erase (mt.hits.begin() + i);   // sonaba en un hueco: en el original no hay nada ahí
+                else
+                    h.seconds = std::max (0.0, clips[(size_t) c].srcStart + (h.seconds - clips[(size_t) c].position));
+            }
+            mt.sortHits();
+            // Un tramo duplicado (o pegado) trae copias de los mismos golpes: en el original caen en el mismo lugar y
+            // sonarían dos veces. Se deja uno por nota a menos de 1 ms (el más fuerte)
+            std::vector<MidiHit> kept;
+            kept.reserve (mt.hits.size());
+            for (const auto& h : mt.hits)
+            {
+                bool merged = false;
+                for (auto k = kept.rbegin(); k != kept.rend() && h.seconds - k->seconds < 0.001; ++k)
+                    if (k->note == h.note)
+                    {
+                        k->velocity = std::max (k->velocity, h.velocity);
+                        merged = true;
+                        break;
+                    }
+                if (! merged)
+                    kept.push_back (h);
+            }
+            mt.hits = std::move (kept);
+        }
+    }
+
+    void copyMidiHits (const SongInfo& info, double from, double to, GridSlice& slice)
+    {
+        slice.midi.clear();
+        for (size_t m = 0; m < info.midiTracks.size(); ++m)
+        {
+            const auto& mt = info.midiTracks[m];
+            MidiSlice s;
+            s.track = (int) m;
+            s.name = mt.name;
+            s.sourceFile = mt.sourceFile;
+            for (auto& h : mt.hits)
+                if (inRange (h.seconds, from, to))
+                    s.hits.push_back ({ h.seconds - from, h.note, h.velocity });
+            if (! s.hits.empty())
+                slice.midi.push_back (std::move (s));
+        }
+    }
+
+    void pasteMidiHits (SongInfo& info, const GridSlice& slice, double at)
+    {
+        for (auto& s : slice.midi)
+        {
+            auto same = [&s] (const MidiTrack& mt) { return mt.name == s.name && mt.sourceFile == s.sourceFile; };
+            MidiTrack* dest = nullptr;
+            if (juce::isPositiveAndBelow (s.track, (int) info.midiTracks.size()) && same (info.midiTracks[(size_t) s.track]))
+                dest = &info.midiTracks[(size_t) s.track];
+            else
+                for (auto& mt : info.midiTracks)
+                    if (same (mt))
+                    {
+                        dest = &mt;
+                        break;
+                    }
+            if (dest == nullptr)
+                continue;   // esa pista MIDI ya no existe (u otra canción): sus golpes no tienen dónde ir
+            for (auto& h : s.hits)
+                dest->hits.push_back ({ std::max (0.0, h.seconds + at), h.note, h.velocity });
+            dest->sortHits();
+        }
     }
 
     double findOnset (const juce::AudioBuffer<float>& buffer, double sr, double around, double window, double* strengthDb)
