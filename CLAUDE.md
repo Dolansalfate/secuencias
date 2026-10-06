@@ -1019,7 +1019,10 @@ Pasos de `run()`:
   el `PATH` se separa con `;` en Windows y `ffmpeg` es `ffmpeg.exe` (`ffmpegInPath`).
 - **MSVC y las init-captures con `this`**: `[sp = SafePointer<MainComponent> (this)]` dentro de otra
   lambda que ya capturó `this` no compila en Visual Studio (toma `this` como el closure). Crea el
-  `SafePointer` en una variable local y captúrala por valor.
+  `SafePointer` en una variable local y captúrala por valor. Tampoco acepta que una lambda use una
+  constante local (`constexpr int bins = 200;`) sin capturarla, aunque GCC y Clang sí: decláralas
+  `static constexpr`. En la CI de Windows los pasos corren en bash (`defaults: run: shell: bash`)
+  para que un error de compilación corte el paso; en pwsh quedaba tapado por el último comando.
 - **Nombres globales que chocan con los SDK de macOS**: los headers de JUCE en Mac arrastran
   Carbon/CoreServices, que define `struct Marker` (AIFF.h), `Rect`, `Point`, `Comment`,
   `Fixed`, `Style`, `Cell`... Los tipos del modelo van con nombre propio (`SongMarker`,
