@@ -53,6 +53,11 @@ jobs:
   windows:
     name: Windows (tests e instalador)
     runs-on: windows-2022
+    # bash (con -e) corta el paso en el primer comando que falla; en pwsh un error de compilación quedaba
+    # tapado por el código de salida del último comando (ctest) y el fallo aparecía recién en el instalador
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Compilar y tests (Visual Studio 2022, x64)

@@ -4610,7 +4610,7 @@ void MainComponent::loadMixPeaks (const juce::String& fileName)
     {
         if (gen != mixGeneration.load() || abortJobs.load())
             return;
-        constexpr int bins = 200;
+        static constexpr int bins = 200;   // static: la lambda de abajo lo usa sin capturarlo (MSVC no acepta un constexpr local)
         double length = 0.0;
         std::vector<float> peaks;
         try { peaks = mix::computePeaks (file, formatManager, bins, length, [this, gen] { return gen != mixGeneration.load() || abortJobs.load(); }); }
