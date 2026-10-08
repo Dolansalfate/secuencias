@@ -2060,6 +2060,290 @@ int main()
         }
 
         {
+            std::cout << "  canción ligada: ids de tramo, pistas por fuente, pistas que suman el mix, huella y reubicación\n";
+            // Ids: los que faltan o se repiten reciben uno nuevo; los demás se conservan
+            MixProject ids;
+            ids.segments.resize (4);
+            ids.segments[0].id = 5;
+            ids.segments[1].id = 5;   // duplicado (copia del anterior)
+            ids.segments[2].id = 0;   // sin id
+            ids.segments[3].id = 2;
+            ids.ensureSegmentIds();
+            CHECK (ids.segments[0].id == 5 && ids.segments[1].id == 6 && ids.segments[2].id == 7 && ids.segments[3].id == 2);
+
+            auto pl = proj;   // fuentes A (120 BPM), B (100 BPM) y C; mix a 100 BPM
+            pl.levelLufs = 0.0;
+            MixSegment b2 = segB;
+            pl.segments = { segA, b2 };
+            pl.ensureSegmentIds();
+            CHECK (pl.segments[0].id > 0 && pl.segments[1].id > 0 && pl.segments[0].id != pl.segments[1].id);
+            CHECK (pl.usedSources() == std::vector<int> ({ 0, 1 }));
+            // Los ids se guardan en mix.json; uno de antes (sin ids) los recibe en orden al abrirlo
+            {
+                const auto idFolder = MixProject::create (mixRoot, "Ids");
+                MixProject a;
+                CHECK (MixProject::load (idFolder, a));
+                a.sources = pl.sources;
+                a.segments = pl.segments;
+                CHECK (a.save());
+                MixProject b;
+                CHECK (MixProject::load (idFolder, b) && b.segments.size() == 2 && b.segments[0].id == pl.segments[0].id
+                       && b.segments[1].id == pl.segments[1].id);
+            }
+
+            // Pistas de cada fuente: cada una en dos pistas que suman la fuente (25 % y 75 %)
+            auto makeStems = [&] (int source, const juce::AudioBuffer<float>& audio, double rate)
+            {
+                const auto result = tmp.getChildFile ("resultado-" + juce::String (source));
+                result.createDirectory();
+                juce::AudioBuffer<float> voice (audio), rest (audio);
+                voice.applyGain (0.25f);
+                rest.applyGain (0.75f);
+                writeWav (result.getChildFile ("voz.wav"), voice, rate);
+                writeWav (result.getChildFile ("resto.wav"), rest, rate);
+                return MixProject::storeStems (pl.folder, pl.sources[(size_t) source].fileName, result, "4|0|0|0");
+            };
+            CHECK (pl.cachedStems (0, "4|0|0|0").isEmpty());
+            CHECK (makeStems (0, bufA, 44100.0));
+            CHECK (makeStems (1, clickTrack (48000.0, 4.0, 1, beatTimes (anB.beats), 0.8f), 48000.0));
+            const auto cached = pl.cachedStems (0, "4|0|0|0");
+            CHECK (cached.size() == 2 && cached.contains ("voz.wav") && cached.contains ("resto.wav"));
+            CHECK (pl.cachedStems (0, "6|1|0|0").isEmpty());   // otra separación: hay que separar de nuevo
+
+            // Las pistas suman el mix: sin nivelar y con nivelado (misma ganancia y mismo limitador en cada pista),
+            // con un tramo estirado (A de 120 a 100 BPM) y otro sin estirar (B)
+            for (const double target : { 0.0, -14.0 })
+            {
+                pl.levelLufs = target;
+                juce::String err;
+                std::vector<MixLevel> mixLevels, stemLevels;
+                const auto whole = mix::render (pl, mix::renderSampleRate, formats, {}, {}, err, &mixLevels);
+                CHECK (err.isEmpty() && whole.getNumSamples() > 0);
+                juce::AudioBuffer<float> sum (2, whole.getNumSamples());
+                sum.clear();
+                int stemCount = 0;
+                const bool ok = mix::renderStems (pl, "4|0|0|0", cached, mix::renderSampleRate, formats, {}, {}, err,
+                                                  [&] (const juce::String&, const juce::AudioBuffer<float>& b)
+                                                  {
+                                                      ++stemCount;
+                                                      for (int ch = 0; ch < 2; ++ch)
+                                                          sum.addFrom (ch, 0, b, ch, 0, juce::jmin (b.getNumSamples(), sum.getNumSamples()));
+                                                      return true;
+                                                  }, &stemLevels);
+                CHECK (ok && err.isEmpty() && stemCount == 2);
+                float maxDiff = 0.0f;
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < whole.getNumSamples(); ++i)
+                        maxDiff = juce::jmax (maxDiff, std::abs (whole.getSample (ch, i) - sum.getSample (ch, i)));
+                CHECK (maxDiff < 2.0e-3f * juce::jmax (0.1f, whole.getMagnitude (0, whole.getNumSamples())));
+                if (maxDiff >= 2.0e-3f)
+                    std::cout << "  pistas contra mix (objetivo " << target << "): diferencia " << maxDiff << "\n";
+                CHECK (mixLevels.size() == stemLevels.size() && mixLevels.size() == 2);
+                if (mixLevels.size() == 2 && stemLevels.size() == 2)
+                    CHECK (std::abs (mixLevels[0].gainDb - stemLevels[0].gainDb) < 1.0e-9 && std::abs (mixLevels[1].limiterDb - stemLevels[1].limiterDb) < 1.0e-9);
+            }
+
+            // Huella: cambia con un tramo, el tempo o el nivelado; no con el nombre del mix
+            const auto sig = mix::renderSignature (pl);
+            auto renamed = pl;
+            renamed.name = "Otro nombre";
+            CHECK (mix::renderSignature (renamed) == sig);
+            auto shorter = pl;
+            shorter.segments[1].end = 2.7;
+            CHECK (mix::renderSignature (shorter) != sig);
+            auto quieter = pl;
+            quieter.levelLufs = -16.0;
+            CHECK (mix::renderSignature (quieter) != sig);
+
+            // Reubicación: el tramo B se acorta desde el inicio (empieza un tiempo después) y A se quita
+            const auto before = mix::pieces (pl);
+            CHECK (before.size() == 2 && before[0].id == pl.segments[0].id && approx (before[1].outStart, 2.4));
+            auto edited = pl;
+            edited.segments.erase (edited.segments.begin());   // sin A
+            edited.segments[0].start = 1.5;                     // B desde 1,5 s de su fuente
+            const auto after = mix::pieces (edited);
+            CHECK (after.size() == 1 && after[0].id == pl.segments[1].id && approx (after[0].outStart, 0.0));
+            double moved = -1.0;
+            CHECK (mix::remapTime (before, after, 2.4 + 1.2, moved) && approx (moved, 0.6));   // 2,1 s de B: 0,6 s después de su inicio nuevo
+            CHECK (! mix::remapTime (before, after, 2.4 + 0.1, moved));                        // 1,0 s de B: quedó fuera
+            CHECK (! mix::remapTime (before, after, 1.0, moved));                              // en A, que ya no está
+            CHECK (! mix::remapTime (before, after, 99.0, moved));
+
+            // La canción ligada recibe lo nuevo y lleva lo suyo con su tramo
+            SongInfo linked;
+            mix::describeSong (pl, linked);
+            CHECK (! linked.markers.empty() && linked.markers[0].fromMix);
+            linked.mixLink.folder = "Mix";
+            linked.mixLink.pieces = before;
+            SongMarker own;
+            own.name = "Coro";
+            own.seconds = 2.4 + 1.2;   // propio, dentro de B
+            own.lufs = -15.0;
+            linked.markers.push_back (own);
+            linked.sortMarkers();
+            linked.notes.push_back ({ 2.4 + 1.5, 0.0, "entra el bajo" });
+            linked.notes.push_back ({ 0.5, 0.0, "en A" });
+            MidiTrack mt;
+            mt.hits = { { 0.3, 36, 100 }, { 2.4 + 1.2, 38, 90 } };
+            linked.midiTracks.push_back (mt);
+            linked.clips.push_back (Clip { 0.0, 1.0, 0.0 });
+            linked.loudnessLufs = -14.0;
+            SongInfo generated;
+            mix::describeSong (edited, generated);
+            mix::applyRebuild (linked, generated, before, after);
+            CHECK (linked.clips.empty() && linked.loudnessLufs <= unmeasuredDb + 1.0);
+            int own2 = 0, fromMix = 0;
+            for (auto& m : linked.markers)
+            {
+                own2 += m.fromMix ? 0 : 1;
+                fromMix += m.fromMix ? 1 : 0;
+                if (! m.fromMix)
+                    CHECK (m.name == "Coro" && approx (m.seconds, 0.6) && m.lufs <= unmeasuredDb + 1.0);
+            }
+            CHECK (own2 == 1 && fromMix == (int) generated.markers.size());
+            CHECK (linked.notes.size() == 1 && approx (linked.notes[0].seconds, 0.9) && linked.notes[0].text == "entra el bajo");
+            CHECK (linked.midiTracks[0].hits.size() == 1 && approx (linked.midiTracks[0].hits[0].seconds, 0.6) && linked.midiTracks[0].hits[0].note == 38);
+            CHECK (linked.mixLink.pieces.size() == 1 && linked.mixLink.pieces[0].id == after[0].id);
+            CHECK (linked.analysis.beats.size() == generated.analysis.beats.size());
+
+            // linked.json guarda el enlace y qué marcadores son del mix
+            Library linkLib (tmp.getChildFile ("lib-ligada"));
+            const auto songDir = tmp.getChildFile ("lib-ligada").getChildFile ("Ligada");
+            songDir.createDirectory();
+            writeWav (songDir.getChildFile ("voz.wav"), bufA, 44100.0);
+            linked.folder = songDir;
+            linked.name = "Ligada";
+            linked.stems.clear();
+            StemInfo st;
+            st.name = "Voz";
+            st.fileName = "voz.wav";
+            linked.stems.push_back (st);
+            linked.mixLink.signature = "abc";
+            linked.mixLink.separated = true;
+            linked.mixLink.options = "4|0|0|0";
+            CHECK (linkLib.saveSong (linked));
+            linkLib.load();
+            CHECK (linkLib.songs.size() == 1);
+            if (linkLib.songs.size() == 1)
+            {
+                const auto& back = linkLib.songs[0];
+                CHECK (back.mixLink.folder == "Mix" && back.mixLink.signature == "abc" && back.mixLink.separated
+                       && back.mixLink.options == "4|0|0|0" && back.mixLink.pieces.size() == 1
+                       && back.mixLink.pieces[0].id == after[0].id && approx (back.mixLink.pieces[0].srcStart, after[0].srcStart));
+                int backFromMix = 0;
+                for (auto& m : back.markers)
+                    backFromMix += m.fromMix ? 1 : 0;
+                CHECK (backFromMix == fromMix);
+            }
+
+            // Un id quitado no se reutiliza (se guarda el próximo): un tramo nuevo no hereda lo de otro
+            {
+                MixProject seq;
+                seq.segments.resize (3);
+                seq.ensureSegmentIds();
+                CHECK (seq.segments[2].id == 3 && seq.nextSegmentId == 4);
+                seq.segments.pop_back();   // se quita el tramo 3
+                seq.segments.push_back (MixSegment());
+                seq.ensureSegmentIds();
+                CHECK (seq.segments[2].id == 4);
+            }
+            // Otro tramo con el mismo id pero de otra fuente no recibe lo de este
+            {
+                auto other = after;
+                other[0].source = "otra-cancion.wav";
+                double t2 = 0.0;
+                CHECK (! mix::remapTime (before, other, 2.4 + 1.2, t2));
+                CHECK (mix::remapTime (after, before, 0.6, t2) && approx (t2, 2.4 + 1.2));   // y al revés (de la nueva a la vieja)
+            }
+            // Una actualización conserva el tempo y el tono de reproducción de cada sección (por su tramo), y un marcador del
+            // mix renombrado a mano (ya propio) queda en vez del que se rehace
+            {
+                // B a su propio tempo (90): dos secciones de tempo
+                auto pt = pl;
+                pt.segments[1].playBpm = 90.0;
+                auto ptEdited = pt;
+                ptEdited.segments.erase (ptEdited.segments.begin());
+                ptEdited.segments[0].start = 1.5;
+                const auto ptBefore = mix::pieces (pt), ptAfter = mix::pieces (ptEdited);
+                SongInfo tempoSong;
+                mix::describeSong (pt, tempoSong);
+                tempoSong.mixLink.pieces = ptBefore;
+                CHECK (tempoSong.tempoRegions.size() == 2);
+                if (tempoSong.tempoRegions.size() == 2)
+                {
+                    tempoSong.tempoRegions[1].playBpm = 80.0;   // la sección de B suena a 80 y un tono más arriba
+                    tempoSong.tempoRegions[1].transpose = 2;
+                }
+                for (auto& m : tempoSong.markers)
+                    if (m.seconds > 1.0)
+                    {
+                        m.name = "Coro final";
+                        m.fromMix = false;
+                    }
+                SongInfo regenerated;
+                mix::describeSong (ptEdited, regenerated);   // B sola, desde 1,5 s
+                mix::applyRebuild (tempoSong, regenerated, ptBefore, ptAfter);
+                CHECK (tempoSong.tempoRegions.size() == 1 && approx (tempoSong.tempoRegions[0].playBpm, 80.0)
+                       && tempoSong.tempoRegions[0].transpose == 2);
+                // "Coro final" (en el inicio de B) ya no cae dentro de B (ahora empieza 0,6 s más adelante en su fuente), así
+                // que se quita; el marcador de B se rehace en 0
+                bool renamedKept = false;
+                int atZero = 0;
+                for (auto& m : tempoSong.markers)
+                {
+                    renamedKept = renamedKept || m.name == "Coro final";
+                    atZero += std::abs (m.seconds) < 0.01 ? 1 : 0;
+                }
+                CHECK (! renamedKept && atZero == 1);
+                // Con el mismo arreglo (nada movido), el renombrado queda y no se duplica con el del mix
+                SongInfo same;
+                mix::describeSong (pl, same);
+                same.mixLink.pieces = before;
+                for (auto& m : same.markers)
+                    if (m.seconds > 1.0)
+                    {
+                        m.name = "Coro final";
+                        m.fromMix = false;
+                    }
+                SongInfo again;
+                mix::describeSong (pl, again);
+                mix::applyRebuild (same, again, before, before);
+                int named = 0, total = 0;
+                for (auto& m : same.markers)
+                {
+                    named += m.name == "Coro final" ? 1 : 0;
+                    total += std::abs (m.seconds - 2.4) < 0.05 ? 1 : 0;
+                }
+                CHECK (named == 1 && total == 1);
+            }
+            // Pistas por archivo (con su extensión) y por opciones: "Intro.mp3" e "Intro.wav" no comparten, y dos separaciones
+            // distintas de la misma fuente conviven
+            CHECK (MixProject::stemsFolderFor (pl.folder, "Intro.mp3", "4|0|0|0") != MixProject::stemsFolderFor (pl.folder, "Intro.wav", "4|0|0|0"));
+            {
+                const auto result6 = tmp.getChildFile ("resultado-6");
+                result6.createDirectory();
+                writeWav (result6.getChildFile ("guitar.wav"), bufA, 44100.0);
+                CHECK (MixProject::storeStems (pl.folder, pl.sources[0].fileName, result6, "6|1|0|0"));
+                CHECK (pl.cachedStems (0, "6|1|0|0").size() == 1 && pl.cachedStems (0, "4|0|0|0").size() == 2);
+            }
+
+            // Quitar una fuente borra sus pistas separadas (en un mix aparte: las fuentes de `proj` siguen en uso)
+            {
+                MixProject single;
+                CHECK (MixProject::load (MixProject::create (mixRoot, "Quitar fuente"), single));
+                CHECK (single.addSource (fileA, formats) == 0);
+                const auto result = tmp.getChildFile ("resultado-quitar");
+                result.createDirectory();
+                writeWav (result.getChildFile ("voz.wav"), bufA, 44100.0);
+                CHECK (MixProject::storeStems (single.folder, single.sources[0].fileName, result, "4|0|0|0"));
+                const auto stemsDir = single.stemsFolder (0, "4|0|0|0").getParentDirectory();   // todas sus separaciones
+                CHECK (stemsDir.isDirectory() && single.cachedStems (0, "4|0|0|0").size() == 1);
+                single.removeSource (0);
+                CHECK (! stemsDir.exists());
+            }
+        }
+
+        {
             // Fundido cruzado hacia un tramo ESTIRADO: primero la fuente de nivel constante (sin estirar)
             // y después A (120 BPM) a 100 BPM con 1,5 tiempos de fundido (0,9 s). En [J - F, J] ya suena
             // el audio de A que precede a su inicio (con el seno) sobre el anterior que se apaga (coseno)

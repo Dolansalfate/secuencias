@@ -17,6 +17,7 @@ struct SongMarker   // "Marker" a secas choca con AIFF.h de macOS (CoreServices)
     // Nivelado por pista del tramo: una entrada por stem (índice en `stems`), en dB sobre el audio
     std::vector<double> stemGainsDb;
     std::vector<double> stemLufs;
+    bool fromMix = false;   // lo puso el mix (uno por tramo): al actualizar la canción desde su mix se rehace
 };
 
 // Sección con tempo propio: detectada a partir de los tiempos del análisis (cada cambio de
@@ -161,6 +162,31 @@ struct Analysis
     void shortBar (int index, int beatsInBar, int meterAfter, int toExclusive);
 };
 
+// Un tramo de un mix tal como quedó en la canción armada con él (mix::pieces): de dónde a dónde suena en la
+// canción, qué parte de su fuente es y con qué estirado. Sirve para llevar marcadores, notas y golpes MIDI al
+// lugar nuevo de su tramo cuando el mix cambia.
+struct MixPiece
+{
+    int id = 0;                                   // MixSegment::id
+    double outStart = 0.0, outEnd = 0.0;          // segundos de la canción
+    double srcStart = 0.0, srcEnd = 0.0;          // segundos de la fuente
+    double ratio = 1.0;                           // duración en la canción / duración en la fuente
+    juce::String source;                          // archivo de la fuente en el mix (otro tramo con el mismo id no vale)
+};
+
+// Canción ligada al mix con que se armó: sus pistas salen de las pistas separadas de cada canción original del
+// mix (o de la mezcla, sin separar), y cuando el mix cambia se vuelven a armar al cargarla
+struct MixLink
+{
+    juce::String folder;            // carpeta del mix dentro de _mixes; vacío = no ligada
+    juce::String signature;         // versión del mix con que se armó (mix::renderSignature)
+    bool separated = false;         // pistas separadas con IA (si no, una sola con la mezcla)
+    juce::String options;           // separación usada ("pistas|calidad|roformer|batería en partes")
+    std::vector<MixPiece> pieces;   // dónde quedó cada tramo
+
+    bool isLinked() const { return folder.isNotEmpty(); }
+};
+
 struct SongInfo
 {
     juce::String name;
@@ -191,6 +217,7 @@ struct SongInfo
     std::vector<MidiTrack> midiTracks;       // pistas MIDI (golpes congelados y editables)
     std::vector<SongMarker> markers;  // siempre ordenados por tiempo
     std::vector<StemInfo> stems;
+    MixLink mixLink;                  // canción armada con un mix y ligada a él
 
     void sortMarkers();
     void sortNotes();
@@ -260,6 +287,8 @@ public:
 
     // Formatos que la app puede decodificar en esta plataforma (m4a solo en macOS).
     static bool isAudioFile (const juce::File&);
+    // Nombre visible de una pista a partir de su archivo ("vocals" -> "Voces", "drums_kick" -> "Bombo")
+    static juce::String stemDisplayName (const juce::String& fileNameWithoutExtension);
     static juce::String audioFilePatterns();     // "*.wav;*.flac;..." para los selectores de archivos
     static juce::String audioFormatsDescription();   // "wav, aiff, flac, ..." para mensajes
     static juce::Array<juce::File> audioFilesIn (const juce::File& folder);

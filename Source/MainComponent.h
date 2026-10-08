@@ -18,6 +18,7 @@
 #include "MixEditor.h"
 #include "MidiTracks.h"
 #include <map>
+#include <set>
 
 class MarkerButton;
 
@@ -253,7 +254,42 @@ private:
     void createSongFromMix();
     void startMixSong (bool separate, const juce::String& name);
     void applyMixSongInfo (int songIndex, const SongInfo& meta);
-    void clearPendingMixSong();
+    // Canción ligada a un mix: se separan (una vez) las canciones originales que falten, en cola, y después se arman
+    // sus pistas con los tramos del mix (mix::renderStems). Al cargar una canción ligada cuyo mix cambió, sus pistas
+    // se vuelven a armar (sin separar de nuevo) y lo suyo se reubica por tramo (mix::applyRebuild).
+    void continueMixSongJob();
+    void mixSongJobFailed();
+    SeparationOptions effectiveOptions (SeparationOptions) const;
+    struct MixSongBuild
+    {
+        juce::File mixFolder;
+        juce::File songFolder;          // canción a actualizar; vacío = crear una nueva
+        juce::String name;              // nombre de la canción nueva
+        bool separated = true;
+        juce::String options;           // separationKey
+    };
+    void buildMixSong (const MixSongBuild&);
+    struct MixSongResult
+    {
+        MixSongBuild build;
+        bool ok = false;
+        juce::String error;
+        SongInfo meta;                  // describeSong de la versión armada
+        std::vector<MixPiece> pieces;
+        juce::String signature;
+        juce::File tempFolder;          // las pistas armadas (se mueven a la canción)
+        bool missingStems = false;      // a una canción del mix le faltan sus pistas (se separa en la próxima carga)
+    };
+    void mixSongBuilt (const MixSongResult&);
+    void applyMixUpdate (const MixSongResult&, bool reloadIfCurrent);
+    int songIndexForFolder (const juce::File&) const;
+    bool linkedSongNeedsRebuild (int index);   // true: hay que volver a armarla antes de cargarla (ver loadSongAt)
+    void openLinkedMix (int index);
+    void unlinkSong (int index);
+    bool linkedSongMenu (const SongInfo&);    // menú de tramos en una canción ligada; true si lo mostró
+    static juce::String separationKey (const SeparationOptions&);
+    static SeparationOptions optionsFromKey (const juce::String&);
+    bool startSeparationWith (const juce::File& file, const juce::String& songName, const SeparationOptions&);
     void updateMixTimer();
     void mixCaptureStep();
     struct MixSnapshot
@@ -376,9 +412,21 @@ private:
     juce::File mixReturnFolder;                    // canción que estaba cargada al abrir el mix (por carpeta: el setlist puede cambiar)
     std::vector<MixSnapshot> mixUndo;
     MixSnapshot mixLastSnapshot;
-    std::unique_ptr<SongInfo> pendingMixSong;      // tiempos, secciones y marcadores para la canción que sale de la separación
-    juce::String pendingMixSongName;
-    juce::File pendingMixInput;                    // copia temporal del render que se está separando
+    // Fuentes de un mix que se separan en cola para una canción ligada (crearla o actualizarla)
+    struct MixSongJob
+    {
+        bool active = false;
+        MixSongBuild build;
+        SeparationOptions options;
+        juce::StringArray pending;                 // archivos de fuentes/ por separar
+        juce::String current;                      // el que se está separando
+        int total = 0;
+        juce::String signature;                    // actualizando: la versión del mix (si falla, no se reintenta sola)
+    } mixSongJob;
+    int mixSongBuilds = 0;                         // pistas de canciones ligadas armándose (mixSongPool)
+    std::set<juce::String> mixSongBuildingFolders; // canciones que se están actualizando (no se encola otra igual)
+    std::unique_ptr<MixSongResult> pendingMixUpdate;   // actualización lista para la canción que suena (al detenerla)
+    std::set<juce::String> failedMixRebuilds;      // carpeta|huella que no se pudo armar (no se reintenta en bucle)
     struct MixCapture
     {
         bool active = false, autoSegments = false, segmentsDone = false, createStarted = false, selectionDone = true;
@@ -449,6 +497,7 @@ private:
     juce::ThreadPool loaderPool { 1 };   // último: se destruye primero
     juce::ThreadPool levelPool { 1 };    // mediciones de sonoridad (no bloquean la carga de canciones)
     juce::ThreadPool mixPool { 1 };      // mix: copias de fuentes, formas de onda y lecturas para analizar (no demoran la escucha)
+    juce::ThreadPool mixSongPool { 1 };  // pistas de canciones ligadas a un mix (no demoran la carga de otras canciones)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

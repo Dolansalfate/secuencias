@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace
 {
@@ -68,6 +69,7 @@ namespace
         o->setProperty ("transpose", s.transpose);
         o->setProperty ("gainDb", (double) s.gainDb);
         o->setProperty ("fadeBeats", s.fadeBeats);
+        o->setProperty ("id", s.id);
         return juce::var (o);
     }
 
@@ -151,6 +153,7 @@ bool MixProject::save() const
     obj->setProperty ("bpm", bpm);
     obj->setProperty ("keepTempos", keepTempos);
     obj->setProperty ("levelLufs", levelLufs);
+    obj->setProperty ("nextSegmentId", nextSegmentId);
     juce::Array<juce::var> srcs, segs;
     for (auto& s : sources)
         srcs.add (toVar (s));
@@ -178,6 +181,7 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
     p.bpm = clampBpm (finiteIn ((double) v.getProperty ("bpm", 0.0), 0.0, 400.0, 0.0));
     p.keepTempos = (bool) v.getProperty ("keepTempos", false);
     p.levelLufs = finiteIn ((double) v.getProperty ("levelLufs", 0.0), -30.0, 0.0, 0.0);
+    p.nextSegmentId = (int) finiteIn ((double) v.getProperty ("nextSegmentId", 1), 1.0, 1.0e9, 1.0);
     if (p.levelLufs > -6.0)
         p.levelLufs = 0.0;   // fuera de lo razonable (o 0): sin nivelar
 
@@ -234,11 +238,91 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
             s.transpose = (int) std::lround (finiteIn ((double) sv.getProperty ("transpose", 0), -12.0, 12.0, 0.0));
             s.gainDb = (float) finiteIn ((double) sv.getProperty ("gainDb", 0.0), -24.0, 12.0, 0.0);
             s.fadeBeats = finiteIn ((double) sv.getProperty ("fadeBeats", 0.0), 0.0, 16.0, 0.0);
+            s.id = (int) finiteIn ((double) sv.getProperty ("id", 0), 0.0, 1.0e9, 0.0);
             p.segments.push_back (s);
         }
+    p.ensureSegmentIds();   // mix.json de antes (sin ids): en orden, siempre los mismos
 
     out = std::move (p);
     return true;
+}
+
+void MixProject::ensureSegmentIds()
+{
+    for (auto& s : segments)
+        nextSegmentId = juce::jmax (nextSegmentId, s.id + 1);
+    std::set<int> seen;
+    for (auto& s : segments)
+    {
+        if (s.id <= 0 || seen.count (s.id) > 0)
+            s.id = nextSegmentId++;
+        seen.insert (s.id);
+    }
+}
+
+std::vector<int> MixProject::usedSources() const
+{
+    std::vector<int> used;
+    for (auto& s : segments)
+        if (s.source >= 0 && s.source < (int) sources.size() && std::find (used.begin(), used.end(), s.source) == used.end())
+            used.push_back (s.source);
+    return used;
+}
+
+juce::File MixProject::stemsFolderFor (const juce::File& mixFolder, const juce::String& sourceFileName, const juce::String& optionsKey)
+{
+    auto base = juce::File::createLegalFileName (sourceFileName);
+    if (base.isEmpty() || base == "." || base == "..")
+        base = "fuente";
+    auto options = juce::File::createLegalFileName (optionsKey.replaceCharacter ('|', '-'));
+    if (options.isEmpty() || options == "." || options == "..")
+        options = "pistas";
+    return mixFolder.getChildFile ("pistas").getChildFile (base).getChildFile (options);
+}
+
+juce::File MixProject::stemsFolder (int source, const juce::String& optionsKey) const
+{
+    if (source < 0 || source >= (int) sources.size())
+        return {};
+    return stemsFolderFor (folder, sources[(size_t) source].fileName, optionsKey);
+}
+
+juce::StringArray MixProject::cachedStems (int source, const juce::String& optionsKey) const
+{
+    const auto dir = stemsFolder (source, optionsKey);
+    const auto info = juce::JSON::parse (dir.getChildFile ("pistas.json").loadFileAsString());
+    juce::StringArray files;
+    if (! info.isObject() || info.getProperty ("options", "").toString() != optionsKey)
+        return {};
+    if (auto* arr = info.getProperty ("files", juce::var()).getArray())
+        for (auto& f : *arr)
+        {
+            const auto stemFile = juce::File::createLegalFileName (f.toString());
+            if (stemFile.isEmpty() || ! dir.getChildFile (stemFile).existsAsFile())
+                return {};   // falta un archivo: hay que separar de nuevo
+            files.add (stemFile);
+        }
+    return files;
+}
+
+bool MixProject::storeStems (const juce::File& mixFolder, const juce::String& sourceFileName, const juce::File& resultFolder,
+                             const juce::String& optionsKey)
+{
+    const auto dir = stemsFolderFor (mixFolder, sourceFileName, optionsKey);
+    dir.deleteRecursively();
+    if (! dir.createDirectory().wasOk())
+        return false;
+    juce::Array<juce::var> files;
+    for (const auto& f : resultFolder.findChildFiles (juce::File::findFiles, false))
+        if (Library::isAudioFile (f) && f.moveFileTo (dir.getChildFile (f.getFileName())))
+            files.add (f.getFileName());
+    if (files.isEmpty())
+        return false;
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("options", optionsKey);
+    o->setProperty ("source", sourceFileName);
+    o->setProperty ("files", files);
+    return dir.getChildFile ("pistas.json").replaceWithText (juce::JSON::toString (juce::var (o)));
 }
 
 juce::StringArray MixProject::list (const juce::File& mixesRoot)
@@ -333,10 +417,12 @@ void MixProject::removeSource (int index)
     for (auto& s : segments)
         if (s.source > index)
             --s.source;
-    // El archivo se borra solo si ninguna otra fuente lo usa
+    // El archivo (y sus pistas separadas) se borra solo si ninguna otra fuente lo usa
     const bool shared = std::any_of (sources.begin(), sources.end(), [&fileName] (const MixSource& s) { return s.fileName == fileName; });
     if (! shared && file.existsAsFile() && file.isAChildOf (sourcesFolder()))
         file.deleteFile();
+    if (const auto stems = stemsFolderFor (folder, fileName, {}).getParentDirectory(); ! shared && stems.isDirectory() && stems.isAChildOf (folder))
+        stems.deleteRecursively();   // todas sus separaciones
 }
 
 //==============================================================================
@@ -549,6 +635,7 @@ namespace mix
             SongMarker m;
             m.name = seg.label.trim().isNotEmpty() ? seg.label.trim() : src.name;
             m.seconds = p.outStart;
+            m.fromMix = true;
             markers.push_back (m);
         }
 
@@ -733,86 +820,99 @@ namespace mix
         return out;
     }
 
-    juce::AudioBuffer<float> render (const MixProject& project, double sampleRate, juce::AudioFormatManager& formats,
-                                     const std::function<bool()>& shouldAbort,
-                                     const std::function<void (float)>& progress, juce::String& error,
-                                     std::vector<MixLevel>* levels)
+    namespace
     {
-        error.clear();
-        const auto places = layout (project);
-        if (levels != nullptr)
-            levels->assign (places.size(), MixLevel());
-        const double totalSeconds = places.empty() ? 0.0 : places.back().outEnd;
-        if (! (totalSeconds > 0.0) || ! (sampleRate > 0.0))
+        // Lo que comparten el render del mix y el de sus pistas: dónde cae cada tramo que suena y cómo entra y sale
+        struct SegmentPlan
         {
-            error = "El mix no tiene tramos.";
-            return {};
-        }
-        if (! (totalSeconds <= maxSeconds) || ! (std::ceil (totalSeconds * sampleRate) <= (double) std::numeric_limits<int>::max()))
-        {
-            error = tr ("El mix dura más de 4 horas.");
-            return {};
-        }
-        const int totalSamples = (int) std::ceil (totalSeconds * sampleRate);
+            int index = -1;                       // en project.segments
+            MixPlacement place;
+            bool crossfade = false, squareIn = false, squareOut = false;
+            double pre = 0.0, fadeOut = 0.0;      // audio previo del fundido de entrada; fundido de salida
+            int m0 = 0, m1 = 0;                   // muestras del mix que ocupa
+        };
 
-        // Uniones que continúan el mismo audio de la fuente: fundido de ganancias que suman 1
-        std::vector<bool> coherentIn (places.size(), false), coherentOut (places.size(), false);
+        struct RenderPlan
         {
-            int previous = -1;
-            for (size_t i = 0; i < places.size(); ++i)
+            std::vector<SegmentPlan> segments;    // solo los que suenan, en orden
+            int totalSamples = 0;
+            int count = 0;                        // tramos del proyecto (progreso y `levels`)
+        };
+
+        bool makePlan (const MixProject& project, double sampleRate, RenderPlan& plan, juce::String& error)
+        {
+            plan = RenderPlan();
+            const auto places = layout (project);
+            plan.count = (int) places.size();
+            const double totalSeconds = places.empty() ? 0.0 : places.back().outEnd;
+            if (! (totalSeconds > 0.0) || ! (sampleRate > 0.0))
             {
-                if (places[i].outEnd <= places[i].outStart)
+                error = "El mix no tiene tramos.";
+                return false;
+            }
+            if (! (totalSeconds <= maxSeconds) || ! (std::ceil (totalSeconds * sampleRate) <= (double) std::numeric_limits<int>::max()))
+            {
+                error = tr ("El mix dura más de 4 horas.");
+                return false;
+            }
+            plan.totalSamples = (int) std::ceil (totalSeconds * sampleRate);
+
+            // Uniones que continúan el mismo audio de la fuente: fundido de ganancias que suman 1
+            std::vector<bool> coherentIn (places.size(), false), coherentOut (places.size(), false);
+            {
+                int previous = -1;
+                for (size_t i = 0; i < places.size(); ++i)
+                {
+                    if (places[i].outEnd <= places[i].outStart)
+                        continue;
+                    if (previous >= 0
+                        && isCoherentJoin (project.segments[(size_t) previous], places[(size_t) previous], project.segments[i], places[i]))
+                        coherentIn[i] = coherentOut[(size_t) previous] = true;
+                    previous = (int) i;
+                }
+            }
+
+            // Entrada: con fundido cruzado (seno sobre el audio que precede al inicio) o, en el primer tramo o sin
+            // audio previo suficiente, 2 ms lineales desde la unión. Salida: coseno. En una unión que continúa el
+            // mismo audio de la fuente, seno² y coseno² (suman 1: sin subida).
+            bool first = true;
+            for (int i = 0; i < plan.count; ++i)
+            {
+                const auto& p = places[(size_t) i];
+                if (p.outEnd <= p.outStart)
                     continue;
-                if (previous >= 0
-                    && isCoherentJoin (project.segments[(size_t) previous], places[(size_t) previous], project.segments[i], places[i]))
-                    coherentIn[i] = coherentOut[(size_t) previous] = true;
-                previous = (int) i;
+                const bool isFirst = first;
+                first = false;
+                SegmentPlan sp;
+                sp.index = i;
+                sp.place = p;
+                sp.crossfade = ! isFirst && p.fadeIn >= edgeFadeSeconds;
+                sp.pre = sp.crossfade ? p.fadeIn : 0.0;
+                const double duration = p.outEnd - p.outStart;
+                sp.fadeOut = juce::jmin (juce::jmax (p.fadeOut, edgeFadeSeconds), duration);
+                sp.m0 = juce::jlimit (0, plan.totalSamples, (int) std::floor ((p.outStart - sp.pre) * sampleRate));
+                sp.m1 = juce::jlimit (sp.m0, plan.totalSamples, (int) std::ceil (p.outEnd * sampleRate));
+                if (sp.m1 <= sp.m0)
+                    continue;
+                sp.squareIn = coherentIn[(size_t) i];
+                sp.squareOut = coherentOut[(size_t) i];
+                plan.segments.push_back (sp);
             }
+            return true;
         }
-        juce::AudioBuffer<float> result (2, totalSamples);
-        result.clear();
 
-        const int count = (int) places.size();
-        bool first = true;
-        for (int i = 0; i < count; ++i)
+        // El tramo leído de `file` (su fuente o una de sus pistas), estirado y transpuesto si hace falta, alineado con
+        // el mix: aligned[j] es la muestra m0 + j (ceros donde el archivo no tiene audio). false si no se pudo leer
+        // (con `error`) o se abortó (sin error).
+        bool readLayer (const MixProject& project, const SegmentPlan& sp, const juce::File& file, const juce::String& what,
+                        double sampleRate, juce::AudioFormatManager& formats, const std::function<bool()>& shouldAbort,
+                        juce::AudioBuffer<float>& aligned, juce::String& error)
         {
-            if (shouldAbort && shouldAbort())
-                return {};
-            const auto& p = places[(size_t) i];
-            const auto& seg = project.segments[(size_t) i];
-            auto report = [&] { if (progress) progress ((float) (i + 1) / (float) count); };
-            if (p.outEnd <= p.outStart)
-            {
-                report();
-                continue;
-            }
-            const bool isFirst = first;
-            first = false;
-            const auto& src = project.sources[(size_t) seg.source];
-            const auto file = project.sourceFile (seg.source);
-            if (! file.existsAsFile())
-            {
-                error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
-                return {};
-            }
-
-            // Entrada: con fundido cruzado (seno sobre el audio que precede al inicio) o, en el primer
-            // tramo o sin audio previo suficiente, 2 ms lineales desde la unión. Salida: coseno. En una
-            // unión que continúa el mismo audio de la fuente, seno² y coseno² (suman 1: sin subida).
-            const bool crossfade = ! isFirst && p.fadeIn >= edgeFadeSeconds;
-            const double pre = crossfade ? p.fadeIn : 0.0;
-            const double duration = p.outEnd - p.outStart;
-            const double fadeOut = juce::jmin (juce::jmax (p.fadeOut, edgeFadeSeconds), duration);
-            const int m0 = juce::jlimit (0, totalSamples, (int) std::floor ((p.outStart - pre) * sampleRate));
-            const int m1 = juce::jlimit (m0, totalSamples, (int) std::ceil (p.outEnd * sampleRate));
-            if (m1 <= m0)
-            {
-                report();
-                continue;
-            }
-
-            // audio[offset + (m - m0)] es la muestra m del mix, que corresponde al instante
-            // srcStart + (m / sampleRate - outStart) / ratio de la fuente
+            const auto& p = sp.place;
+            const auto& seg = project.segments[(size_t) sp.index];
+            const int m0 = sp.m0, m1 = sp.m1;
+            // audio[offset + j] es la muestra m0 + j del mix, que corresponde al instante
+            // srcStart + ((m0 + j) / sampleRate - outStart) / ratio de la fuente
             juce::AudioBuffer<float> audio;
             juce::int64 offset = 0;
             const bool stretch = std::abs (p.ratio - 1.0) > 1.0e-6 || seg.transpose != 0;
@@ -821,20 +921,20 @@ namespace mix
                 const double from = p.srcStart + ((double) m0 / sampleRate - p.outStart);
                 if (! readRange (file, from, from + (double) (m1 - m0) / sampleRate, sampleRate, formats, audio))
                 {
-                    error = tr ("No se pudo leer la fuente «") + src.name + tr ("»");
-                    return {};
+                    error = tr ("No se pudo leer «") + what + tr ("»");
+                    return false;
                 }
             }
             else
             {
-                // Lo que usa el tramo más contexto, empezando en una muestra exacta; el instante x del
-                // recorte cae en x · ratio de lo estirado
-                const double from = std::floor ((p.srcStart - pre / p.ratio - stretchContext) * sampleRate) / sampleRate;
+                // Lo que usa el tramo más contexto, empezando en una muestra exacta; el instante x del recorte cae en
+                // x · ratio de lo estirado
+                const double from = std::floor ((p.srcStart - sp.pre / p.ratio - stretchContext) * sampleRate) / sampleRate;
                 juce::AudioBuffer<float> clip;
                 if (! readRange (file, from, p.srcEnd + stretchContext, sampleRate, formats, clip))
                 {
-                    error = tr ("No se pudo leer la fuente «") + src.name + tr ("»");
-                    return {};
+                    error = tr ("No se pudo leer «") + what + tr ("»");
+                    return false;
                 }
                 SongInfo tmp;
                 TempoRegion region;
@@ -846,120 +946,405 @@ namespace mix
                 const auto map = TimeMap::build (tmp, (double) clip.getNumSamples() / sampleRate);
                 audio = stretcher::renderBuffer (clip, map, sampleRate, shouldAbort);
                 if (audio.getNumSamples() == 0)
-                    return {};   // abortado
+                    return false;   // abortado
                 offset = std::llround (((p.srcStart - from) * p.ratio + (double) m0 / sampleRate - p.outStart) * sampleRate);
             }
-
+            aligned.setSize (2, m1 - m0);
+            aligned.clear();
             const int channels = audio.getNumChannels();
             if (channels <= 0)
-            {
-                report();
-                continue;
-            }
-            const float userDb = juce::jlimit (-24.0f, 12.0f, seg.gainDb);
-            float gain = juce::Decibels::decibelsToGain (userDb);
-            std::vector<float> limiter;   // con nivelado: ganancia del limitador por muestra del mix desde m0
-            if (project.levelLufs < 0.0)
-            {
-                // El tramo alineado con el mix (ceros donde la fuente no tiene audio) y su cuerpo, desde la unión: lo
-                // que se mide (sin el audio previo del fundido de entrada)
-                juce::AudioBuffer<float> aligned (2, m1 - m0);
-                aligned.clear();
-                const float* srcL = audio.getReadPointer (0);
-                const float* srcR = audio.getReadPointer (juce::jmin (1, channels - 1));
-                for (int m = m0; m < m1; ++m)
-                {
-                    const juce::int64 k = offset + (m - m0);
-                    if (k >= 0 && k < (juce::int64) audio.getNumSamples())
-                    {
-                        aligned.setSample (0, m - m0, srcL[k]);
-                        aligned.setSample (1, m - m0, srcR[k]);
-                    }
-                }
-                const int b0 = juce::jlimit (0, m1 - m0, (int) std::ceil (p.outStart * sampleRate) - m0);
-                auto bodyLufs = [&] (const std::vector<float>* lim, float g)
-                {
-                    juce::AudioBuffer<float> body (2, juce::jmax (1, m1 - m0 - b0));
-                    body.clear();
-                    for (int ch = 0; ch < 2; ++ch)
-                        for (int j = b0; j < m1 - m0; ++j)
-                            body.setSample (ch, j - b0, aligned.getSample (ch, j) * g * (lim != nullptr ? (*lim)[(size_t) j] : 1.0f));
-                    return loudness::measure (body, sampleRate, {}, false).whole.lufs;
-                };
-                const double measured = bodyLufs (nullptr, 1.0f);
-                if (measured > loudness::unknown + 1.0)
-                {
-                    // Ganancia hasta el objetivo (tope ±12 dB); el limitador corta solo los picos que pasarían de -1 dB
-                    // y, como eso baja algo la sonoridad, se vuelve a medir y a corregir (hasta tres pasadas)
-                    const double target = project.levelLufs;
-                    const int lookahead = juce::jmax (1, (int) std::lround (limiterLookahead * sampleRate));
-                    const int release = juce::jmax (1, (int) std::lround (limiterRelease * sampleRate));
-                    const float ceiling = juce::Decibels::decibelsToGain ((float) limiterCeilingDb);
-                    double levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, target - measured);
-                    double after = measured + levelDb, reduction = 0.0;
-                    for (int pass = 0;; ++pass)
-                    {
-                        // El limitador siempre es el de la ganancia final (cada corrección vuelve a pasar por aquí)
-                        const float total = juce::Decibels::decibelsToGain ((float) levelDb + userDb);
-                        reduction = loudness::limiterGains (aligned, total, ceiling, lookahead, release, limiter);
-                        if (reduction > -0.01)
-                        {
-                            limiter.clear();   // no hizo falta
-                            after = measured + levelDb;
-                            break;
-                        }
-                        after = bodyLufs (&limiter, total) - userDb;
-                        const double missing = target - after;
-                        if (pass == 2 || std::abs (missing) < 0.15 || levelDb >= maxLevelDb - 1.0e-6)
-                            break;
-                        levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, levelDb + missing);
-                    }
-                    gain = juce::Decibels::decibelsToGain ((float) levelDb + userDb);
-                    if (levels != nullptr)
-                    {
-                        auto& lv = (*levels)[(size_t) i];
-                        lv.gainDb = levelDb;
-                        lv.lufs = after;
-                        lv.limiterDb = reduction;
-                        lv.belowTarget = after < target - 0.5;
-                    }
-                }
-            }
-            const bool squareIn = coherentIn[(size_t) i], squareOut = coherentOut[(size_t) i];
+                return true;
             const float* inL = audio.getReadPointer (0);
             const float* inR = audio.getReadPointer (juce::jmin (1, channels - 1));
-            float* outL = result.getWritePointer (0);
-            float* outR = result.getWritePointer (1);
             const juce::int64 available = audio.getNumSamples();
-            const double fadeOutStart = p.outEnd - fadeOut;
-            for (int m = m0; m < m1; ++m)
+            float* outL = aligned.getWritePointer (0);
+            float* outR = aligned.getWritePointer (1);
+            for (int j = 0; j < m1 - m0; ++j)
             {
-                const juce::int64 k = offset + (m - m0);
-                if (k < 0 || k >= available)
-                    continue;
+                const juce::int64 k = offset + j;
+                if (k >= 0 && k < available)
+                {
+                    outL[j] = inL[k];
+                    outR[j] = inR[k];
+                }
+            }
+            return true;
+        }
+
+        // Ganancia del tramo (la propia y, con nivelado, la que lo lleva al objetivo) y, si hizo falta, el limitador
+        // por muestra desde m0 en `limiter`. `aligned` es su fuente original (ver render).
+        float levelSegment (const MixProject& project, const SegmentPlan& sp, const juce::AudioBuffer<float>& aligned,
+                            double sampleRate, std::vector<float>& limiter, MixLevel* level)
+        {
+            const auto& seg = project.segments[(size_t) sp.index];
+            const float userDb = juce::jlimit (-24.0f, 12.0f, seg.gainDb);
+            limiter.clear();
+            if (! (project.levelLufs < 0.0))
+                return juce::Decibels::decibelsToGain (userDb);
+            // Su cuerpo, desde la unión: lo que se mide (sin el audio previo del fundido de entrada)
+            const int length = sp.m1 - sp.m0;
+            const int b0 = juce::jlimit (0, length, (int) std::ceil (sp.place.outStart * sampleRate) - sp.m0);
+            auto bodyLufs = [&] (const std::vector<float>* lim, float g)
+            {
+                juce::AudioBuffer<float> body (2, juce::jmax (1, length - b0));
+                body.clear();
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int j = b0; j < length; ++j)
+                        body.setSample (ch, j - b0, aligned.getSample (ch, j) * g * (lim != nullptr ? (*lim)[(size_t) j] : 1.0f));
+                return loudness::measure (body, sampleRate, {}, false).whole.lufs;
+            };
+            const double measured = bodyLufs (nullptr, 1.0f);
+            if (! (measured > loudness::unknown + 1.0))
+                return juce::Decibels::decibelsToGain (userDb);
+            // Ganancia hasta el objetivo (tope ±12 dB); el limitador corta solo los picos que pasarían del techo y,
+            // como eso baja algo la sonoridad, se vuelve a medir y a corregir (hasta tres pasadas)
+            const double target = project.levelLufs;
+            const int lookahead = juce::jmax (1, (int) std::lround (limiterLookahead * sampleRate));
+            const int release = juce::jmax (1, (int) std::lround (limiterRelease * sampleRate));
+            const float ceiling = juce::Decibels::decibelsToGain ((float) limiterCeilingDb);
+            double levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, target - measured);
+            double after = measured + levelDb, reduction = 0.0;
+            for (int pass = 0;; ++pass)
+            {
+                // El limitador siempre es el de la ganancia final (cada corrección vuelve a pasar por aquí)
+                const float total = juce::Decibels::decibelsToGain ((float) levelDb + userDb);
+                reduction = loudness::limiterGains (aligned, total, ceiling, lookahead, release, limiter);
+                if (reduction > -0.01)
+                {
+                    limiter.clear();   // no hizo falta
+                    after = measured + levelDb;
+                    break;
+                }
+                after = bodyLufs (&limiter, total) - userDb;
+                const double missing = target - after;
+                if (pass == 2 || std::abs (missing) < 0.15 || levelDb >= maxLevelDb - 1.0e-6)
+                    break;
+                levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, levelDb + missing);
+            }
+            if (level != nullptr)
+            {
+                level->gainDb = levelDb;
+                level->lufs = after;
+                level->limiterDb = reduction;
+                level->belowTarget = after < target - 0.5;
+            }
+            return juce::Decibels::decibelsToGain ((float) levelDb + userDb);
+        }
+
+        // Suma el tramo en `out` con sus fundidos, su ganancia y el limitador
+        void addSegment (juce::AudioBuffer<float>& out, const SegmentPlan& sp, const juce::AudioBuffer<float>& aligned, float gain,
+                         const std::vector<float>& limiter, double sampleRate)
+        {
+            const auto& p = sp.place;
+            const double fadeOutStart = p.outEnd - sp.fadeOut;
+            const float* inL = aligned.getReadPointer (0);
+            const float* inR = aligned.getReadPointer (1);
+            float* outL = out.getWritePointer (0);
+            float* outR = out.getWritePointer (1);
+            for (int m = sp.m0; m < sp.m1; ++m)
+            {
+                const int j = m - sp.m0;
                 const double t = (double) m / sampleRate;
                 double g;
-                if (! crossfade)
+                if (! sp.crossfade)
                     g = juce::jlimit (0.0, 1.0, (t - p.outStart) / edgeFadeSeconds);
                 else if (t >= p.outStart)
                     g = 1.0;
                 else
                 {
-                    g = std::sin (halfPi * juce::jlimit (0.0, 1.0, (t - (p.outStart - pre)) / pre));
-                    if (squareIn)
+                    g = std::sin (halfPi * juce::jlimit (0.0, 1.0, (t - (p.outStart - sp.pre)) / sp.pre));
+                    if (sp.squareIn)
                         g *= g;
                 }
                 if (t > fadeOutStart)
                 {
-                    const double c = std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - fadeOutStart) / fadeOut));
-                    g *= squareOut ? c * c : c;
+                    const double c = std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - fadeOutStart) / sp.fadeOut));
+                    g *= sp.squareOut ? c * c : c;
                 }
-                const float v = gain * (float) g * (limiter.empty() ? 1.0f : limiter[(size_t) (m - m0)]);
-                outL[m] += inL[k] * v;
-                outR[m] += inR[k] * v;
+                const float v = gain * (float) g * (limiter.empty() ? 1.0f : limiter[(size_t) j]);
+                outL[m] += inL[j] * v;
+                outR[m] += inR[j] * v;
             }
+        }
+    }
+
+    juce::AudioBuffer<float> render (const MixProject& project, double sampleRate, juce::AudioFormatManager& formats,
+                                     const std::function<bool()>& shouldAbort,
+                                     const std::function<void (float)>& progress, juce::String& error,
+                                     std::vector<MixLevel>* levels)
+    {
+        error.clear();
+        RenderPlan plan;
+        const bool planned = makePlan (project, sampleRate, plan, error);
+        if (levels != nullptr)
+            levels->assign ((size_t) plan.count, MixLevel());
+        if (! planned)
+            return {};
+        juce::AudioBuffer<float> result (2, plan.totalSamples);
+        result.clear();
+        size_t next = 0;
+        for (int i = 0; i < plan.count; ++i)
+        {
+            if (shouldAbort && shouldAbort())
+                return {};
+            auto report = [&] { if (progress) progress ((float) (i + 1) / (float) plan.count); };
+            if (next >= plan.segments.size() || plan.segments[next].index != i)
+            {
+                report();   // no suena
+                continue;
+            }
+            const auto& sp = plan.segments[next++];
+            const auto& src = project.sources[(size_t) project.segments[(size_t) i].source];
+            const auto file = project.sourceFile (project.segments[(size_t) i].source);
+            if (! file.existsAsFile())
+            {
+                error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
+                return {};
+            }
+            juce::AudioBuffer<float> aligned;
+            if (! readLayer (project, sp, file, src.name, sampleRate, formats, shouldAbort, aligned, error))
+                return {};
+            std::vector<float> limiter;
+            const float gain = levelSegment (project, sp, aligned, sampleRate, limiter, levels != nullptr ? &(*levels)[(size_t) i] : nullptr);
+            addSegment (result, sp, aligned, gain, limiter, sampleRate);
             report();
         }
         return result;
+    }
+
+    bool renderStems (const MixProject& project, const juce::String& optionsKey, const juce::StringArray& stemFiles, double sampleRate,
+                      juce::AudioFormatManager& formats,
+                      const std::function<bool()>& shouldAbort, const std::function<void (float)>& progress, juce::String& error,
+                      const std::function<bool (const juce::String&, const juce::AudioBuffer<float>&)>& onStem,
+                      std::vector<MixLevel>* levels)
+    {
+        error.clear();
+        RenderPlan plan;
+        const bool planned = makePlan (project, sampleRate, plan, error);
+        if (levels != nullptr)
+            levels->assign ((size_t) plan.count, MixLevel());
+        if (! planned)
+            return false;
+        const int steps = juce::jmax (1, (int) plan.segments.size() * (1 + stemFiles.size()));
+        int done = 0;
+        auto report = [&] { ++done; if (progress) progress ((float) done / (float) steps); };
+
+        // 1) La ganancia de cada tramo (con nivelado, medida en su fuente original, que es la suma de sus pistas): la
+        //    misma ganancia y el mismo limitador van después a cada pista, así las pistas siguen sumando el mix
+        std::vector<float> gains (plan.segments.size(), 1.0f);
+        std::vector<std::vector<float>> limiters (plan.segments.size());
+        for (size_t s = 0; s < plan.segments.size(); ++s)
+        {
+            if (shouldAbort && shouldAbort())
+                return false;
+            const auto& sp = plan.segments[s];
+            const auto& seg = project.segments[(size_t) sp.index];
+            if (project.levelLufs < 0.0)
+            {
+                const auto& src = project.sources[(size_t) seg.source];
+                const auto file = project.sourceFile (seg.source);
+                if (! file.existsAsFile())
+                {
+                    error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
+                    return false;
+                }
+                juce::AudioBuffer<float> aligned;
+                if (! readLayer (project, sp, file, src.name, sampleRate, formats, shouldAbort, aligned, error))
+                    return false;
+                gains[s] = levelSegment (project, sp, aligned, sampleRate, limiters[s], levels != nullptr ? &(*levels)[(size_t) sp.index] : nullptr);
+            }
+            else
+                gains[s] = juce::Decibels::decibelsToGain (juce::jlimit (-24.0f, 12.0f, seg.gainDb));
+            report();
+        }
+
+        // 2) Cada pista: el mix armado con esa pista de cada fuente (una fuente que no la tenga, en silencio)
+        for (auto& stem : stemFiles)
+        {
+            juce::AudioBuffer<float> out (2, plan.totalSamples);
+            out.clear();
+            for (size_t s = 0; s < plan.segments.size(); ++s)
+            {
+                if (shouldAbort && shouldAbort())
+                    return false;
+                const auto& sp = plan.segments[s];
+                const auto file = project.stemsFolder (project.segments[(size_t) sp.index].source, optionsKey).getChildFile (stem);
+                if (file.existsAsFile())
+                {
+                    juce::AudioBuffer<float> aligned;
+                    if (! readLayer (project, sp, file, stem, sampleRate, formats, shouldAbort, aligned, error))
+                        return false;
+                    addSegment (out, sp, aligned, gains[s], limiters[s], sampleRate);
+                }
+                report();
+            }
+            if (! onStem (stem, out))
+            {
+                if (error.isEmpty())
+                    error = tr ("No se pudo guardar la pista «") + stem + tr ("»");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::vector<MixPiece> pieces (const MixProject& project)
+    {
+        std::vector<MixPiece> out;
+        const auto places = layout (project);
+        for (size_t i = 0; i < places.size(); ++i)
+        {
+            const auto& p = places[i];
+            if (p.outEnd <= p.outStart)
+                continue;
+            MixPiece piece;
+            piece.id = project.segments[i].id;
+            piece.outStart = p.outStart;
+            piece.outEnd = p.outEnd;
+            piece.srcStart = p.srcStart;
+            piece.srcEnd = p.srcEnd;
+            piece.ratio = p.ratio > 0.0 ? p.ratio : 1.0;
+            const int source = project.segments[i].source;
+            if (source >= 0 && source < (int) project.sources.size())
+                piece.source = project.sources[(size_t) source].fileName;
+            out.push_back (piece);
+        }
+        return out;
+    }
+
+    juce::String renderSignature (const MixProject& project)
+    {
+        // Todo lo que cambia el audio o lo que trae la canción (tiempos, acordes, marcadores); no el nombre del mix
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("bpm", project.bpm);
+        o->setProperty ("keepTempos", project.keepTempos);
+        o->setProperty ("levelLufs", project.levelLufs);
+        juce::Array<juce::var> segs;
+        for (auto& seg : project.segments)
+        {
+            auto v = toVar (seg);
+            if (auto* so = v.getDynamicObject(); so != nullptr && seg.source >= 0 && seg.source < (int) project.sources.size())
+            {
+                const auto& src = project.sources[(size_t) seg.source];
+                so->setProperty ("file", src.fileName);
+                so->setProperty ("name", src.name);
+                so->setProperty ("length", src.length);
+            }
+            segs.add (v);
+        }
+        o->setProperty ("segments", segs);
+        juce::Array<juce::var> analyses;
+        for (int i : project.usedSources())
+            analyses.add (Library::analysisToVar (project.sources[(size_t) i].analysis));
+        o->setProperty ("analyses", analyses);
+        return juce::String::toHexString ((juce::int64) juce::JSON::toString (juce::var (o), true).hashCode64());
+    }
+
+    bool remapTime (const std::vector<MixPiece>& from, const std::vector<MixPiece>& to, double seconds, double& out)
+    {
+        const MixPiece* old = nullptr;
+        for (auto& p : from)
+            if (p.outEnd > p.outStart && seconds >= p.outStart - 1.0e-6 && seconds < p.outEnd)
+            {
+                old = &p;
+                break;
+            }
+        if (old == nullptr && ! from.empty() && std::abs (seconds - from.back().outEnd) < 1.0e-6)
+            old = &from.back();   // justo en el final
+        if (old == nullptr)
+            return false;
+        const double src = old->srcStart + (seconds - old->outStart) / old->ratio;
+        for (auto& p : to)
+            if (p.id == old->id && (p.source.isEmpty() || old->source.isEmpty() || p.source == old->source))
+            {
+                if (src < p.srcStart - 0.01 || src > p.srcEnd + 0.01)
+                    return false;   // ese pedazo del tramo ya no está en el mix
+                out = juce::jlimit (p.outStart, p.outEnd, p.outStart + (src - p.srcStart) * p.ratio);
+                return true;
+            }
+        return false;   // el tramo se quitó
+    }
+
+    void applyRebuild (SongInfo& song, const SongInfo& generated, const std::vector<MixPiece>& from, const std::vector<MixPiece>& to)
+    {
+        // Cada sección nueva conserva el tempo y el tono de reproducción que tenía la vieja de su tramo (se busca con el
+        // mismo instante de la fuente, llevado hacia atrás)
+        auto regions = generated.tempoRegions;
+        for (auto& r : regions)
+            if (double old = 0.0; remapTime (to, from, r.start + 0.01, old))
+                if (const int k = song.tempoRegionAt (old); k >= 0)
+                {
+                    r.playBpm = song.tempoRegions[(size_t) k].playBpm;
+                    r.transpose = song.tempoRegions[(size_t) k].transpose;
+                }
+        song.analysis = generated.analysis;
+        song.tempoRegions = regions;
+        song.bpm = generated.bpm;
+        song.clickOffset = generated.clickOffset;
+        song.clips.clear();
+
+        // Marcadores: los del mix se rehacen; los propios van con su tramo
+        std::vector<SongMarker> markers;
+        for (auto& m : song.markers)
+            if (double t = 0.0; ! m.fromMix && remapTime (from, to, m.seconds, t))
+            {
+                auto moved = m;
+                moved.seconds = t;
+                markers.push_back (moved);
+            }
+        for (auto m : generated.markers)
+        {
+            // Donde ya hay un marcador propio (por ejemplo, el de un tramo renombrado a mano), queda el propio
+            const bool taken = std::any_of (markers.begin(), markers.end(), [&m] (const SongMarker& own)
+                                            { return ! own.fromMix && std::abs (own.seconds - m.seconds) < 0.05; });
+            if (taken)
+                continue;
+            m.fromMix = true;
+            markers.push_back (m);
+        }
+        for (auto& m : markers)
+        {
+            m.gainDb = 0.0;
+            m.lufs = m.truePeakDb = unmeasuredDb;
+            m.stemGainsDb.clear();
+            m.stemLufs.clear();
+        }
+        song.markers = std::move (markers);
+        song.sortMarkers();
+
+        // Notas y golpes MIDI van con su tramo (los de un pedazo que ya no está se quitan)
+        std::vector<SongNote> notes;
+        for (auto& n : song.notes)
+            if (double t = 0.0; remapTime (from, to, n.seconds, t))
+            {
+                auto moved = n;
+                moved.seconds = t;
+                notes.push_back (moved);
+            }
+        song.notes = std::move (notes);
+        song.sortNotes();
+        for (auto& mt : song.midiTracks)
+        {
+            std::vector<MidiHit> hits;
+            for (auto& h : mt.hits)
+                if (double t = 0.0; remapTime (from, to, h.seconds, t))
+                {
+                    auto moved = h;
+                    moved.seconds = t;
+                    hits.push_back (moved);
+                }
+            mt.hits = std::move (hits);
+            mt.sortHits();
+        }
+
+        // El audio cambió: el nivelado se vuelve a medir
+        song.loudnessLufs = song.truePeakDb = unmeasuredDb;
+        song.headGainDb = 0.0;
+        song.headLufs = song.headTruePeakDb = unmeasuredDb;
+        song.headStemGainsDb.clear();
+        song.headStemLufs.clear();
+        song.stemSongLufs.clear();
+        song.fitStemArrays();
+        song.mixLink.pieces = to;
     }
 }

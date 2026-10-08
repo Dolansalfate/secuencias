@@ -35,6 +35,7 @@ struct MixSegment
     int transpose = 0;          // semitonos (-12..12)
     float gainDb = 0.0f;        // -24..12
     double fadeBeats = 0.0;     // fundido cruzado con el tramo anterior, en tiempos del mix (0 = corte de 10 ms)
+    int id = 0;                 // estable dentro del mix (ensureSegmentIds): una canción ligada reubica lo suyo por tramo
 };
 
 struct MixProject
@@ -49,6 +50,7 @@ struct MixProject
     static constexpr double defaultLevelLufs = -14.0;
     std::vector<MixSource> sources;
     std::vector<MixSegment> segments;   // en el orden en que suenan
+    int nextSegmentId = 1;              // el próximo id de tramo: nunca baja (un id quitado no se vuelve a usar)
 
     juce::File sourcesFolder() const { return folder.getChildFile ("fuentes"); }
     juce::File sourceFile (int index) const;           // fuentes/<fileName>, o File() si el índice no existe
@@ -75,8 +77,24 @@ struct MixProject
     // Copia el archivo a fuentes/ (sin pisar otro con el mismo nombre), lee su largo y agrega la fuente
     // sin analizar. Devuelve su índice, o -1 si no es audio legible o no se pudo copiar.
     int addSource (const juce::File& audioFile, juce::AudioFormatManager&);
-    // Quita la fuente y sus tramos, reindexa los tramos de las demás y borra su archivo de fuentes/
+    // Quita la fuente y sus tramos, reindexa los tramos de las demás y borra su archivo de fuentes/ (y sus pistas)
     void removeSource (int index);
+
+    // Ids de tramo: los que falten o se repitan (un tramo duplicado copia el id del original) reciben uno nuevo, de
+    // nextSegmentId (que se guarda: un id de un tramo quitado no se reutiliza)
+    void ensureSegmentIds();
+    std::vector<int> usedSources() const;   // fuentes con algún tramo, en orden de aparición
+
+    // Pistas separadas de cada canción original (para las canciones ligadas al mix): <mix>/pistas/<archivo>/<opciones>/,
+    // con los wav y pistas.json ({ "options", "source", "files" }). Una carpeta por archivo (con su extensión: dos
+    // fuentes no comparten pistas) y por opciones de separación (dos canciones del mismo mix pueden usar otras).
+    juce::File stemsFolder (int source, const juce::String& optionsKey) const;
+    static juce::File stemsFolderFor (const juce::File& mixFolder, const juce::String& sourceFileName, const juce::String& optionsKey);
+    // Archivos de pistas de esa fuente si están separados con esas opciones (todos presentes); vacío si no
+    juce::StringArray cachedStems (int source, const juce::String& optionsKey) const;
+    // Mueve los wav de una separación (`resultFolder`) a las pistas de la fuente con esas opciones (reemplaza las que hubiera)
+    static bool storeStems (const juce::File& mixFolder, const juce::String& sourceFileName, const juce::File& resultFolder,
+                            const juce::String& optionsKey);
 };
 
 // Nivelado de un tramo en el último render (mix::render, uno por tramo, mismo orden)
@@ -191,4 +209,31 @@ namespace mix
                                      const std::function<bool()>& shouldAbort,
                                      const std::function<void (float)>& progress, juce::String& error,
                                      std::vector<MixLevel>* levels = nullptr);
+
+    // Las pistas del mix (canción ligada): por cada archivo de pista (`stemFiles`, los nombres en las pistas de
+    // cada fuente), el mix armado igual que render pero con esa pista de cada fuente (en silencio si una fuente no
+    // la tiene); con nivelado, la ganancia y el limitador de cada tramo salen de su fuente original y se aplican
+    // igual a todas sus pistas, así la suma de las pistas es el mix. `onStem` recibe cada pista terminada (false =
+    // no se pudo guardar). false si falló (con `error`) o se abortó.
+    bool renderStems (const MixProject&, const juce::String& optionsKey, const juce::StringArray& stemFiles, double sampleRate,
+                      juce::AudioFormatManager&,
+                      const std::function<bool()>& shouldAbort, const std::function<void (float)>& progress, juce::String& error,
+                      const std::function<bool (const juce::String& stemFile, const juce::AudioBuffer<float>&)>& onStem,
+                      std::vector<MixLevel>* levels = nullptr);
+
+    // Dónde queda cada tramo que suena (para la canción ligada; ver MixPiece)
+    std::vector<MixPiece> pieces (const MixProject&);
+    // Huella de todo lo que cambia la canción armada con el mix (tramos, tempos, nivelado, análisis de las fuentes
+    // usadas, nombres de tramos); no el nombre del mix. Si cambia, la canción ligada se vuelve a armar.
+    juce::String renderSignature (const MixProject&);
+    // Un instante de la canción armada con `from` en la armada con `to`: mismo tramo (por id y con la misma fuente) y
+    // mismo instante de su fuente. false si ese tramo se quitó o ese pedazo ya no está dentro de él. Es simétrica:
+    // con from y to cambiados lleva de la versión nueva a la vieja.
+    bool remapTime (const std::vector<MixPiece>& from, const std::vector<MixPiece>& to, double seconds, double& out);
+    // Pone en una canción ligada lo que trae la versión nueva del mix (`generated`, de describeSong): tiempos,
+    // acordes, secciones de tempo (con el tempo y el tono de reproducción que tenía cada una, buscada por su tramo),
+    // bpm, inicio del click y los marcadores de los tramos (salvo donde ya hay uno propio); lleva los marcadores
+    // propios, las notas y los golpes MIDI al lugar nuevo de su tramo (quita los que quedan fuera); quita los cortes
+    // del arreglo y deja el nivelado sin medir (el audio cambió). La mezcla de las pistas no se toca.
+    void applyRebuild (SongInfo& song, const SongInfo& generated, const std::vector<MixPiece>& from, const std::vector<MixPiece>& to);
 }

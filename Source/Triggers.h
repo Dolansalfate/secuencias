@@ -54,5 +54,5 @@ namespace triggers
                                                      double thresholdDb = -35.0, double minMs = 80.0);
 
     // Escribe un buffer como WAV de 24 bits
-    bool writeWav (const juce::AudioBuffer<float>&, double sampleRate, const juce::File&);
+    bool writeWav (const juce::AudioBuffer<float>&, double sampleRate, const juce::File&, int bitsPerSample = 24);   // 32 = coma flotante
 }

@@ -79,6 +79,15 @@ modelo que usa Moises).
   de la barra de arriba) o lo agrega sin separar; la canción nueva ya trae los tiempos, compases,
   acordes y tonalidad (transpuestos si hace falta), secciones de tempo y un marcador por tramo
   (`mix::describeSong`), así el click, la guía de escenario y el nivelado funcionan sin analizar.
+  **La canción queda ligada a su mix** (etiqueta "MIX" en el setlist): separando, cada canción
+  original se separa entera una sola vez (sus pistas quedan en el mix, `<mix>/pistas/`) y las
+  pistas de la canción se arman cortando, estirando, fundiendo y nivelando esas pistas con los
+  tramos del mix; si después se cambian tramos, tempos, fundidos o el nivel, al cargar la canción
+  se vuelve a armar sola en segundos, sin separar de nuevo (solo se separa una canción nueva que
+  entre al mix). Los marcadores de los tramos, tiempos, acordes y secciones de tempo se rehacen;
+  los marcadores propios, las notas y los golpes MIDI van con su tramo; la mezcla, los triggers y
+  las salidas de cada pista se conservan. En una canción ligada los tramos (cortar, mover, pegar)
+  se editan en el mix; el menú del setlist ofrece "Abrir su mix" y "Desligar del mix".
 - Importar stems: varios archivos o una carpeta (o arrastrar varios archivos a la ventana).
   Formatos: wav, aiff, flac, mp3, ogg (m4a solo en macOS: JUCE no decodifica AAC en Linux).
 - **Vista de arreglo** (`TimelineView`): regla con marcadores (clic = ir, arrastrar = mover,
@@ -578,6 +587,12 @@ Secuencias/
   golpes ordenados con `sortHits`; `shiftGrid` los mueve con los huecos del arreglo).
 - Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
   (`SongNote`, ordenadas por `sortNotes`; las de texto vacío no se guardan).
+- Canción ligada a un mix: `mixLink`: `{ "folder" (carpeta dentro de _mixes), "signature"
+  (`mix::renderSignature` de la versión armada), "separated", "options" (separación:
+  "pistas|calidad|roformer|batería en partes"), "pieces": [[id, outStart, outEnd, srcStart,
+  srcEnd, ratio, archivo de la fuente], ...] }` (`MixLink`, `MixPiece`: dónde quedó cada tramo, por
+  `MixSegment::id` y su fuente).
+  Los marcadores que puso el mix llevan `"mix": true` (`SongMarker::fromMix`).
 - Escritura y tonalidad: `spelling` (0 = según la tonalidad, 1 = sostenidos, 2 = bemoles) y
   `keyOverride` (tonalidad elegida a mano, canónica como madmom: "Eb major"; vacío = la
   detectada).
@@ -871,8 +886,16 @@ Pasos de `run()`:
 
 ### 5.4i MixProject y MixEditor (armar mix antes de separar)
 - Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, levelLufs, sources: [{ name, file, length,
-  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats }] }`),
-  `fuentes/` (copias de las canciones originales) y `mezcla.wav` (último render, 44,1 kHz, 24 bits).
+  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats, id }] }`),
+  `fuentes/` (copias de las canciones originales), `mezcla.wav` (último render, 44,1 kHz, 24 bits) y
+  `pistas/<archivo>/<opciones>/` (las pistas separadas de cada canción original: una carpeta por
+  archivo, con su extensión, y por opciones de separación, "4-0-0-1"; `pistas.json`: `{ options,
+  source, files }`; `stemsFolder (fuente, opciones)`, `cachedStems` exige todos los archivos,
+  `storeStems` mueve ahí el resultado de una separación; `removeSource` borra todas las de esa
+  fuente). Cada tramo tiene un `id` estable (`ensureSegmentIds`, con `nextSegmentId` guardado en
+  mix.json: los que faltan o se repiten, como el de un tramo duplicado, reciben uno nuevo y un id
+  quitado no se reutiliza; `load` se los da en orden a los mix.json de antes; `mixEdited` los asegura
+  en cada edición).
   La carpeta es la identidad del mix (`Library::legalFolderName`: sin puntos ni espacios al final,
   que Windows quitaría); el nombre visible es el `name` de mix.json (renombrar no mueve la carpeta)
   y `MixProject::entries` lo lee para el menú "Armar mix" (abrir y borrar van por carpeta; borrar
@@ -939,13 +962,43 @@ Pasos de `run()`:
   escuchar el mix mientras se prepara (por otra escucha o por "Crear canción") queda en
   `mixWantedPlay` y suena al terminar el render. Al abrir el mix se quita la selección del
   setlist (un clic en cualquier canción, también la de antes, cierra el mix y la carga). Si cambia la frecuencia del dispositivo, `dropMixPreview` descarta lo
-  cargado. `mixGeneration` (atómico) invalida los trabajos de un mix cerrado. `createSongFromMix` / `startMixSong`: separar copia
-  el render a un temporal (`pendingMixInput`), guarda `pendingMixSong` y llama a
-  `startSeparation (archivo, nombre)`; al terminar la separación, `applyMixSongInfo` pone los
-  metadatos en la canción importada; con el mix abierto la canción nueva no se selecciona (no se
-  cierra el mix bajo el usuario). Si el mix se editó mientras se preparaba, `startMixSong` vuelve
-  a renderizar antes de crear la canción. Sin separar: `importStemFiles ({ mezcla.wav })` y lo
-  mismo. Elegir una canción del setlist cierra el mix. `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
+  cargado. `mixGeneration` (atómico) invalida los trabajos de un mix cerrado. Elegir una canción del
+  setlist cierra el mix.
+- Canción ligada (`createSongFromMix` / `startMixSong`): `MixSongJob` lleva la cola de canciones
+  originales sin pistas para esas opciones (`separationKey`); `continueMixSongJob` separa la siguiente
+  con `startSeparationWith` (con las opciones guardadas; sin Roformer o DrumSep si ya no están
+  instalados) y, en el Timer, al terminar `storeStems` las deja en el mix; con la cola vacía,
+  `buildMixSong` (en su propio hilo, `mixSongPool`, así no demora la carga de otra canción; una sola
+  actualización por canción a la vez, `mixSongBuildingFolders`) carga el mix.json del disco, exige las
+  pistas de todas las canciones usadas (si falta una, `missingStems`: la próxima carga la separa),
+  arma las pistas con `mix::renderStems` (WAV de coma flotante en un temporal) o la mezcla con
+  `mix::render` (sin separar), y `mixSongBuilt` (UI) crea la canción (`importStemFiles` +
+  `applyMixSongInfo` con el nombre escrito + `mixLink`) o la actualiza con `applyMixUpdate` (comprueba
+  que siga ligada a ese mix, mueve los archivos a su carpeta, agrega los `StemInfo` que falten y quita
+  las pistas del mix que ya no salen, sin tocar las grabadas, `mix::applyRebuild`, nueva huella y
+  opciones) y la recarga si es la elegida; si está sonando o grabando, la actualización espera en
+  `pendingMixUpdate` hasta que se detenga (Timer) o se cargue otra canción. `loadSongAt` pregunta
+  `linkedSongNeedsRebuild`: si la huella del mix cambió, descarga lo que suena, muestra "Actualizando
+  desde su mix" y arma antes de cargar; si falta separar una canción nueva del mix, arranca esa
+  separación y carga la versión anterior mientras tanto; un mix que ya no está o una versión que ya
+  falló (`failedMixRebuilds`, también si su separación falló o se canceló: `mixSongJobFailed`) cargan
+  como están. `effectiveOptions` quita Roformer y DrumSep si audio-separator ya no está (la clave
+  guardada es la de lo que se separó). Si el mix se borra mientras se separa, el resultado se
+  descarta. `mixSongBuilds` cuenta los armados en curso (`isMixBusy` los espera). Un marcador del mix
+  renombrado o movido a mano pasa a ser propio (`fromMix = false`). El menú de
+  tramos de una canción ligada (`linkedSongMenu`) y Shift + arrastre remiten al mix; "Separar canción
+  (IA)" también; `openLinkedMix`, `unlinkSong`; borrar un mix desliga sus canciones.
+- `mix::render` y `mix::renderStems` comparten `makePlan` (ubicación, fundidos, uniones coherentes),
+  `readLayer` (lee y estira el tramo de un archivo, alineado con el mix), `levelSegment` (ganancia y
+  limitador, siempre medidos en la fuente original) y `addSegment` (fundidos y suma): las pistas reciben
+  la misma ganancia y el mismo limitador por tramo, así sin estirar suman exactamente el mix; con
+  estirado, cada pista se estira por separado (como en un DAW) y la suma suena como el mix pero no es
+  idéntica muestra a muestra. `mix::pieces`, `renderSignature` (JSON de tempo, nivelado, tramos con
+  su fuente y el análisis de las fuentes usadas; no el nombre), `remapTime` (mismo tramo por id y
+  fuente y mismo instante de su fuente; false si el tramo se quitó o ese pedazo quedó fuera; simétrica)
+  y `applyRebuild` (cada sección de tempo nueva conserva el tempo y el tono de reproducción de la vieja
+  de su tramo, buscada con `remapTime` hacia atrás; un marcador propio en el lugar de uno del mix lo
+  reemplaza). `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
   [--mixtramos] [--mixcancion=1|2] [--mixsel=5-8]` (rutas sin espacios).
 
 ### 5.5 UI (MainComponent)
@@ -1101,8 +1154,11 @@ Pasos de `run()`:
 - Armar mix: cada tramo se estira con una razón constante (conserva el pulso de la grabación
   dentro del tramo; una canción tocada sin click no queda cuantizada); la exactitud de las uniones
   depende del análisis de madmom (los menús de la fuente corrigen tiempos a la mitad, al doble o
-  el 1 del compás). Al crear la canción, la copia del render para separar y la importación sin
-  separar se hacen en el hilo de mensajes (un instante con mixes de varios minutos).
+  el 1 del compás). Canción ligada: ocupa disco (las pistas de cada canción original en el mix, más
+  las de la canción en WAV de coma flotante: unos 30 MB por minuto y pista); lo que se edite en la
+  canción sobre la grilla (tiempos, acordes, secciones de tempo) se rehace al actualizarla desde el
+  mix (se editan en el mix), y las tomas grabadas en ella no se reubican; con estirado, las pistas no
+  suman el mix muestra a muestra (cada una se estira por separado).
 - Grabación: la alineación confía en las latencias que informa el dispositivo (con PipeWire
   o ALSA suelen ser correctas; si no, está la compensación extra en ms). Saltar con el cabezal
   durante una toma desalinea lo grabado después del salto (la toma se alinea por su inicio).
@@ -1162,6 +1218,19 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.8.0 (canciones ligadas a su mix)**: separación de cada canción original una vez (`MixSongJob`,
+  `<mix>/pistas`, `storeStems`, `cachedStems`), pistas armadas con los tramos (`mix::renderStems`, render
+  repartido en `makePlan` / `readLayer` / `levelSegment` / `addSegment`), `MixSegment::id`,
+  `SongInfo::mixLink` (`MixLink`, `MixPiece`), `SongMarker::fromMix`, actualización al cargar
+  (`linkedSongNeedsRebuild`, `buildMixSong`, `mixSongBuilt`, `mix::renderSignature`, `remapTime`,
+  `applyRebuild`), etiqueta "MIX" en el setlist, "Abrir su mix" / "Desligar del mix", tramos y "Separar
+  canción" bloqueados en una canción ligada, borrar un mix desliga sus canciones, `writeWav` de 32 bits,
+  `Library::stemDisplayName`. Revisión: nombre escrito para la canción, `nextSegmentId` y fuente en
+  `MixPiece` (un tramo nuevo no hereda lo de otro), pistas por archivo y opciones, armado en
+  `mixSongPool` sin duplicados, actualización que espera a que se detenga la canción, fallos de
+  separación sin reintento en bucle, enlace comprobado al aplicar, opciones efectivas y pistas
+  sobrantes quitadas, marcadores del mix editados a mano conservados, tempo y tono por sección
+  conservados.
 - **v0.7.1**: selección del armado de mix: cada borde se arrastra solo (asas en la regla), Shift + clic,
   "Inicio / Fin del tramo aquí" en el menú y compases escritos en la cabecera ("Compases [8] a [16]");
   antes, arrastrar desde un borde empezaba una selección nueva y el inicio saltaba al clic.

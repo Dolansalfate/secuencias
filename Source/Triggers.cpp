@@ -207,14 +207,14 @@ namespace triggers
         return hits;
     }
 
-    bool writeWav (const juce::AudioBuffer<float>& b, double sr, const juce::File& file)
+    bool writeWav (const juce::AudioBuffer<float>& b, double sr, const juce::File& file, int bitsPerSample)
     {
         file.deleteFile();
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
         if (stream == nullptr)
             return false;
-        std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, (unsigned) b.getNumChannels(), 24, {}, 0));
+        std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, (unsigned) b.getNumChannels(), bitsPerSample, {}, 0));
         if (writer == nullptr)
             return false;
         stream.release();

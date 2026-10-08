@@ -362,6 +362,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                     for (auto& v : *g) mk.stemGainsDb.push_back (juce::jlimit (-40.0, 40.0, (double) v));
                 if (auto* l = m.getProperty ("stemLufs", juce::var()).getArray())
                     for (auto& v : *l) mk.stemLufs.push_back ((double) v);
+                mk.fromMix = (bool) m.getProperty ("mix", false);
                 s.markers.push_back (mk);
             }
         if (auto* g = json.getProperty ("headStemGainsDb", juce::var()).getArray())
@@ -428,6 +429,35 @@ SongInfo Library::readSong (const juce::File& folder) const
                 mt.sortHits();
                 s.midiTracks.push_back (mt);
             }
+
+        if (auto link = json.getProperty ("mixLink", juce::var()); link.isObject())
+        {
+            // Solo un nombre de carpeta dentro de _mixes (un song.json editado a mano no debe salir de ahí)
+            s.mixLink.folder = juce::File::createLegalFileName (link.getProperty ("folder", "").toString());
+            if (s.mixLink.folder == "." || s.mixLink.folder == "..")
+                s.mixLink.folder.clear();
+            s.mixLink.signature = link.getProperty ("signature", "").toString();
+            s.mixLink.separated = (bool) link.getProperty ("separated", false);
+            s.mixLink.options = link.getProperty ("options", "").toString();
+            if (auto* arr = link.getProperty ("pieces", juce::var()).getArray())
+                for (auto& p : *arr)
+                    if (auto* v = p.getArray(); v != nullptr && v->size() >= 6)
+                    {
+                        MixPiece piece;
+                        piece.id = (int) (*v)[0];
+                        piece.outStart = (double) (*v)[1];
+                        piece.outEnd = (double) (*v)[2];
+                        piece.srcStart = (double) (*v)[3];
+                        piece.srcEnd = (double) (*v)[4];
+                        piece.ratio = (double) (*v)[5];
+                        if (v->size() >= 7)
+                            piece.source = (*v)[6].toString();
+                        if (std::isfinite (piece.outStart) && std::isfinite (piece.outEnd) && std::isfinite (piece.srcStart)
+                            && std::isfinite (piece.srcEnd) && std::isfinite (piece.ratio) && piece.ratio > 0.0
+                            && piece.outEnd >= piece.outStart && piece.srcEnd >= piece.srcStart)
+                            s.mixLink.pieces.push_back (piece);
+                    }
+        }
 
         const auto clips = json.getProperty ("clips", juce::var());
         if (auto* arr = clips.getArray())
@@ -543,6 +573,8 @@ bool Library::saveSong (const SongInfo& s) const
         for (auto v : m.stemLufs) sl.add (v);
         mo->setProperty ("stemGainsDb", sg);
         mo->setProperty ("stemLufs", sl);
+        if (m.fromMix)
+            mo->setProperty ("mix", true);
         markers.add (juce::var (mo));
     }
     obj->setProperty ("markers", markers);
@@ -589,6 +621,20 @@ bool Library::saveSong (const SongInfo& s) const
             tracks.add (juce::var (m));
         }
         obj->setProperty ("midiTracks", tracks);
+    }
+
+    if (s.mixLink.isLinked())
+    {
+        auto* link = new juce::DynamicObject();
+        link->setProperty ("folder", s.mixLink.folder);
+        link->setProperty ("signature", s.mixLink.signature);
+        link->setProperty ("separated", s.mixLink.separated);
+        link->setProperty ("options", s.mixLink.options);
+        juce::Array<juce::var> pieces;
+        for (auto& p : s.mixLink.pieces)
+            pieces.add (juce::Array<juce::var> { p.id, p.outStart, p.outEnd, p.srcStart, p.srcEnd, p.ratio, p.source });
+        link->setProperty ("pieces", pieces);
+        obj->setProperty ("mixLink", juce::var (link));
     }
 
     if (! s.clips.empty())
@@ -872,4 +918,9 @@ void Library::move (int index, int delta)
         return;
     std::swap (songs[(size_t) index], songs[(size_t) other]);
     saveSetlist();
+}
+
+juce::String Library::stemDisplayName (const juce::String& fileNameWithoutExtension)
+{
+    return displayNameFor (fileNameWithoutExtension);
 }

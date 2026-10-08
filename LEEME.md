@@ -84,6 +84,14 @@ El mismo código sigue compilando en macOS.
   IA (con las opciones de pistas y calidad de arriba) o agregarla sin separar; la canción aparece en
   el setlist con sus tiempos, compases, acordes, secciones de tempo y un marcador en cada tramo, sin
   tener que analizarla de nuevo. El mix queda guardado para seguir otro día ("Armar mix" > su nombre).
+  **La canción queda ligada a su mix** (dice "MIX" en el setlist): si después cambias un tramo (dónde
+  empieza o termina, el orden, el tempo, el fundido o el nivel), al volver a la canción se actualiza
+  sola en unos segundos. Para eso, al separar, la app separa cada canción original entera una sola
+  vez y guarda sus pistas en el mix: los cambios de tramos no vuelven a separar (solo una canción
+  nueva que agregues al mix). Tus marcadores, notas y pistas MIDI se mueven con su tramo, y la mezcla
+  de cada pista (faders, salidas, triggers) se conserva. Los cortes de tramos se hacen en el mix: en
+  la canción, clic derecho en el setlist > "Abrir su mix" (o "Desligar del mix" si quieres editarla
+  por su cuenta). Ocupa bastante disco: las pistas de las canciones originales quedan en el mix.
 - **Instrumentos VST3 / AU (por ejemplo Addictive Drums)**: botón "Instrumentos" arriba. La primera
   vez, "Buscar instrumentos instalados" (recorre las carpetas habituales de VST3, y de AU en Mac;
   si tienes plugins en otra carpeta, "Buscar en una carpeta..."). Después, "Añadir instrumento" y
