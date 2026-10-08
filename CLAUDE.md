@@ -58,7 +58,10 @@ modelo que usa Moises).
   otra (tiempos, primeros tiempos de compás, acordes y tonalidad; con un `Analyzer` propio,
   `mixAnalyzer`), y en la vista de la fuente se seleccionan tramos arrastrando sobre la forma de
   onda, ajustados a compases o tiempos y a la transiente (`mix::refineToOnset`), que se agregan al
-  mix en orden. Cada tramo se estira con razón constante para durar exactamente sus tiempos al
+  mix en orden. Cada borde de la selección se arrastra solo (por su línea o por su asa en la regla),
+  Shift + clic lleva ahí el borde más cercano, el clic derecho ofrece "Inicio / Fin del tramo aquí", y
+  en la cabecera de la fuente los compases se escriben ("Compases [8] a [16]"; sin análisis, tiempos
+  m:ss). Un clic suelto solo mueve el cabezal desde donde escucha "Escuchar". Cada tramo se estira con razón constante para durar exactamente sus tiempos al
   tempo del mix (el del primer tramo o el que se escriba; o "Cada tramo a su tempo"), así cada
   unión cae justo en la rejilla, y dentro del tramo se conserva el pulso de la grabación. Por
   tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
@@ -887,6 +890,15 @@ Pasos de `run()`:
 - `MixEditor` (no toca el motor ni archivos): cabecera, fuentes, vista de la fuente (onda con
   compases, selección ajustada con `snapToBeat` + `refineCut`), línea del mix y panel del tramo;
   edita el proyecto en el hilo de mensajes y avisa con `onChanged`; pide lo demás con callbacks.
+  Selección: arrastrar en un hueco la rehace (`dragSelection` / `finishSelection`); `SourceWaveView::edgeAt`
+  reconoce un borde (6 px de su línea o su asa de 9 px en la regla; en una selección angosta manda la mitad
+  del clic) y `dragEdge` / `finishEdge` mueven solo ese borde y ajustan a la transiente solo ese;
+  `extendSelectionTo` (Shift + clic), `setEdgeAt` (menú) y `applySelection` (pone, ajusta los bordes
+  pedidos, lleva el cabezal al inicio y la muestra). Los campos de la cabecera (`selFromEdit`,
+  `selToEdit`, `updateSelectionFields`, `selectionFieldEdited`) usan `mix::barCount` y `mix::barRange`
+  (compases first a last: del primer tiempo de first al de last + 1, o al final; 0 = desde el inicio);
+  `selectionFirstBar` mira 0,1 s después del inicio (el corte ajustado queda unos ms antes del 1).
+  `MixEditor::selectBars` hace lo mismo desde fuera (`--captura --mix=... --mixsel=5-8`).
 - En `MainComponent`: `openMix` descarga la canción (`unloadSong`; se recuerda por carpeta en
   `mixReturnFolder`, que se conserva al pasar de un mix a otro) y pone el editor encima del área
   de la canción; no se abre mientras la canción se analiza o se nivela (el resultado se aplica a
@@ -916,7 +928,7 @@ Pasos de `run()`:
   cierra el mix bajo el usuario). Si el mix se editó mientras se preparaba, `startMixSong` vuelve
   a renderizar antes de crear la canción. Sin separar: `importStemFiles ({ mezcla.wav })` y lo
   mismo. Elegir una canción del setlist cierra el mix. `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
-  [--mixtramos] [--mixcancion=1|2]` (rutas sin espacios).
+  [--mixtramos] [--mixcancion=1|2] [--mixsel=5-8]` (rutas sin espacios).
 
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
@@ -1132,6 +1144,10 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.7.1**: selección del armado de mix: cada borde se arrastra solo (asas en la regla), Shift + clic,
+  "Inicio / Fin del tramo aquí" en el menú y compases escritos en la cabecera ("Compases [8] a [16]");
+  antes, arrastrar desde un borde empezaba una selección nueva y el inicio saltaba al clic.
+  `mix::barCount`, `mix::barRange`, `MixEditor::selectBars`, `--mixsel`.
 - **v0.7.0 (pistas MIDI)**: `MidiTracks` (golpes congelados y editables, filas con sonido propio),
   `SongInfo::midiTracks` en song.json, `shiftGrid` los mueve, segundo conjunto de líneas en el
   motor (`setMidiSamplers`, `rawVelocity`), pista MIDI editable en la vista de arreglo, canales

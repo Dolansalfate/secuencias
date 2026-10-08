@@ -405,6 +405,32 @@ namespace mix
         return bars;
     }
 
+    int barCount (const Analysis& a)
+    {
+        int bars = 0;
+        for (auto& b : a.beats)
+            bars += b.beatInBar == 1 ? 1 : 0;
+        return bars;
+    }
+
+    bool barRange (const Analysis& a, double length, int first, int last, double& start, double& end)
+    {
+        std::vector<double> downbeats;
+        for (auto& b : a.beats)
+            if (b.beatInBar == 1)
+                downbeats.push_back (b.seconds);
+        const int n = (int) downbeats.size();
+        if (n == 0)
+            return false;
+        if (first > last)
+            std::swap (first, last);
+        first = juce::jlimit (0, n, first);
+        last = juce::jlimit (juce::jmax (1, first), n, last);
+        start = first == 0 ? 0.0 : downbeats[(size_t) first - 1];
+        end = last < n ? downbeats[(size_t) last] : juce::jmax (length, downbeats[(size_t) n - 1]);
+        return end > start;
+    }
+
     std::vector<MixPlacement> layout (const MixProject& project)
     {
         std::vector<MixPlacement> out (project.segments.size());

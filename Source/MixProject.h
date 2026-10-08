@@ -110,6 +110,13 @@ namespace mix
     int barNumberAt (const Analysis&, double seconds);
     // Compases completos entre dos instantes (primeros tiempos de compás en [start - 0,05, end - 0,05))
     int barsBetween (const Analysis&, double start, double end);
+    // Cantidad de compases (primeros tiempos de compás) de la fuente
+    int barCount (const Analysis&);
+    // Tramo de los compases first a last (inclusive, numerados como barNumberAt): desde el primer tiempo del
+    // compás first (0 = desde el inicio de la canción, lo que precede al compás 1) hasta el del compás siguiente
+    // a last (el final de la canción, `length`, si last es el último). Se ordenan y se acotan a los compases que
+    // hay (last al menos 1). false sin compases.
+    bool barRange (const Analysis&, double length, int first, int last, double& start, double& end);
 
     // Ubicación de todos los tramos (ver MixPlacement). Tramos con fuente inexistente o largo <= 0
     // quedan con outEnd == outStart (no suenan). Tempo de cada tramo: playBpm propio > 0; si no,

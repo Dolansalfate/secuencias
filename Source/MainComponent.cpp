@@ -5133,11 +5133,12 @@ bool MainComponent::isMixBusy() const
     if (! mixCapture.active || mixProject == nullptr)
         return false;
     return mixCopyJobs > 0 || mixAnalyzingFile.isNotEmpty() || ! mixAnalysisQueue.empty() || mixRendering
-           || (mixCapture.autoSegments && ! mixCapture.segmentsDone)
+           || (mixCapture.autoSegments && ! mixCapture.segmentsDone) || ! mixCapture.selectionDone
            || (mixCapture.createMode > 0 && ! mixCapture.createStarted);
 }
 
-void MainComponent::openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode)
+void MainComponent::openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode,
+                                       int selectFirstBar, int selectLastBar)
 {
     library.mixesFolder().createDirectory();
     auto folder = library.mixesFolder().getChildFile (juce::File::createLegalFileName (name));
@@ -5152,6 +5153,9 @@ void MainComponent::openMixForCapture (const juce::String& name, const juce::Str
     mixCapture.active = true;
     mixCapture.autoSegments = autoSegments;
     mixCapture.createMode = createMode;
+    mixCapture.selFirst = selectFirstBar;
+    mixCapture.selLast = selectLastBar;
+    mixCapture.selectionDone = selectFirstBar < 0;
     // Las fuentes que falten entran por el mismo camino que "+ Canción" (copia en segundo plano)
     juce::Array<juce::File> missing;
     for (auto& path : sourceFiles)
@@ -5203,6 +5207,16 @@ void MainComponent::mixCaptureStep()
             mixEdited();
         }
         return;
+    }
+    if (! mixCapture.selectionDone)
+    {
+        // Compases escritos a mano en la primera fuente (el mismo camino que los campos de la cabecera)
+        mixCapture.selectionDone = true;
+        if (! mixProject->sources.empty())
+        {
+            mixEditor->selectSource (0);
+            mixEditor->selectBars (mixCapture.selFirst, mixCapture.selLast);
+        }
     }
     if (mixCapture.createMode > 0 && ! mixCapture.createStarted)
     {

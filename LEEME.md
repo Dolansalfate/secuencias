@@ -64,7 +64,12 @@ El mismo código sigue compilando en macOS.
 - **Armar mix (antes de separar)**: botón "Armar mix" > "Mix nuevo...". Con "+ Canción" cargas las
   canciones originales completas; la app las analiza sola (tiempos y compases, con la IA de
   análisis). Eliges una canción en la lista, arrastras sobre su onda para seleccionar un tramo
-  (se ajusta a los compases y al golpe) y "Agregar al mix"; repites con otras canciones. Abajo ves
+  (se ajusta a los compases y al golpe) y "Agregar al mix"; repites con otras canciones. Para
+  afinar el tramo, arrastra solo su inicio o su fin (por la línea o por el asa de arriba), usa
+  Shift + clic para llevar ahí el borde más cercano, o escribe los compases arriba a la derecha
+  ("Compases [8] a [16]": un clic en el número, escribes y Enter). Un clic suelto solo mueve la
+  marca blanca desde donde suena "Escuchar"; el clic derecho ofrece "Inicio del tramo aquí" y
+  "Fin del tramo aquí". Abajo ves
   los tramos en orden: cada uno se ajusta al tempo del mix de modo que las uniones caen exactas en
   el pulso (puedes elegir "Cada tramo a su tempo" o darle a un tramo su propio tempo). Por tramo
   puedes moverlo, quitarlo, alargarlo o acortarlo por compases, cambiarle el tono, la ganancia y el

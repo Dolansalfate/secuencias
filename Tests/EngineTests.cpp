@@ -1631,6 +1631,20 @@ int main()
         CHECK (mix::barsBetween (anA, 0.25, 4.25) == 2);
         CHECK (mix::barsBetween (anA, 0.24, 2.24) == 1);
         CHECK (mix::barsBetween (anB, 0.89, 3.29) == 1);
+        {
+            // Compases escritos a mano: del primer tiempo del primero al del siguiente al último (o el final)
+            double s = 0.0, e = 0.0;
+            CHECK (mix::barCount (anA) == 2 && mix::barCount (Analysis()) == 0);
+            CHECK (mix::barRange (anA, 4.0, 1, 1, s, e) && approx (s, 0.25) && approx (e, 2.25));
+            CHECK (mix::barRange (anA, 4.0, 1, 2, s, e) && approx (s, 0.25) && approx (e, 4.0));   // el último llega al final
+            CHECK (mix::barRange (anA, 4.0, 0, 1, s, e) && approx (s, 0.0) && approx (e, 2.25));   // 0 = desde el inicio
+            CHECK (mix::barRange (anA, 4.0, 2, 1, s, e) && approx (s, 0.25) && approx (e, 4.0));   // al revés se ordena
+            CHECK (mix::barRange (anA, 4.0, 5, 9, s, e) && approx (s, 2.25) && approx (e, 4.0));   // fuera de rango se acota
+            CHECK (! mix::barRange (Analysis(), 4.0, 1, 2, s, e));
+            // De vuelta a los números que muestra la selección
+            mix::barRange (anA, 4.0, 2, 2, s, e);
+            CHECK (mix::barNumberAt (anA, s) == 2 && mix::barNumberAt (anA, e - 0.1) == 2 && mix::barsBetween (anA, s, e) == 1);
+        }
 
         std::cout << "  proyecto: crear, fuentes copiadas, quitar\n";
         const auto mixRoot = tmp.getChildFile ("lib-mixes").getChildFile (Library::mixesFolderName());

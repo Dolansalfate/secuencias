@@ -385,7 +385,9 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     //==========================================================================
     // Vista de la fuente elegida: regla con los compases, forma de onda (imagen cacheada), tramos
     // ya usados, selección y cabezales. Arrastrar = seleccionar (ajustado a compases, tiempos o
-    // libre), clic = cabezal de la vista, doble clic = escuchar, clic derecho = menú del tiempo.
+    // libre); arrastrar un borde de la selección (o su asa en la regla) = mover solo ese borde;
+    // Shift + clic = llevar ahí el borde más cercano; clic = cabezal de la vista (desde donde
+    // escucha "Escuchar"), doble clic = escuchar, clic derecho = menú (inicio o fin del tramo aquí).
     class SourceWaveView : public juce::Component
     {
     public:
@@ -533,21 +535,69 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
 
             drawGrid (g, src->analysis);
 
-            // Selección
+            // Selección, con un asa en la regla en cada borde (se arrastran para mover solo ese borde)
             if (impl.hasSelection())
             {
                 const float a = timeToX (impl.selStart), b = timeToX (impl.selEnd);
                 g.setColour (ui::accent.withAlpha (0.2f));
                 g.fillRect (a, 0.0f, b - a, (float) h);
-                g.setColour (ui::accent);
-                g.fillRect (a - 1.0f, 0.0f, 2.0f, (float) h);
-                g.fillRect (b - 1.0f, 0.0f, 2.0f, (float) h);
+                for (int edge = 0; edge < 2; ++edge)
+                {
+                    const float x = edge == 0 ? a : b;
+                    const bool hot = edge == hoverEdge || edge == draggingEdge;
+                    g.setColour (hot ? ui::accent.brighter (0.4f) : ui::accent);
+                    g.fillRect (x - (hot ? 1.5f : 1.0f), 0.0f, hot ? 3.0f : 2.0f, (float) h);
+                    // Asa: una pestaña hacia adentro de la selección, con dos rayitas
+                    const float tab = (float) handleWidth;
+                    g.fillRoundedRectangle (edge == 0 ? x - 1.0f : x - tab + 1.0f, 1.0f, tab, (float) rulerHeight - 2.0f, 2.0f);
+                    g.setColour (juce::Colours::black.withAlpha (0.55f));
+                    const float gx = edge == 0 ? x + tab * 0.5f - 1.0f : x - tab * 0.5f + 1.0f;
+                    g.fillRect (gx - 2.0f, 5.0f, 1.0f, (float) rulerHeight - 10.0f);
+                    g.fillRect (gx + 1.0f, 5.0f, 1.0f, (float) rulerHeight - 10.0f);
+                }
             }
 
             // Cabezal de la vista (desde donde escucha "Escuchar") y el de reproducción
             drawHead (g, timeToX (impl.sourceCursor), h, juce::Colours::white.withAlpha (0.75f), 1.0f);
             if (impl.playKind == 1 && impl.playingSource == source)
                 drawHead (g, timeToX (impl.playSeconds), h, ui::playhead, 2.0f);
+        }
+
+        // Borde de la selección bajo el mouse: 0 = inicio, 1 = fin, -1 = ninguno. Sobre la línea (a 6 px) o sobre
+        // su asa en la regla; si los dos están cerca, el más próximo
+        int edgeAt (juce::Point<int> p) const
+        {
+            if (! impl.hasSelection())
+                return -1;
+            const float a = timeToX (impl.selStart), b = timeToX (impl.selEnd), x = (float) p.x;
+            const bool inRuler = p.y < rulerHeight;
+            const float da = inRuler && x >= a - 3.0f && x <= a + (float) handleWidth + 1.0f ? 0.0f : std::abs (x - a);
+            const float db = inRuler && x <= b + 3.0f && x >= b - (float) handleWidth - 1.0f ? 0.0f : std::abs (x - b);
+            if (da > 6.0f && db > 6.0f)
+                return -1;
+            if (da <= 6.0f && db <= 6.0f)
+                return x < (a + b) * 0.5f ? 0 : 1;   // selección angosta: manda la mitad donde se hizo clic
+            return da <= db ? 0 : 1;
+        }
+
+        void setHoverEdge (int edge)
+        {
+            if (edge == hoverEdge)
+                return;
+            hoverEdge = edge;
+            setMouseCursor (edge >= 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+            repaint();
+        }
+
+        void mouseMove (const juce::MouseEvent& e) override
+        {
+            setHoverEdge (impl.currentSource() != nullptr ? edgeAt (e.getPosition()) : -1);
+        }
+
+        void mouseExit (const juce::MouseEvent&) override
+        {
+            if (draggingEdge < 0)
+                setHoverEdge (-1);
         }
 
         void mouseDown (const juce::MouseEvent& e) override
@@ -557,33 +607,50 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             impl.sourceWasLast = true;
             popupDown = e.mods.isPopupMenu();
             dragging = false;
+            draggingEdge = -1;
             if (popupDown)
             {
                 impl.sourceWaveMenu (timeAt (e.x), 8.0 / pixelsPerSecond);
                 return;
             }
             dragAnchor = timeAt (e.x);
+            if (! e.mods.isShiftDown())
+                draggingEdge = edgeAt (e.getPosition());   // se toma un borde: el otro queda donde está
         }
 
         void mouseDrag (const juce::MouseEvent& e) override
         {
             if (popupDown || impl.currentSource() == nullptr)
                 return;
-            if (! dragging && std::abs (e.getDistanceFromDragStartX()) < 4)
+            if (! dragging && std::abs (e.getDistanceFromDragStartX()) < (draggingEdge >= 0 ? 2 : 4))
                 return;
             dragging = true;
             const double t = timeAt (e.x);
-            impl.dragSelection (juce::jmin (dragAnchor, t), juce::jmax (dragAnchor, t));
+            if (draggingEdge >= 0)
+                impl.dragEdge (draggingEdge == 0, t);
+            else
+                impl.dragSelection (juce::jmin (dragAnchor, t), juce::jmax (dragAnchor, t));
         }
 
         void mouseUp (const juce::MouseEvent& e) override
         {
             if (popupDown || impl.currentSource() == nullptr)
                 return;
+            const int edge = draggingEdge;
+            draggingEdge = -1;
             if (dragging)
             {
                 dragging = false;
-                impl.finishSelection();
+                if (edge >= 0)
+                    impl.finishEdge (edge == 0);
+                else
+                    impl.finishSelection();
+                setHoverEdge (edgeAt (e.getPosition()));
+                return;
+            }
+            if (e.mods.isShiftDown())
+            {
+                impl.extendSelectionTo (timeAt (e.x));   // el borde más cercano va al clic
                 return;
             }
             impl.setSourceCursor (timeAt (e.x));
@@ -691,6 +758,8 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
         bool whole = true;             // se ve la canción entera (se mantiene al cambiar el tamaño)
         bool dragging = false, popupDown = false;
         double dragAnchor = 0.0;
+        static constexpr int handleWidth = 9;   // asa de cada borde de la selección, en la regla
+        int hoverEdge = -1, draggingEdge = -1;  // borde bajo el mouse y el que se arrastra (0 inicio, 1 fin)
     };
 
     //==========================================================================
@@ -1032,7 +1101,10 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     bool edgeOnBeat (int source, double seconds) const;
     bool joinOffBeat (int index) const;
     bool selectionOffBeat() const;
-    juce::String selectionText() const;
+    bool sourceHasBars() const;                 // la fuente elegida tiene compases (análisis con primeros tiempos)
+    int selectionFirstBar() const;              // compases de la selección, como los muestra la cabecera
+    int selectionLastBar() const;
+    juce::String selectionSuffix() const;       // "· 16 compases · 0:38" (y si un borde no cae en un tiempo, cuál)
     juce::String mixSummary (bool withTempo) const;
 
     // --- Estado general ---
@@ -1065,6 +1137,13 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     double refineEdge (int source, double seconds) const;
     void dragSelection (double from, double to);
     void finishSelection();
+    void dragEdge (bool startEdge, double seconds);       // mueve solo ese borde (ajustado), sin cruzar el otro
+    void finishEdge (bool startEdge);                     // al soltar: ajusta ese borde a la transiente
+    void setEdgeAt (bool startEdge, double seconds);      // menú "Inicio / Fin del tramo aquí"
+    void extendSelectionTo (double seconds);              // Shift + clic: el borde más cercano va ahí
+    void applySelection (double start, double end, bool refineStart, bool refineEnd);
+    void updateSelectionFields();                         // los campos de la cabecera ("Compases [8] a [16]")
+    void selectionFieldEdited (bool startField);
     void setSourceCursor (double seconds);
     void playSource();
 
@@ -1115,6 +1194,7 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     bool sourceWasLast = false;             // lo último que se usó fue la vista de la fuente (para Espacio)
     bool busy = false;
     juce::Rectangle<int> headerArea, leftArea, sourceArea, sourceInfoArea, mixArea, mixInfoArea, panelArea;
+    int selectionFieldsLeft = 0;            // x donde empiezan los campos de la selección (el estado se dibuja antes)
 
     // Cabecera
     juce::Label mixCaption, nameEdit, bpmCaption, bpmEdit;
@@ -1127,6 +1207,9 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     // Vista de la fuente
     juce::ComboBox snapBox;
     juce::TextButton playSourceBtn, stopSourceBtn, addToMixBtn, replaceBtn;
+    // Selección escrita a mano en la cabecera de la fuente: "Compases [8] a [16] · 9 compases · 0:21" (o los
+    // tiempos m:ss sin análisis)
+    juce::Label selCaption, selFromEdit, selToCaption, selToEdit, selInfo;
     SourceWaveView sourceWave { *this };
     juce::ScrollBar sourceScroll { false };
     // Línea del mix
@@ -1201,6 +1284,20 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
     addToMixBtn.onClick = [this] { addSelectionToMix(); };
     replaceBtn.setButtonText ("Reemplazar el tramo");
     replaceBtn.onClick = [this] { replaceSegmentWithSelection(); };
+    // Selección escrita a mano: un clic en el número lo edita (Enter acepta, Esc cancela)
+    styleCaption (selCaption, "Compases", juce::Justification::centredRight);
+    styleCaption (selToCaption, "a", juce::Justification::centred);
+    styleCaption (selInfo, {});
+    selInfo.setMinimumHorizontalScale (1.0f);
+    for (auto* field : { &selFromEdit, &selToEdit })
+    {
+        styleValue (*field, true);
+        field->setFont (ui::font (12.0f, true));
+    }
+    selFromEdit.onEditorShow = [this] { beginEdit (selFromEdit, selFromEdit.getText()); };
+    selToEdit.onEditorShow = [this] { beginEdit (selToEdit, selToEdit.getText()); };
+    selFromEdit.onTextChange = [this] { selectionFieldEdited (true); };
+    selToEdit.onTextChange = [this] { selectionFieldEdited (false); };
     sourceScroll.setAutoHide (false);
     sourceScroll.addListener (this);
 
@@ -1292,6 +1389,7 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
              &mixCaption, &nameEdit, &bpmCaption, &bpmEdit, &keepTemposBtn, &createBtn, &closeBtn,
              &sourcesCaption, &addSourceBtn, &sourceViewport,
              &snapBox, &playSourceBtn, &stopSourceBtn, &addToMixBtn, &replaceBtn, &sourceWave, &sourceScroll,
+             &selCaption, &selFromEdit, &selToCaption, &selToEdit, &selInfo,
              &playMixBtn, &playJoinBtn, &stopMixBtn, &clickBtn, &fitMixBtn, &mixLine, &mixScroll,
              &segCaption, &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startCaption, &startEarlierBtn, &startLaterBtn,
              &endCaption, &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit, &toneCaption, &toneDownBtn,
@@ -1431,27 +1529,43 @@ bool MixEditor::Impl::selectionOffBeat() const
     return hasSelection() && (! edgeOnBeat (selectedSource(), selStart) || ! edgeOnBeat (selectedSource(), selEnd));
 }
 
-// "Compases 17 a 32 · 16 compases · 0:38" (y si un borde no cae en un tiempo, cuál)
-juce::String MixEditor::Impl::selectionText() const
+bool MixEditor::Impl::sourceHasBars() const
+{
+    auto* src = currentSource();
+    return src != nullptr && mix::barCount (src->analysis) > 0;
+}
+
+// El compás donde empieza la selección (0 = antes del primero) y el último que toca. El inicio se mira 0,1 s
+// más adelante: el corte ajustado a la transiente queda unos ms antes del primer tiempo del compás
+int MixEditor::Impl::selectionFirstBar() const
+{
+    auto* src = currentSource();
+    return src != nullptr ? mix::barNumberAt (src->analysis, juce::jmin (selStart + 0.1, selEnd)) : 0;
+}
+
+int MixEditor::Impl::selectionLastBar() const
+{
+    auto* src = currentSource();
+    return src != nullptr ? mix::barNumberAt (src->analysis, juce::jmax (selStart, selEnd - 0.1)) : 0;
+}
+
+// Lo que sigue a los campos: "· 16 compases · 0:38" (y si un borde no cae en un tiempo, cuál)
+juce::String MixEditor::Impl::selectionSuffix() const
 {
     auto* src = currentSource();
     if (src == nullptr)
         return {};
     if (! hasSelection())
-        return "Arrastra sobre la onda para elegir un tramo";
-    const auto& a = src->analysis;
-    const bool analyzed = ! a.beats.empty();
-    const int bars = analyzed ? mix::barsBetween (a, selStart, selEnd) : 0;
-    const int first = analyzed ? mix::barNumberAt (a, selStart) : 0;
-    const int last = analyzed ? mix::barNumberAt (a, juce::jmax (selStart, selEnd - 0.1)) : 0;
+        return tr ("· escribe o arrastra sobre la onda");
     juce::String text;
-    if (bars > 0 && first > 0 && last >= first)
-        text = (first == last ? tr ("Compás ") + juce::String (first)
-                              : "Compases " + juce::String (first) + " a " + juce::String (last))
-             + dot() + juce::String (bars) + (bars == 1 ? tr (" compás") : juce::String (" compases"));
+    if (sourceHasBars())
+    {
+        const int bars = mix::barsBetween (src->analysis, selStart, selEnd);
+        text = dot().trimStart() + juce::String (bars) + (bars == 1 ? tr (" compás") : juce::String (" compases")) + dot();
+    }
     else
-        text = clockText (selStart) + " a " + clockText (selEnd);
-    text += dot() + clockText (selEnd - selStart);
+        text = dot().trimStart();
+    text += clockText (selEnd - selStart);
     const bool startOff = ! edgeOnBeat (selectedSource(), selStart);
     const bool endOff = ! edgeOnBeat (selectedSource(), selEnd);
     if (startOff || endOff)
@@ -1643,7 +1757,105 @@ void MixEditor::Impl::updateSourceButtons()
     auto* seg = currentSegment();
     replaceBtn.setEnabled (hasSource && hasSelection() && seg != nullptr && seg->source == selectedSource()
                            && (std::abs (seg->start - selStart) > 1.0e-6 || std::abs (seg->end - selEnd) > 1.0e-6));
+    updateSelectionFields();
     owner.repaint (sourceInfoArea);
+}
+
+// Campos de la selección, a la derecha de la cabecera de la fuente. Con compases: "Compases [8] a [16]"; sin
+// análisis: "Desde [1:05] a [1:32]". Vacíos sin selección (se puede escribir igual). Se ubican según el texto.
+void MixEditor::Impl::updateSelectionFields()
+{
+    auto* src = currentSource();
+    const bool show = src != nullptr && ! sourceInfoArea.isEmpty();
+    for (auto* c : std::initializer_list<juce::Component*> { &selCaption, &selFromEdit, &selToCaption, &selToEdit, &selInfo })
+        c->setVisible (show);
+    if (! show)
+    {
+        selectionFieldsLeft = sourceInfoArea.getRight();
+        return;
+    }
+    const bool bars = sourceHasBars();
+    const bool any = hasSelection();
+    selCaption.setText (bars ? "Compases" : "Desde", juce::dontSendNotification);
+    if (! selFromEdit.isBeingEdited())
+        selFromEdit.setText (! any ? juce::String() : bars ? juce::String (selectionFirstBar()) : clockText (selStart),
+                             juce::dontSendNotification);
+    if (! selToEdit.isBeingEdited())
+        selToEdit.setText (! any ? juce::String() : bars ? juce::String (selectionLastBar()) : clockText (selEnd),
+                           juce::dontSendNotification);
+    const auto suffix = selectionSuffix();
+    selInfo.setText (suffix, juce::dontSendNotification);
+    selInfo.setColour (juce::Label::textColourId, ! any ? juce::Colours::grey
+                                                        : (selectionOffBeat() ? offBeatColour : juce::Colours::white));
+    selInfo.setFont (ui::font (12.0f, any));
+
+    // De derecha a izquierda: texto, campo final, "a", campo inicial, "Compases"
+    auto row = sourceInfoArea;
+    const int fieldWidth = bars ? 40 : 52;
+    const int infoWidth = juce::jmin (row.getWidth() / 2, juce::GlyphArrangement::getStringWidthInt (selInfo.getFont(), suffix) + 10);
+    selInfo.setBounds (row.removeFromRight (infoWidth));
+    selToEdit.setBounds (row.removeFromRight (fieldWidth).reduced (0, 1));
+    selToCaption.setBounds (row.removeFromRight (16));
+    selFromEdit.setBounds (row.removeFromRight (fieldWidth).reduced (0, 1));
+    selCaption.setBounds (row.removeFromRight (bars ? 62 : 44));
+    selectionFieldsLeft = row.getRight();
+}
+
+// Un campo de la selección se editó: compases (enteros; 0 = desde el inicio de la canción) o tiempos (m:ss o
+// segundos). Si el inicio queda después del fin (o al revés), el otro borde lo acompaña; sin selección, el campo
+// escrito da las dos puntas (un compás). Con compases los bordes se ajustan a la transiente, como al arrastrar.
+void MixEditor::Impl::selectionFieldEdited (bool startField)
+{
+    auto& field = startField ? selFromEdit : selToEdit;
+    auto* src = currentSource();
+    const auto text = field.getText().trim();
+    if (src == nullptr || text.isEmpty() || editUnchanged (field))
+    {
+        updateSourceButtons();
+        return;
+    }
+    const double len = sourceLength (selectedSource());
+    if (sourceHasBars())
+    {
+        if (! text.containsOnly ("0123456789"))
+        {
+            updateSourceButtons();
+            return;
+        }
+        const int value = text.getIntValue();
+        int first = hasSelection() ? selectionFirstBar() : value;
+        int last = hasSelection() ? selectionLastBar() : value;
+        if (startField)
+            first = value, last = juce::jmax (last, value);
+        else
+            last = value, first = juce::jmin (first, value);
+        double a = 0.0, b = 0.0;
+        if (mix::barRange (src->analysis, len, first, last, a, b))
+            applySelection (a, b, true, true);
+        else
+            updateSourceButtons();
+        return;
+    }
+    // Tiempo: "1:05", "1:05,5" o "65"
+    double seconds = 0.0;
+    const auto clean = text.replaceCharacter (',', '.');
+    if (clean.containsChar (':'))
+        seconds = clean.upToFirstOccurrenceOf (":", false, false).getIntValue() * 60.0
+                + clean.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
+    else
+        seconds = clean.getDoubleValue();
+    if (! clean.containsOnly ("0123456789.:") || ! std::isfinite (seconds))
+    {
+        updateSourceButtons();
+        return;
+    }
+    seconds = juce::jlimit (0.0, len, seconds);
+    double a = hasSelection() ? selStart : seconds, b = hasSelection() ? selEnd : seconds;
+    if (startField)
+        a = seconds, b = juce::jmax (b, juce::jmin (len, seconds + 1.0));
+    else
+        b = seconds, a = juce::jmin (a, juce::jmax (0.0, seconds - 1.0));
+    applySelection (a, b, false, false);
 }
 
 void MixEditor::Impl::updatePanel()
@@ -1797,6 +2009,7 @@ void MixEditor::Impl::layout()
         s.removeFromTop (6);
         sourceScroll.setBounds (s.removeFromBottom (12));
         sourceWave.setBounds (s);
+        updateSelectionFields();
     }
     {
         auto m = mixArea.reduced (8, 6);
@@ -1865,13 +2078,8 @@ void MixEditor::Impl::paintFrame (juce::Graphics& g)
         g.setColour (ui::trackColour (selectedSource()));
         g.drawText (src->name, info.removeFromLeft (nameWidth), juce::Justification::centredLeft, true);
 
-        const auto selection = selectionText();
-        const auto selectionFont = ui::font (12.0f, true);
-        const int selectionWidth = juce::jmin (info.getWidth() * 3 / 5,
-                                               juce::GlyphArrangement::getStringWidthInt (selectionFont, selection) + 8);
-        g.setFont (selectionFont);
-        g.setColour (! hasSelection() ? juce::Colours::grey : (selectionOffBeat() ? offBeatColour : juce::Colours::white));
-        g.drawText (selection, info.removeFromRight (selectionWidth), juce::Justification::centredRight, true);
+        // La selección son componentes (campos editables) a la derecha: el estado se dibuja antes
+        info.setRight (juce::jmax (info.getX(), juce::jmin (info.getRight(), selectionFieldsLeft - 6)));
 
         g.setFont (ui::font (12.0f));
         g.setColour (statusFor (selectedSource()).isNotEmpty() ? ui::accent : juce::Colours::lightgrey);
@@ -2113,7 +2321,11 @@ void MixEditor::Impl::sourceWaveMenu (double seconds, double tolerance)
     if (beat >= 0)
         m.addItem (1, tr ("Este tiempo es el 1 del compás"), true, src->analysis.beats[(size_t) beat].beatInBar == 1);
     m.addItem (2, tr ("Escuchar desde aquí"));
+    m.addSeparator();
+    m.addItem (5, tr ("Inicio del tramo aquí"));
+    m.addItem (6, tr ("Fin del tramo aquí"));
     m.addItem (3, tr ("Agregar la selección al mix"), hasSelection());
+    m.addSeparator();
     m.addItem (4, tr ("Ver la canción entera"));
     std::weak_ptr<bool> guard = alive;
     auto* self = this;
@@ -2145,6 +2357,8 @@ void MixEditor::Impl::sourceWaveMenu (double seconds, double tolerance)
             impl.addSelectionToMix();
         else if (result == 4)
             impl.sourceWave.fit();
+        else if (result == 5 || result == 6)
+            impl.setEdgeAt (result == 5, seconds);
     });
 }
 
@@ -2217,6 +2431,107 @@ void MixEditor::Impl::finishSelection()
         }
         sourceCursor = selStart;
     }
+    sourceWave.repaint();
+    updateSourceButtons();
+}
+
+// Arrastre de un solo borde: el otro queda donde está (aunque esté ajustado a la transiente). El borde ajustado
+// no pasa al otro lado: si el tiempo ajustado lo cruzaría, se queda en el último lugar válido.
+void MixEditor::Impl::dragEdge (bool startEdge, double seconds)
+{
+    if (currentSource() == nullptr || ! hasSelection())
+        return;
+    const double t = snapTime (seconds);
+    constexpr double minWidth = 0.05;
+    if (startEdge && t < selEnd - minWidth)
+        selStart = t;
+    else if (! startEdge && t > selStart + minWidth)
+        selEnd = t;
+    else
+        return;
+    sourceWave.repaint();
+    updateSourceButtons();
+}
+
+void MixEditor::Impl::finishEdge (bool startEdge)
+{
+    applySelection (selStart, selEnd, startEdge, ! startEdge);
+}
+
+// Menú "Inicio del tramo aquí" / "Fin del tramo aquí": ese borde va al tiempo ajustado; sin selección, el tramo va
+// de ahí al final de la canción (o del inicio hasta ahí) y se termina con el otro borde
+void MixEditor::Impl::setEdgeAt (bool startEdge, double seconds)
+{
+    if (currentSource() == nullptr)
+        return;
+    const double len = sourceLength (selectedSource());
+    const double t = snapTime (seconds);
+    double a = hasSelection() ? selStart : 0.0, b = hasSelection() ? selEnd : len;
+    if (startEdge)
+    {
+        a = t;
+        if (b <= a + 0.05)
+            b = len;
+    }
+    else
+    {
+        b = t;
+        if (b <= a + 0.05)
+            a = 0.0;
+    }
+    applySelection (a, b, startEdge, ! startEdge);
+}
+
+// Shift + clic: el borde más cercano al clic va ahí; sin selección, el tramo va del cabezal de la vista al clic
+void MixEditor::Impl::extendSelectionTo (double seconds)
+{
+    if (currentSource() == nullptr)
+        return;
+    const double t = snapTime (seconds);
+    if (! hasSelection())
+    {
+        const double c = snapTime (sourceCursor);
+        if (std::abs (t - c) > 0.05)
+            applySelection (juce::jmin (c, t), juce::jmax (c, t), true, true);
+        return;
+    }
+    const bool startEdge = std::abs (t - selStart) < std::abs (t - selEnd);
+    if (startEdge ? t >= selEnd - 0.05 : t <= selStart + 0.05)
+        return;
+    applySelection (startEdge ? t : selStart, startEdge ? selEnd : t, startEdge, ! startEdge);
+}
+
+// Pone la selección [start, end] y ajusta a la transiente los bordes pedidos (con compases y sin el modo
+// "Libre", como al soltar un arrastre); el cabezal de la vista va al inicio y la vista la muestra
+void MixEditor::Impl::applySelection (double start, double end, bool refineStart, bool refineEnd)
+{
+    auto* src = currentSource();
+    if (src == nullptr)
+        return;
+    const double len = sourceLength (selectedSource());
+    start = juce::jlimit (0.0, len, start);
+    end = juce::jlimit (0.0, len, end);
+    if (end < start)
+        std::swap (start, end);
+    if (end <= start + 0.02)
+    {
+        updateSourceButtons();
+        return;
+    }
+    if (snapMode != snapFree && ! src->analysis.beats.empty())
+    {
+        const double a = refineStart ? refineEdge (selectedSource(), start) : start;
+        const double b = refineEnd ? refineEdge (selectedSource(), end) : end;
+        if (b > a + 0.05)
+        {
+            start = a;
+            end = b;
+        }
+    }
+    selStart = start;
+    selEnd = end;
+    setSourceCursor (selStart);
+    sourceWave.ensureVisible (selStart, selEnd);
     sourceWave.repaint();
     updateSourceButtons();
 }
@@ -2631,6 +2946,14 @@ void MixEditor::selectSource (int index)
 void MixEditor::selectSegment (int index)
 {
     impl->chooseSegment (index);
+}
+
+void MixEditor::selectBars (int firstBar, int lastBar)
+{
+    auto* src = impl->currentSource();
+    double a = 0.0, b = 0.0;
+    if (src != nullptr && mix::barRange (src->analysis, impl->sourceLength (selectedSource), firstBar, lastBar, a, b))
+        impl->applySelection (a, b, true, true);
 }
 
 bool MixEditor::handleKey (const juce::KeyPress& key)

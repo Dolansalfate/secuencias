@@ -62,7 +62,8 @@ public:
     // Herramienta de captura: abre (o crea) el mix `name` en _mixes, le agrega esas fuentes si no las
     // tiene, y opcionalmente arma tramos de prueba (8 compases de cada fuente desde su 3.er compás) y
     // crea la canción (createMode 1 = separar con IA, 2 = sin separar)
-    void openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode);
+    void openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode,
+                            int selectFirstBar = -1, int selectLastBar = -1);
     bool isMixBusy() const;   // la captura espera a que termine lo que pidió del mix
     void createMidiTrackForCapture();   // pista MIDI de la batería, con una fila de conga y los golpes de 5 a 10 s en ella
     void openImportPickerForCapture()                         { chooseStems(); }
@@ -380,8 +381,8 @@ private:
     juce::File pendingMixInput;                    // copia temporal del render que se está separando
     struct MixCapture
     {
-        bool active = false, autoSegments = false, segmentsDone = false, createStarted = false;
-        int createMode = 0;
+        bool active = false, autoSegments = false, segmentsDone = false, createStarted = false, selectionDone = true;
+        int createMode = 0, selFirst = -1, selLast = -1;
     } mixCapture;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
     TimeMap timeMap;                     // original <-> reproducción de lo que suena

@@ -41,6 +41,8 @@ public:
     int getSelectedSegment() const { return selectedSegment; }
     void selectSource (int);
     void selectSegment (int);
+    // Selección de los compases first a last de la fuente elegida, como si se escribieran en la cabecera
+    void selectBars (int firstBar, int lastBar);
 
     // --- Avisos al dueño ---
     std::function<void()> onChanged;                              // tramos, tempo o análisis editados: guardar, render viejo
