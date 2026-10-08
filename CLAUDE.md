@@ -71,7 +71,11 @@ modelo que usa Moises).
   tempo del mix (el del primer tramo o el que se escriba; o "Cada tramo a su tempo"), así cada
   unión cae justo en la rejilla, y dentro del tramo se conserva el pulso de la grabación. Por
   tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
-  fundido cruzado (corte de 10 ms, 1 o 2 tiempos, 1 o 2 compases) y nombre. "Escuchar el mix" y
+  fundido cruzado (corte de 10 ms, 1 o 2 tiempos, 1 o 2 compases), compases de silencio antes (a su
+  tempo y su compás: el click sigue contando, sirve de cuenta para entrar; panel "Silencio antes" o
+  clic derecho en el tramo; un bloque rayado en la línea del mix) y nombre. La línea del mix tiene una
+  regla con los compases del mix (los de la canción que saldría, con los de silencio) sobre la del
+  tiempo, y líneas tenues de compás sobre los tramos. "Escuchar el mix" y
   "Escuchar la unión" (4 s antes) renderizan a `mezcla.wav` y lo reproducen con el click opcional
   siguiendo los tiempos del mix; también se escucha la fuente con su click para comprobar el
   análisis (con menú para tiempos a la mitad o al doble, compases de 3 o 4 y "este tiempo es el
@@ -886,7 +890,8 @@ Pasos de `run()`:
 
 ### 5.4i MixProject y MixEditor (armar mix antes de separar)
 - Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, levelLufs, sources: [{ name, file, length,
-  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats, id }] }`),
+  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats, id, silenceBars }],
+  nextSegmentId }`),
   `fuentes/` (copias de las canciones originales), `mezcla.wav` (último render, 44,1 kHz, 24 bits) y
   `pistas/<archivo>/<opciones>/` (las pistas separadas de cada canción original: una carpeta por
   archivo, con su extensión, y por opciones de separación, "4-0-0-1"; `pistas.json`: `{ options,
@@ -939,6 +944,15 @@ Pasos de `run()`:
   `selectionFirstBar` mira 0,1 s después del inicio (el corte ajustado queda unos ms antes del 1).
   `MixEditor::selectBars` hace lo mismo desde fuera (`--captura --mix=... --mixsel=5-8`). El selector
   `levelBox` (cabecera) edita `levelLufs`; `levelInfo` (panel) muestra el `MixLevel` del tramo elegido.
+  Silencio: `MixSegment::silenceBars` (0 a 64) y `MixPlacement::silence` (`layout`: el tramo empieza
+  compases · `meterOf` (su fuente, 4 sin análisis) · 60 / playBpm después del anterior, sin fundido
+  cruzado: entra con 2 ms y el anterior sale con 10 ms); `describeSong` pone tiempos en el silencio
+  (con el 1 en cada compás) y la sección de tempo del tramo empieza en su silencio; `remapTime` lleva
+  lo que cae en un silencio con su tramo, a la misma distancia antes de su inicio. En el editor:
+  `silenceBy` / `setSilenceBars` (panel y submenú del tramo), `mixBeats` (de `describeSong`, en
+  `recomputeLayout`) para la regla de compases (`MixLineView::drawBars`: número cada 1, 2, 4... según
+  el espacio, marcas de tiempo si caben, líneas tenues sobre los tramos), el silencio dibujado rayado
+  y `segmentAt` que lo cuenta como parte de su tramo.
   En la captura, `--mixtramos` también renderiza el mix (se ve el nivelado).
 - En `MainComponent`: `openMix` descarga la canción (`unloadSong`; se recuerda por carpeta en
   `mixReturnFolder`, que se conserva al pasar de un mix a otro) y pone el editor encima del área
@@ -1218,6 +1232,9 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.8.1**: armar mix con compases de silencio antes de un tramo (`silenceBars`, el click sigue en el
+  silencio, sin fundido a través de él) y regla de compases en la línea del mix (`mixBeats`, `drawBars`);
+  `mix::meterOf`; con `--mixtramos` la captura elige el último tramo aunque el mix ya tenga tramos.
 - **v0.8.0 (canciones ligadas a su mix)**: separación de cada canción original una vez (`MixSongJob`,
   `<mix>/pistas`, `storeStems`, `cachedStems`), pistas armadas con los tramos (`mix::renderStems`, render
   repartido en `makePlan` / `readLayer` / `levelSegment` / `addSegment`), `MixSegment::id`,

@@ -2060,6 +2060,79 @@ int main()
         }
 
         {
+            std::cout << "  compases de silencio entre tramos: ubicación, tiempos que siguen, render mudo y reubicación\n";
+            auto ps = proj;   // A (120 BPM) a 100 y B (100 BPM): A dura 2,4 s en el mix
+            ps.levelLufs = 0.0;
+            ps.bpm = 100.0;
+            ps.keepTempos = false;
+            MixSegment a = segA, b = segB;
+            b.silenceBars = 2;   // 2 compases de 4 a 100 BPM = 4,8 s
+            ps.segments = { a, b };
+            ps.ensureSegmentIds();
+            auto pl2 = mix::layout (ps);
+            CHECK (pl2.size() == 2 && approx (pl2[1].silence, 4.8) && approx (pl2[1].outStart, 7.2) && approx (pl2[1].outEnd, 9.6));
+            CHECK (approx (pl2[1].fadeIn, 0.0) && approx (pl2[0].fadeOut, mix::cutFadeSeconds));   // sin fundido cruzado a través del silencio
+            CHECK (approx (mix::length (ps), 9.6));
+            // Los tiempos siguen en el silencio (8, con el 1 en cada compás) y la canción tiene 16
+            SongInfo withSilence;
+            mix::describeSong (ps, withSilence);
+            const auto& sb = withSilence.analysis.beats;
+            CHECK (sb.size() == 16);
+            if (sb.size() == 16)
+            {
+                CHECK (approx (sb[4].seconds, 2.4) && sb[4].beatInBar == 1 && approx (sb[5].seconds, 3.0) && sb[5].beatInBar == 2);
+                CHECK (approx (sb[8].seconds, 4.8) && sb[8].beatInBar == 1 && approx (sb[11].seconds, 6.6) && sb[11].beatInBar == 4);
+                CHECK (approx (sb[12].seconds, 7.2));
+            }
+            bool markerAtB = false;
+            for (auto& m : withSilence.markers)
+                markerAtB = markerAtB || approx (m.seconds, 7.2);
+            CHECK (markerAtB);   // la canción entra después del silencio
+            // Con otro tempo para B, su sección de tempo empieza donde empieza su silencio
+            auto ps90 = ps;
+            ps90.segments[1].playBpm = 90.0;
+            SongInfo at90;
+            mix::describeSong (ps90, at90);
+            CHECK (at90.tempoRegions.size() == 2 && approx (at90.tempoRegions[1].start, 2.4) && approx (at90.tempoRegions[1].origBpm, 90.0));
+            // El render queda mudo en el silencio
+            {
+                juce::String err;
+                const auto rendered = mix::render (ps, mix::renderSampleRate, formats, {}, {}, err);
+                CHECK (err.isEmpty() && rendered.getNumSamples() == (int) std::ceil (9.6 * mix::renderSampleRate));
+                const int s0 = (int) (2.45 * mix::renderSampleRate), s1 = (int) (7.15 * mix::renderSampleRate);
+                CHECK (rendered.getMagnitude (0, s0, s1 - s0) < 1.0e-6f);
+                CHECK (rendered.getMagnitude (0, (int) (7.2 * mix::renderSampleRate), (int) (2.0 * mix::renderSampleRate)) > 0.1f);
+            }
+            // Algo puesto en el silencio va con su tramo, a la misma distancia antes de su inicio (si el silencio nuevo alcanza)
+            {
+                const auto before2 = mix::pieces (ps);
+                auto shorter = ps;
+                shorter.segments[1].silenceBars = 1;   // B entra en 4,8
+                const auto after2 = mix::pieces (shorter);
+                double t = 0.0;
+                CHECK (mix::remapTime (before2, after2, 6.0, t) && approx (t, 3.6));
+                CHECK (! mix::remapTime (before2, after2, 3.0, t));   // 4,2 s antes: el silencio nuevo dura 2,4
+                CHECK (mix::remapTime (before2, after2, 8.0, t) && approx (t, 5.6));   // dentro de B
+            }
+            // mix.json guarda los compases de silencio
+            {
+                const auto silenceFolder = MixProject::create (mixRoot, "Silencio");
+                MixProject a1;
+                CHECK (MixProject::load (silenceFolder, a1));
+                a1.sources = ps.sources;
+                a1.segments = ps.segments;
+                CHECK (a1.save());
+                MixProject a2;
+                CHECK (MixProject::load (silenceFolder, a2) && a2.segments.size() == 2 && a2.segments[1].silenceBars == 2
+                       && a2.segments[0].silenceBars == 0);
+            }
+            // La huella cambia con el silencio (una canción ligada se vuelve a armar)
+            auto noSilence = ps;
+            noSilence.segments[1].silenceBars = 0;
+            CHECK (mix::renderSignature (noSilence) != mix::renderSignature (ps));
+        }
+
+        {
             std::cout << "  canción ligada: ids de tramo, pistas por fuente, pistas que suman el mix, huella y reubicación\n";
             // Ids: los que faltan o se repiten reciben uno nuevo; los demás se conservan
             MixProject ids;

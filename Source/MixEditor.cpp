@@ -12,7 +12,7 @@ namespace
     constexpr int headerHeight = 36, statusHeight = 22, sourcesWidth = 230, panelHeight = 70;
     constexpr int narrowWidth = 900;           // editor más angosto: columna de canciones de 160 px
     constexpr int narrowSourcesWidth = 160;
-    constexpr int panelTwoRowsWidth = 744;     // panel del tramo más angosto que esto: tres filas (y más alto)
+    constexpr int panelTwoRowsWidth = 1010;    // panel del tramo más angosto que esto: tres filas (y más alto)
     constexpr int threeRowsPanelHeight = 98;
     constexpr double onBeatTolerance = 0.1;      // un borde a menos de esto de un tiempo cae en el tiempo (el corte a la transiente lo adelanta)
     const juce::Colour waveBackground { 0xff181c21 };
@@ -769,7 +769,8 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     class MixLineView : public juce::Component
     {
     public:
-        static constexpr int rulerHeight = 16, textHeight = 32;
+        static constexpr int barsHeight = 15, timeHeight = 14;           // regla: compases arriba, tiempo abajo
+        static constexpr int rulerHeight = barsHeight + timeHeight, textHeight = 32;
         static constexpr float blockPad = 4.0f;
         static constexpr double maxPixelsPerSecond = 400.0;
 
@@ -849,7 +850,7 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             for (int i = 0; i < (int) places.size(); ++i)
             {
                 const auto& p = places[(size_t) i];
-                if (p.outEnd > p.outStart && t >= p.outStart && t < p.outEnd)
+                if (p.outEnd > p.outStart && t >= p.outStart - p.silence && t < p.outEnd)   // su silencio antes, también
                     return i;
             }
             return -1;
@@ -879,15 +880,53 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             const int w = getWidth(), h = getHeight();
             g.setColour (ui::panelAlt);
             g.fillRect (0, 0, w, rulerHeight);
-            drawTimeTicks (g, viewStart, pixelsPerSecond, w, rulerHeight);
+            {
+                juce::Graphics::ScopedSaveState state (g);
+                g.setOrigin (0, barsHeight);
+                drawTimeTicks (g, viewStart, pixelsPerSecond, w, timeHeight);
+            }
+            g.setColour (juce::Colours::black.withAlpha (0.3f));
+            g.fillRect (0, barsHeight, w, 1);
 
             if (! imageValid)
                 renderImage();
             g.drawImageAt (image, 0, rulerHeight);
+            drawBars (g, w, h);
 
             const float top = (float) rulerHeight + blockPad, bottom = (float) h - blockPad;
             const auto& places = impl.placements;
             const int count = juce::jmin ((int) places.size(), (int) proj->segments.size());
+
+            // Compases de silencio antes de un tramo: un bloque rayado con su largo
+            for (int i = 0; i < count; ++i)
+            {
+                const auto& p = places[(size_t) i];
+                if (p.silence <= 0.0 || p.outEnd <= p.outStart)
+                    continue;
+                const float a = timeToX (p.outStart - p.silence), b = timeToX (p.outStart);
+                if (b < 0.0f || a > (float) w)
+                    continue;
+                const auto block = juce::Rectangle<float> (a, top, b - a, bottom - top);
+                g.setColour (juce::Colours::white.withAlpha (0.05f));
+                g.fillRect (block);
+                {
+                    juce::Graphics::ScopedSaveState state (g);
+                    g.reduceClipRegion (block.toNearestInt());
+                    g.setColour (juce::Colours::white.withAlpha (0.08f));
+                    for (float x = a - (bottom - top); x < b; x += 10.0f)
+                        g.drawLine (x, bottom, x + (bottom - top), top, 1.0f);
+                }
+                g.setColour (juce::Colours::white.withAlpha (0.25f));
+                g.drawRect (block, 1.0f);
+                const int bars = proj->segments[(size_t) i].silenceBars;
+                const auto text = juce::String (bars) + (bars == 1 ? tr (" compás de silencio") : tr (" compases de silencio"));
+                g.setFont (ui::font (11.0f));
+                g.setColour (juce::Colours::lightgrey);
+                if (juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 10 <= (int) (b - a))
+                    g.drawText (text, block.reduced (5.0f, 2.0f).removeFromTop (16.0f), juce::Justification::centredLeft, true);
+                else if (b - a >= 26.0f)
+                    g.drawText (juce::String (bars) + " c.", block.reduced (3.0f, 2.0f).removeFromTop (16.0f), juce::Justification::centred, true);
+            }
             for (int i = 0; i < count; ++i)
             {
                 const auto& p = places[(size_t) i];
@@ -955,6 +994,61 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             drawHead (g, timeToX (impl.mixCursor), h, juce::Colours::white.withAlpha (0.75f), 1.0f);
             if (impl.playKind == 2)
                 drawHead (g, timeToX (impl.playSeconds), h, ui::playhead, 2.0f);
+        }
+
+        // Compases del mix (los tiempos de la canción que saldría, con los de silencio): número en la regla, cada 1, 2,
+        // 4... según el espacio, y una línea tenue sobre los tramos; marcas de los tiempos si hay lugar
+        void drawBars (juce::Graphics& g, int w, int h) const
+        {
+            const auto& beats = impl.mixBeats;
+            std::vector<double> downbeats;
+            for (auto& b : beats)
+                if (b.beatInBar == 1)
+                    downbeats.push_back (b.seconds);
+            if (downbeats.empty())
+            {
+                g.setColour (juce::Colours::grey);
+                g.setFont (ui::font (10.0f));
+                g.drawText (tr ("Compases: cuando las canciones estén analizadas"), 6, 0, juce::jmax (0, w - 12), barsHeight,
+                            juce::Justification::centredLeft, true);
+                return;
+            }
+            const double barSeconds = downbeats.size() > 1 ? (downbeats.back() - downbeats.front()) / (double) (downbeats.size() - 1) : 2.0;
+            const double barPixels = barSeconds * pixelsPerSecond;
+            int step = 1;
+            for (int s : { 1, 2, 4, 8, 16, 32, 64, 128 })
+            {
+                step = s;
+                if (s * barPixels >= 30.0)
+                    break;
+            }
+            if (barPixels >= 24.0)   // tiempos: marcas cortas
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.25f));
+                for (auto& b : beats)
+                    if (b.beatInBar != 1)
+                        if (const float x = timeToX (b.seconds); x >= 0.0f && x <= (float) w)
+                            g.fillRect (x, (float) barsHeight - 4.0f, 1.0f, 4.0f);
+            }
+            g.setFont (ui::font (10.0f, true));
+            for (size_t k = 0; k < downbeats.size(); ++k)
+            {
+                const float x = timeToX (downbeats[k]);
+                if (x < -40.0f || x > (float) w)
+                    continue;
+                const bool labeled = k % (size_t) step == 0;
+                if (barPixels >= 6.0f)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (labeled ? 0.10f : 0.05f));
+                    g.fillRect (x, (float) rulerHeight, 1.0f, (float) (h - rulerHeight));   // sobre los tramos
+                }
+                if (! labeled)
+                    continue;
+                g.setColour (juce::Colours::white.withAlpha (0.5f));
+                g.fillRect (x, 0.0f, 1.0f, (float) barsHeight);
+                g.setColour (juce::Colours::white);
+                g.drawText (juce::String ((int) k + 1), (int) x + 3, 0, 40, barsHeight, juce::Justification::centredLeft);
+            }
         }
 
         void mouseDown (const juce::MouseEvent& e) override
@@ -1169,6 +1263,8 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     void segmentGainEdited();
     void segmentLabelEdited();
     void transposeBy (int semitones);
+    void silenceBy (int bars);                  // compases de silencio antes del tramo elegido (+ o -)
+    void setSilenceBars (int index, int bars);
     void fadeChosen();
 
     MixEditor& owner;
@@ -1184,6 +1280,7 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
 
     std::vector<MixPlacement> placements;   // mix::layout del proyecto (uno por tramo)
     std::vector<bool> offBeatJoins;         // por tramo: su unión con el anterior no cae en un tiempo (joinOffBeat)
+    std::vector<Beat> mixBeats;             // tiempos del mix (los de la canción que saldría: describeSong), para los compases
     double mixLength = 0.0;
     double selStart = 0.0, selEnd = 0.0;    // selección en segundos de la fuente elegida (vacía si selEnd <= selStart)
     double sourceCursor = 0.0, mixCursor = 0.0;
@@ -1225,6 +1322,8 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     juce::TextButton startEarlierBtn, startLaterBtn, endEarlierBtn, endLaterBtn;
     juce::Label tempoCaption, segTempoEdit, toneCaption, toneValue, gainCaption, gainEdit, fadeCaption, nameCaption, labelEdit;
     juce::Label levelInfo;                  // "Niv +3,2 dB": lo que el nivelado le dio al tramo elegido
+    juce::Label silenceCaption, silenceValue;   // compases de silencio antes del tramo elegido
+    juce::TextButton silenceDownBtn, silenceUpBtn;
     juce::TextButton toneDownBtn, toneUpBtn;
     juce::ComboBox fadeBox;
     // Pie
@@ -1396,9 +1495,16 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
     };
     labelEdit.onTextChange = [this] { segmentLabelEdited(); };
     styleCaption (levelInfo, {});
+    styleCaption (silenceCaption, "Silencio antes", juce::Justification::centredRight);
+    silenceDownBtn.setButtonText ("-");
+    silenceDownBtn.onClick = [this] { silenceBy (-1); };
+    styleValue (silenceValue, false);
+    silenceUpBtn.setButtonText ("+");
+    silenceUpBtn.onClick = [this] { silenceBy (1); };
 
     for (auto* b : std::initializer_list<juce::TextButton*> { &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startEarlierBtn,
-                                                               &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn })
+                                                               &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn,
+                                                               &silenceDownBtn, &silenceUpBtn })
         b->setLookAndFeel (&compactLook);
 
     statusLabel.setFont (ui::font (12.0f));
@@ -1415,7 +1521,7 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
              &segCaption, &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startCaption, &startEarlierBtn, &startLaterBtn,
              &endCaption, &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit, &toneCaption, &toneDownBtn,
              &toneValue, &toneUpBtn, &gainCaption, &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit,
-             &levelInfo, &statusLabel })
+             &levelInfo, &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn, &statusLabel })
         owner.addAndMakeVisible (c);
 }
 
@@ -1424,7 +1530,8 @@ MixEditor::Impl::~Impl()
     sourceScroll.removeListener (this);
     mixScroll.removeListener (this);
     for (auto* b : std::initializer_list<juce::TextButton*> { &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startEarlierBtn,
-                                                               &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn })
+                                                               &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn,
+                                                               &silenceDownBtn, &silenceUpBtn })
         b->setLookAndFeel (nullptr);
 }
 
@@ -1709,12 +1816,16 @@ void MixEditor::Impl::recomputeLayout()
     if (proj == nullptr)
     {
         placements.clear();
+        mixBeats.clear();
         mixLength = 0.0;
     }
     else
     {
         placements = mix::layout (*proj);
         mixLength = placements.empty() ? 0.0 : placements.back().outEnd;
+        SongInfo described;
+        mix::describeSong (*proj, described);   // los tiempos que tendrá la canción: compases del mix (con los de silencio)
+        mixBeats = described.analysis.beats;
         offBeatJoins.assign (proj->segments.size(), false);
         for (size_t i = 1; i < proj->segments.size(); ++i)
         {
@@ -1899,13 +2010,14 @@ void MixEditor::Impl::updatePanel()
                                                               &startCaption, &startEarlierBtn, &startLaterBtn, &endCaption,
                                                               &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit,
                                                               &toneCaption, &toneDownBtn, &toneValue, &toneUpBtn, &gainCaption,
-                                                              &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit })
+                                                              &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit,
+                                                              &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn })
         c->setEnabled (on);
     levelInfo.setText ({}, juce::dontSendNotification);
     if (! on)
     {
         segCaption.setText ("Sin tramo", juce::dontSendNotification);
-        for (auto* l : std::initializer_list<juce::Label*> { &segTempoEdit, &toneValue, &gainEdit, &labelEdit })
+        for (auto* l : std::initializer_list<juce::Label*> { &segTempoEdit, &toneValue, &gainEdit, &labelEdit, &silenceValue })
             l->setText ({}, juce::dontSendNotification);
         fadeBox.setSelectedId (0, juce::dontSendNotification);
         return;
@@ -1929,6 +2041,12 @@ void MixEditor::Impl::updatePanel()
     toneValue.setColour (juce::Label::textColourId, seg->transpose != 0 ? ui::accent : juce::Colours::white);
     toneDownBtn.setEnabled (seg->transpose > -12);
     toneUpBtn.setEnabled (seg->transpose < 12);
+    silenceValue.setText (seg->silenceBars == 0 ? juce::String ("ninguno")
+                                                : juce::String (seg->silenceBars) + (seg->silenceBars == 1 ? tr (" compás") : juce::String (" compases")),
+                          juce::dontSendNotification);
+    silenceValue.setColour (juce::Label::textColourId, seg->silenceBars > 0 ? ui::accent : juce::Colours::white);
+    silenceDownBtn.setEnabled (seg->silenceBars > 0);
+    silenceUpBtn.setEnabled (seg->silenceBars < MixSegment::maxSilenceBars);
     if (! gainEdit.isBeingEdited())
         gainEdit.setText (gainText (seg->gainDb), juce::dontSendNotification);
     // Nivelado del último render: "Niv +5,4 dB · lim -6,2" (cuánto bajó el limitador los picos; "tope" en naranja
@@ -2081,7 +2199,9 @@ void MixEditor::Impl::layout()
         layoutRow (p, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                         { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
                         { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 150, false, 90 }, { nullptr, 6 },
-                        { &fadeCaption, 54 }, { &fadeBox, 110 }, { nullptr, 0, true } }, 3);
+                        { &fadeCaption, 54 }, { &fadeBox, 110 }, { nullptr, 6 },
+                        { &silenceCaption, 92 }, { &silenceDownBtn, 26 }, { &silenceValue, 82 }, { &silenceUpBtn, 26 },
+                        { nullptr, 0, true } }, 3);
         return;
     }
     // Tres filas: tramo y nombre; cortes y fundido; tempo, tono y ganancia
@@ -2092,7 +2212,8 @@ void MixEditor::Impl::layout()
     p.removeFromTop (rowGap);
     auto row3 = p.removeFromTop (rowHeight);
     layoutRow (row1, { { &segCaption, 84, false, 70 }, { &moveLeftBtn, 26 }, { &moveRightBtn, 26 }, { &removeSegBtn, 56 },
-                       { nullptr, 10, false, 4 }, { &nameCaption, 48 }, { &labelEdit, 120, true, 90 } }, 3);
+                       { nullptr, 10, false, 4 }, { &silenceCaption, 92, false, 80 }, { &silenceDownBtn, 26 }, { &silenceValue, 82, false, 70 },
+                       { &silenceUpBtn, 26 }, { nullptr, 10, false, 4 }, { &nameCaption, 48 }, { &labelEdit, 120, true, 90 } }, 3);
     layoutRow (row2, { { &startCaption, 38, false, 34 }, { &startEarlierBtn, 66 }, { &startLaterBtn, 66 }, { nullptr, 6, false, 2 },
                        { &endCaption, 26, false, 22 }, { &endEarlierBtn, 66 }, { &endLaterBtn, 66 }, { nullptr, 6, false, 2 },
                        { &fadeCaption, 54, false, 48 }, { &fadeBox, 110, false, 96 }, { nullptr, 0, true } }, 3);
@@ -2646,6 +2767,15 @@ void MixEditor::Impl::segmentMenu (int index, double mixSeconds)
     m.addItem (5, tr ("Escuchar desde aquí"));
     m.addItem (6, tr ("Escuchar la unión"));
     m.addSeparator();
+    {
+        juce::PopupMenu silence;
+        const int current = proj->segments[(size_t) index].silenceBars;
+        for (int bars : { 0, 1, 2, 4, 8, 16 })
+            silence.addItem (100 + bars, bars == 0 ? juce::String ("Ninguno") : juce::String (bars) + (bars == 1 ? tr (" compás") : juce::String (" compases")),
+                             true, bars == current);
+        m.addSubMenu (index == 0 ? tr ("Silencio antes (al empezar el mix)") : tr ("Silencio antes de este tramo"), silence);
+    }
+    m.addSeparator();
     m.addItem (4, "Quitar");
     std::weak_ptr<bool> guard = alive;
     auto* self = this;
@@ -2665,7 +2795,10 @@ void MixEditor::Impl::segmentMenu (int index, double mixSeconds)
             case 4: impl.removeSegment (index); break;
             case 5: impl.setMixCursor (mixSeconds); impl.playMix (mixSeconds); break;
             case 6: impl.chooseSegment (index); impl.playJoin(); break;
-            default: break;
+            default:
+                if (result >= 100 && result <= 100 + MixSegment::maxSilenceBars)
+                    impl.setSilenceBars (index, result - 100);
+                break;
         }
     });
 }
@@ -2913,6 +3046,24 @@ void MixEditor::Impl::transposeBy (int semitones)
     if (value == seg->transpose)
         return;
     seg->transpose = value;
+    changed();
+}
+
+void MixEditor::Impl::silenceBy (int bars)
+{
+    if (auto* seg = currentSegment())
+        setSilenceBars (selectedSegment(), seg->silenceBars + bars);
+}
+
+void MixEditor::Impl::setSilenceBars (int index, int bars)
+{
+    auto* proj = project();
+    if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
+        return;
+    const int value = juce::jlimit (0, MixSegment::maxSilenceBars, bars);
+    if (value == proj->segments[(size_t) index].silenceBars)
+        return;
+    proj->segments[(size_t) index].silenceBars = value;
     changed();
 }
 

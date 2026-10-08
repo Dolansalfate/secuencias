@@ -80,7 +80,10 @@ El mismo código sigue compilando en macOS.
   el pulso (puedes elegir "Cada tramo a su tempo" o darle a un tramo su propio tempo). Por tramo
   puedes moverlo, quitarlo, alargarlo o acortarlo por compases, cambiarle el tono, la ganancia y el
   fundido con el anterior (corte o 1-2 tiempos o compases). "Escuchar el mix" o "Escuchar la unión"
-  (con "Click" para comprobar el pulso). Ctrl+Z deshace. Al final, "Crear canción...": separarla con
+  (con "Click" para comprobar el pulso). La línea del mix muestra los compases arriba (y el tiempo
+  abajo). Para dejar compases de silencio entre dos canciones (el click sigue contando: sirve de
+  cuenta para entrar), elige el tramo que viene después y usa "Silencio antes" [-] [+] en su panel,
+  o clic derecho en el tramo > "Silencio antes de este tramo". Ctrl+Z deshace. Al final, "Crear canción...": separarla con
   IA (con las opciones de pistas y calidad de arriba) o agregarla sin separar; la canción aparece en
   el setlist con sus tiempos, compases, acordes, secciones de tempo y un marcador en cada tramo, sin
   tener que analizarla de nuevo. El mix queda guardado para seguir otro día ("Armar mix" > su nombre).

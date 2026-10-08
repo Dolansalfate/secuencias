@@ -70,6 +70,8 @@ namespace
         o->setProperty ("gainDb", (double) s.gainDb);
         o->setProperty ("fadeBeats", s.fadeBeats);
         o->setProperty ("id", s.id);
+        if (s.silenceBars > 0)
+            o->setProperty ("silenceBars", s.silenceBars);
         return juce::var (o);
     }
 
@@ -239,6 +241,7 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
             s.gainDb = (float) finiteIn ((double) sv.getProperty ("gainDb", 0.0), -24.0, 12.0, 0.0);
             s.fadeBeats = finiteIn ((double) sv.getProperty ("fadeBeats", 0.0), 0.0, 16.0, 0.0);
             s.id = (int) finiteIn ((double) sv.getProperty ("id", 0), 0.0, 1.0e9, 0.0);
+            s.silenceBars = (int) finiteIn ((double) sv.getProperty ("silenceBars", 0), 0.0, (double) MixSegment::maxSilenceBars, 0.0);
             p.segments.push_back (s);
         }
     p.ensureSegmentIds();   // mix.json de antes (sin ids): en orden, siempre los mismos
@@ -523,6 +526,12 @@ namespace mix
         return end > start;
     }
 
+    int meterOf (const MixSource& source)
+    {
+        const int meter = source.analysis.meter;
+        return meter >= 2 && meter <= 12 ? meter : 4;
+    }
+
     std::vector<MixPlacement> layout (const MixProject& project)
     {
         std::vector<MixPlacement> out (project.segments.size());
@@ -551,9 +560,12 @@ namespace mix
             if (p.srcEnd <= p.srcStart)
                 continue;   // largo 0: no suena
 
-            p.outEnd = position + (p.srcEnd - p.srcStart) * p.ratio;
+            // Compases de silencio antes: el tramo empieza ese lapso después del anterior (a su tempo y su compás)
+            p.silence = seg.silenceBars > 0 ? juce::jlimit (0, MixSegment::maxSilenceBars, seg.silenceBars) * meterOf (*s) * 60.0 / p.playBpm : 0.0;
+            p.outStart = position + p.silence;
+            p.outEnd = p.outStart + (p.srcEnd - p.srcStart) * p.ratio;
             const double duration = p.outEnd - p.outStart;
-            if (previous >= 0)
+            if (previous >= 0 && p.silence <= 0.0)
             {
                 // Fundido cruzado en la unión: el tramo que entra empieza a sonar `fadeIn` antes (con
                 // el audio que precede a su inicio en la fuente) y el anterior se apaga en ese lapso
@@ -609,6 +621,15 @@ namespace mix
                 analysis.meter = an.meter;
                 analysis.bpm = p.playBpm;
             }
+            // Compases de silencio antes del tramo: el click sigue con su tempo y su compás (cuenta para entrar)
+            if (p.silence > 0.0)
+            {
+                const int meter = meterOf (src);
+                const int count = juce::jlimit (0, MixSegment::maxSilenceBars, seg.silenceBars) * meter;
+                const double beat = 60.0 / juce::jmax (1.0, p.playBpm);
+                for (int k = 0; k < count; ++k)
+                    beats.push_back ({ Beat { p.outStart - p.silence + k * beat, k % meter + 1 }, i, 30.0 / juce::jmax (1.0, p.playBpm) });
+            }
             for (auto& b : an.beats)
                 if (b.seconds >= p.srcStart - beatTolerance && b.seconds < p.srcEnd - beatTolerance)
                 {
@@ -628,7 +649,7 @@ namespace mix
                     chords.push_back (mc);
             }
             TempoRegion r;
-            r.start = p.outStart;
+            r.start = p.outStart - p.silence;   // el silencio va al tempo del tramo que entra
             r.origBpm = p.playBpm;
             r.playBpm = 0.0;
             regions.push_back (r);
@@ -1252,7 +1273,26 @@ namespace mix
         if (old == nullptr && ! from.empty() && std::abs (seconds - from.back().outEnd) < 1.0e-6)
             old = &from.back();   // justo en el final
         if (old == nullptr)
+        {
+            // En el silencio antes de un tramo: va con ese tramo, a la misma distancia antes de su inicio (si ese
+            // silencio nuevo alcanza)
+            for (size_t j = 0; j < from.size(); ++j)
+            {
+                const double gapStart = j == 0 ? 0.0 : from[j - 1].outEnd;
+                if (seconds < gapStart - 1.0e-6 || seconds >= from[j].outStart)
+                    continue;
+                const double before = from[j].outStart - seconds;
+                for (size_t k = 0; k < to.size(); ++k)
+                    if (to[k].id == from[j].id && (to[k].source.isEmpty() || from[j].source.isEmpty() || to[k].source == from[j].source))
+                    {
+                        const double newGapStart = k == 0 ? 0.0 : to[k - 1].outEnd;
+                        out = to[k].outStart - before;
+                        return out >= newGapStart - 1.0e-6;
+                    }
+                return false;
+            }
             return false;
+        }
         const double src = old->srcStart + (seconds - old->outStart) / old->ratio;
         for (auto& p : to)
             if (p.id == old->id && (p.source.isEmpty() || old->source.isEmpty() || p.source == old->source))

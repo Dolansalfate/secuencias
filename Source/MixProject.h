@@ -36,6 +36,8 @@ struct MixSegment
     float gainDb = 0.0f;        // -24..12
     double fadeBeats = 0.0;     // fundido cruzado con el tramo anterior, en tiempos del mix (0 = corte de 10 ms)
     int id = 0;                 // estable dentro del mix (ensureSegmentIds): una canción ligada reubica lo suyo por tramo
+    int silenceBars = 0;        // compases de silencio antes del tramo (a su tempo y con su compás; 0 a 64): el click sigue
+    static constexpr int maxSilenceBars = 64;
 };
 
 struct MixProject
@@ -116,6 +118,7 @@ struct MixPlacement
     double ratio = 1.0;                    // duración en el mix / duración en la fuente = srcBpm / playBpm
     double fadeIn = 0.0;                   // segundos del mix antes de outStart en que el tramo ya entra (fundido cruzado)
     double fadeOut = 0.0;                  // segundos antes de outEnd en que se desvanece (= fadeIn del siguiente; 10 ms al final)
+    double silence = 0.0;                  // segundos de silencio antes de outStart (silenceBars del tramo)
 };
 
 namespace mix
@@ -146,6 +149,8 @@ namespace mix
     int barNumberAt (const Analysis&, double seconds);
     // Compases completos entre dos instantes (primeros tiempos de compás en [start - 0,05, end - 0,05))
     int barsBetween (const Analysis&, double start, double end);
+    // Tiempos por compás de una fuente (su análisis; 4 si no tiene)
+    int meterOf (const MixSource&);
     // Cantidad de compases (primeros tiempos de compás) de la fuente
     int barCount (const Analysis&);
     // Tramo de los compases first a last (inclusive, numerados como barNumberAt): desde el primer tiempo del
@@ -156,7 +161,9 @@ namespace mix
 
     // Ubicación de todos los tramos (ver MixPlacement). Tramos con fuente inexistente o largo <= 0
     // quedan con outEnd == outStart (no suenan). Tempo de cada tramo: playBpm propio > 0; si no,
-    // keepTempos ? su tempo detectado : effectiveBpm(). Sin tempo detectado, ratio = 1.
+    // keepTempos ? su tempo detectado : effectiveBpm(). Sin tempo detectado, ratio = 1. Un tramo con
+    // silenceBars empieza silence = compases · compás de su fuente (4 sin análisis) · 60 / playBpm después
+    // del anterior, sin fundido cruzado con él (entra con edgeFadeSeconds y el anterior sale con 10 ms).
     // fadeIn (i > 0): fadeBeats > 0 ? fadeBeats · 60 / playBpm : cutFadeSeconds, acotado a lo que hay
     // de audio antes del inicio en la fuente (srcStart · ratio) y a la mitad de la duración de ambos
     // tramos. fadeIn del primero = 0. fadeOut = fadeIn del siguiente; el del último = cutFadeSeconds.

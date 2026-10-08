@@ -5648,10 +5648,10 @@ void MainComponent::mixCaptureStep()
                     mixProject->segments.push_back (seg);
             }
             mixEditor->refresh();
-            if (! mixProject->segments.empty())
-                mixEditor->selectSegment ((int) mixProject->segments.size() - 1);
             mixEdited();
         }
+        if (! mixProject->segments.empty())
+            mixEditor->selectSegment ((int) mixProject->segments.size() - 1);   // el panel del último tramo a la vista
         return;
     }
     if (mixCapture.autoSegments && ! mixCapture.renderStarted)
