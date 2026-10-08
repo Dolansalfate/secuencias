@@ -63,10 +63,11 @@ modelo que usa Moises).
   en la cabecera de la fuente los compases se escriben ("Compases [8] a [16]"; sin análisis, tiempos
   m:ss). Un clic suelto solo mueve el cabezal desde donde escucha "Escuchar". **Nivelado** (selector de
   la cabecera: sin nivelar o -12/-14/-16/-18 LUFS; los mixes nuevos empiezan en -14): al renderizar,
-  cada tramo se mide (EBU R128) y se lleva a esa sonoridad sin pasar de -1 dBTP (tope ±12 dB), con su
-  ganancia propia encima; el panel muestra "Niv +x dB" (naranja con "tope" si no llegó para no
-  saturar) y el pie la sonoridad del mix y cuántos tramos quedaron más bajos. Así la canción que se
-  separa ya va pareja. Cada tramo se estira con razón constante para durar exactamente sus tiempos al
+  cada tramo se mide (EBU R128) y recibe la ganancia que lo lleva a esa sonoridad (tope ±12 dB), con
+  su ganancia propia encima; un limitador con anticipación baja solo los picos que pasarían de -1,5 dB
+  (pico real cerca de -1 dBTP), así una grabación antigua, baja y con picos altos también llega. El
+  panel muestra "Niv +6,2 dB · lim -3,9" y el pie la sonoridad del mix y en cuántos tramos actuó el
+  limitador. Así la canción que se separa ya va pareja (el limitador alcanza también a los stems). Cada tramo se estira con razón constante para durar exactamente sus tiempos al
   tempo del mix (el del primer tramo o el que se escriba; o "Cada tramo a su tempo"), así cada
   unión cae justo en la rejilla, y dentro del tramo se conserva el pulso de la grabación. Por
   tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
@@ -890,9 +891,13 @@ Pasos de `run()`:
   lo estira y transpone con `stretcher::renderBuffer` y un `TimeMap` de una sección (o lo copia si
   no hace falta), aplica ganancia y fundidos y lo suma. Con `levelLufs` < 0 (0 = sin nivelar; los mixes
   guardados sin el campo quedan así; `MixProject::create` pone `defaultLevelLufs` = -14), antes de los
-  fundidos mide el cuerpo del tramo (desde la unión, sin el audio previo del fundido) con
-  `loudness::measure` y le suma `gainToTarget (medida, objetivo, -1 dBTP)` acotado a ±12 dB; lo
-  aplicado sale en `MixLevel` (`render (..., &levels)`: dB, sonoridad resultante, `peakLimited`).
+  fundidos copia el tramo alineado con el mix (`aligned`), mide su cuerpo (desde la unión, sin el audio
+  previo del fundido; `loudness::measure` sin pico real) y le da `objetivo - medida` (±`maxLevelDb`);
+  `loudness::limiterGains` (techo `limiterCeilingDb` -1,5 dB sobre muestras y su estimación cúbica a
+  media muestra, anticipación 5 ms como media de un mínimo hacia adelante, vuelta de un polo de 100
+  ms) da la ganancia por muestra, y como el limitador resta sonoridad se vuelve a medir y a corregir
+  hasta tres pasadas (el limitador siempre se recalcula con la ganancia final); lo aplicado sale en
+  `MixLevel` (`render (..., &levels)`: dB, sonoridad resultante, `limiterDb`, `belowTarget`).
   `renderMix` (MainComponent) mide además el mix entero para el pie y pasa los niveles al editor
   (`MixEditor::setSegmentLevels`, que `changed()` vacía en la próxima edición). `mix::describeSong` arma la canción: tiempos
   y acordes llevados al mix con `toMix` (acordes y tonalidad transpuestos con
@@ -1161,8 +1166,10 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   "Inicio / Fin del tramo aquí" en el menú y compases escritos en la cabecera ("Compases [8] a [16]");
   antes, arrastrar desde un borde empezaba una selección nueva y el inicio saltaba al clic.
   `mix::barCount`, `mix::barRange`, `MixEditor::selectBars`, `--mixsel`. Nivelado del mix por tramo a
-  -12/-14/-16/-18 LUFS (`MixProject::levelLufs`, `MixLevel`, -14 en los mixes nuevos, sin pasar de
-  -1 dBTP), selector en la cabecera, "Niv" en el panel y sonoridad del mix en el pie.
+  -12/-14/-16/-18 LUFS (`MixProject::levelLufs`, `MixLevel`, -14 en los mixes nuevos) con limitador de
+  picos (`loudness::limiterGains`, techo -1,5 dB: pico real cerca de -1 dBTP; la primera versión, sin
+  limitador, dejaba las grabaciones bajas con picos altos donde estaban), selector en la cabecera, "Niv
+  ... · lim ..." en el panel y sonoridad del mix en el pie. `loudness::measure (..., truePeak)`.
 - **v0.7.0 (pistas MIDI)**: `MidiTracks` (golpes congelados y editables, filas con sonido propio),
   `SongInfo::midiTracks` en song.json, `shiftGrid` los mueve, segundo conjunto de líneas en el
   motor (`setMidiSamplers`, `rawVelocity`), pista MIDI editable en la vista de arreglo, canales

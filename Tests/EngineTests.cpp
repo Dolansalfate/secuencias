@@ -380,6 +380,37 @@ int main()
             for (int i = 0; i < b44.getNumSamples(); ++i)
                 b44.setSample (ch, i, amp * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 997.0 * i / 44100.0));
         CHECK (std::abs (loudness::measure (b44, 44100.0, {}).whole.lufs + 23.0) < 0.2);
+        CHECK (loudness::measure (b44, 44100.0, {}, false).whole.truePeakDb <= loudness::unknown);   // sin pico real
+
+        // Limitador: un pico de 2,0 (con ganancia 1 y techo 1) se baja a tiempo y sin saltos; antes de la anticipación
+        // y bastante después del pico la ganancia es 1
+        {
+            juce::AudioBuffer<float> spike (2, 4000);
+            spike.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                spike.setSample (ch, 2000, 2.0f);
+            std::vector<float> g;
+            const double reduction = loudness::limiterGains (spike, 1.0f, 1.0f, 100, 200, g);
+            CHECK (g.size() == 4000 && reduction < -6.0 && reduction > -7.5);
+            bool underCeiling = true, smooth = true;
+            for (int i = 0; i < 4000; ++i)
+            {
+                underCeiling = underCeiling && std::abs (spike.getSample (0, i)) * g[(size_t) i] <= 1.0f + 1.0e-5f
+                               && g[(size_t) i] <= 1.0f + 1.0e-6f;
+                if (i > 0)
+                    smooth = smooth && std::abs (g[(size_t) i] - g[(size_t) i - 1]) < 0.02f;
+            }
+            CHECK (underCeiling && smooth);
+            CHECK (std::abs (g[1850] - 1.0f) < 1.0e-6f && g[1990] < 0.9f && g[3999] > 0.99f);
+            // Sin picos sobre el techo: ganancia 1 y reducción 0
+            CHECK (std::abs (loudness::limiterGains (spike, 0.4f, 1.0f, 100, 200, g)) < 1.0e-9 && std::abs (g[2000] - 1.0f) < 1.0e-6f);
+            // Un pico en la primera muestra también se baja
+            juce::AudioBuffer<float> first (1, 500);
+            first.clear();
+            first.setSample (0, 0, 3.0f);
+            loudness::limiterGains (first, 1.0f, 1.0f, 50, 100, g);
+            CHECK (3.0f * g[0] <= 1.0f + 1.0e-5f);
+        }
     }
 
     std::cout << "[Analyzer] etiquetas, resultado y utilidades del analisis\n";
@@ -1962,7 +1993,8 @@ int main()
             {
                 CHECK (std::abs (lufs[0] + 14.0) < 0.3 && std::abs (lufs[1] + 14.0) < 0.3);   // los dos tramos quedan parejos
                 CHECK (std::abs ((levels[0].gainDb - levels[1].gainDb) - 12.04) < 0.2);
-                CHECK (! levels[0].peakLimited && ! levels[1].peakLimited && std::abs (levels[0].lufs + 14.0) < 0.2);
+                CHECK (! levels[0].belowTarget && ! levels[1].belowTarget && std::abs (levels[0].lufs + 14.0) < 0.2);
+                CHECK (levels[0].limiterDb > -0.01 && levels[1].limiterDb > -0.01);   // senos: el limitador no actúa
                 if (std::abs (lufs[0] + 14.0) >= 0.3 || std::abs (lufs[1] + 14.0) >= 0.3)
                     std::cout << "  tramos nivelados a " << lufs[0] << " y " << lufs[1] << " LUFS\n";
             }
@@ -1971,13 +2003,42 @@ int main()
             rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
             lufs = sectionLufs (rendered, p3);
             CHECK (lufs.size() == 2 && std::abs (lufs[1] + 20.0) < 0.3);
-            // Golpes sueltos: para llegar a -14 pasarían de -1 dBTP, así que quedan en el tope
-            p3.segments = { a };
-            p3.segments[0].source = ci;
-            rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
-            CHECK (levels.size() == 1 && levels[0].peakLimited && levels[0].lufs < -15.0);
-            const float peakDb = juce::Decibels::gainToDecibels (rendered.getMagnitude (0, rendered.getNumSamples()));
-            CHECK (peakDb <= -0.9f);
+            // Una grabación con poca sonoridad y picos altos (un tono continuo bajo con golpes cortos casi a 0 dBFS, como
+            // una grabación antigua sin masterizar): llega igual a -14 porque el limitador baja solo los golpes, y nada
+            // pasa de -1 dB (pico real cerca de -1 dBTP)
+            {
+                juce::AudioBuffer<float> hits (2, (int) (44100.0 * 4.0));
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int j = 0; j < hits.getNumSamples(); ++j)
+                    {
+                        float v = 0.08f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * j / 44100.0);
+                        const int inHit = j % 11025;   // cuatro golpes por segundo, de 3 ms
+                        if (inHit < 132)
+                            v += 0.85f * std::exp (-inHit / 40.0f) * (float) std::sin (juce::MathConstants<double>::twoPi * 2000.0 * inHit / 44100.0);
+                        hits.setSample (ch, j, v);
+                    }
+                const auto toneHitsFile = mixFiles.getChildFile ("tono-con-golpes.wav");
+                writeWav (toneHitsFile, hits, 44100.0);
+                MixProject p4 = p3;
+                p4.sources.clear();
+                const int hi = p4.addSource (toneHitsFile, formats);
+                MixSegment c;
+                c.source = hi;
+                c.start = 0.0;
+                c.end = 4.0;
+                p4.segments = { c };
+                rendered = mix::render (p4, mix::renderSampleRate, formats, {}, {}, err, &levels);
+                CHECK (err.isEmpty() && levels.size() == 1);
+                if (levels.size() == 1)
+                {
+                    CHECK (levels[0].limiterDb < -3.0 && ! levels[0].belowTarget && std::abs (levels[0].lufs + 14.0) < 0.2);
+                    const auto whole = loudness::measure (rendered, mix::renderSampleRate, { { 0.0, 4.0, {} } });
+                    CHECK (std::abs (whole.sections[0].result.lufs + 14.0) < 0.3 && whole.whole.truePeakDb < -0.5);
+                    if (std::abs (whole.sections[0].result.lufs + 14.0) >= 0.3 || whole.whole.truePeakDb >= -0.5)
+                        std::cout << "  golpes nivelados: " << whole.sections[0].result.lufs << " LUFS, pico real "
+                                  << whole.whole.truePeakDb << " dBTP, limitador " << levels[0].limiterDb << " dB\n";
+                }
+            }
             // Sin nivelar: nada cambia
             p3.levelLufs = 0.0;
             p3.segments = { a };

@@ -4845,17 +4845,24 @@ void MainComponent::renderMix (std::function<void (bool)> then)
             {
                 self->mixRenderedVersion = version;
                 self->mixRenderedInfo = meta;
-                // Nivelado: cómo quedó el mix y cuántos tramos no llegaron al objetivo para no saturar
+                // Nivelado: cómo quedó el mix, en cuántos tramos actuó el limitador (y cuánto) y si alguno no llegó
                 juce::String level;
                 if (mixLufs > loudness::unknown + 1.0)
                 {
-                    int limited = 0;
+                    int limited = 0, below = 0;
+                    double deepest = 0.0;
                     for (auto& lv : levels)
-                        limited += lv.peakLimited ? 1 : 0;
+                    {
+                        limited += lv.limiterDb < -0.1 ? 1 : 0;
+                        below += lv.belowTarget ? 1 : 0;
+                        deepest = juce::jmin (deepest, lv.limiterDb);
+                    }
+                    auto count = [] (int n) { return juce::String (n) + (n == 1 ? tr (" tramo") : tr (" tramos")); };
                     level = tr (" · ") + juce::String (mixLufs, 1).replaceCharacter ('.', ',') + " LUFS"
-                          + (limited == 1 ? tr (" (1 tramo queda más bajo para no saturar)")
-                                          : limited > 1 ? tr (" (") + juce::String (limited) + tr (" tramos quedan más bajos para no saturar)")
-                                                        : juce::String());
+                          + (limited > 0 ? tr (" · limitador en ") + count (limited) + tr (" (hasta ")
+                                               + juce::String (deepest, 1).replaceCharacter ('.', ',') + " dB)"
+                                         : juce::String())
+                          + (below > 0 ? tr (" · ") + count (below) + tr (" bajo el objetivo (tope de 12 dB)") : juce::String());
                 }
                 if (self->mixEditor != nullptr)
                 {

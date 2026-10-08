@@ -1,6 +1,7 @@
 #include "Loudness.h"
 #include <cmath>
 #include <algorithm>
+#include <deque>
 
 namespace
 {
@@ -112,7 +113,7 @@ namespace
 
 namespace loudness
 {
-    Result measure (const juce::AudioBuffer<float>& audio, double fs, const std::vector<Section>& sections)
+    Result measure (const juce::AudioBuffer<float>& audio, double fs, const std::vector<Section>& sections, bool truePeak)
     {
         Result r;
         r.sections = sections;
@@ -167,6 +168,8 @@ namespace loudness
         }
 
         // 3) Pico real (x4) de todo y por tramo
+        if (! truePeak)
+            return r;
         static const Upsampler4 upsampler;
         auto peakDb = [&] (int from, int to)
         {
@@ -184,6 +187,68 @@ namespace loudness
                 s.result.truePeakDb = peakDb (from, to);
         }
         return r;
+    }
+
+    double limiterGains (const juce::AudioBuffer<float>& audio, float gain, float ceiling, int lookahead, int release,
+                         std::vector<float>& out)
+    {
+        const int n = audio.getNumSamples();
+        const int channels = juce::jmin (2, audio.getNumChannels());
+        out.assign ((size_t) juce::jmax (0, n), 1.0f);
+        if (n <= 0 || channels <= 0 || ! (gain > 0.0f) || ! (ceiling > 0.0f))
+            return 0.0;
+        lookahead = juce::jmax (1, lookahead);
+
+        // Ganancia necesaria en cada muestra (pico de la muestra o entre ella y la siguiente)
+        std::vector<float> need ((size_t) n, 1.0f);
+        bool any = false;
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const float* x = audio.getReadPointer (ch);
+            auto at = [x, n] (int i) { return x[juce::jlimit (0, n - 1, i)]; };
+            for (int i = 0; i < n; ++i)
+            {
+                const float mid = (-at (i - 1) + 9.0f * at (i) + 9.0f * at (i + 1) - at (i + 2)) * (1.0f / 16.0f);
+                const float peak = juce::jmax (std::abs (x[i]), std::abs (mid)) * gain;
+                if (peak > ceiling)
+                {
+                    need[(size_t) i] = juce::jmin (need[(size_t) i], ceiling / peak);
+                    any = true;
+                }
+            }
+        }
+        if (! any)
+            return 0.0;
+
+        // a[i] = mínimo de need en [i, i + lookahead] (cola monótona); b = media de a en [i - lookahead + 1, i]: en cada
+        // pico p, todos los a promediados ya lo incluyen, así b[p] <= need[p]. Después la vuelta con un polo (solo sube
+        // despacio; nunca por encima de b, así tampoco de need)
+        std::vector<float> ahead ((size_t) n, 1.0f);
+        std::deque<int> window;
+        for (int i = n - 1; i >= 0; --i)
+        {
+            while (! window.empty() && need[(size_t) window.back()] >= need[(size_t) i])
+                window.pop_back();
+            window.push_back (i);
+            while (window.front() > i + lookahead)
+                window.pop_front();
+            ahead[(size_t) i] = need[(size_t) window.front()];
+        }
+        // Antes del audio, la ventana se llena con a[0] (el mínimo de las primeras muestras): un pico al principio
+        // también queda cubierto
+        const float releaseCoef = 1.0f / (float) juce::jmax (1, release);
+        const float before = ahead[0];
+        double sum = (double) before * lookahead;
+        float g = before, lowest = 1.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            sum += (double) ahead[(size_t) i] - (double) (i >= lookahead ? ahead[(size_t) (i - lookahead)] : before);
+            const float target = juce::jlimit (0.0f, 1.0f, (float) (sum / lookahead));
+            g = target < g ? target : g + (target - g) * releaseCoef;
+            out[(size_t) i] = g;
+            lowest = juce::jmin (lowest, g);
+        }
+        return juce::Decibels::gainToDecibels (lowest, -100.0f);
     }
 
     double gainToTarget (const Measurement& m, double targetLufs, double maxPeakDb)

@@ -28,10 +28,20 @@ namespace loudness
     };
 
     // Mide la mezcla estéreo completa y cada tramo. Los tramos se dan en segundos (fin <= inicio
-    // o fuera del audio = se ignoran; se devuelven en el mismo orden).
-    Result measure (const juce::AudioBuffer<float>& stereo, double sampleRate, const std::vector<Section>& sections);
+    // o fuera del audio = se ignoran; se devuelven en el mismo orden). Sin truePeak no se calcula
+    // el pico real (truePeakDb queda en unknown): es lo que más tarda.
+    Result measure (const juce::AudioBuffer<float>& stereo, double sampleRate, const std::vector<Section>& sections,
+                    bool truePeak = true);
 
     // Ganancia en dB para llevar un tramo a targetLufs sin que su pico real supere maxPeakDb.
     // Devuelve 0 si no se midió.
     double gainToTarget (const Measurement&, double targetLufs, double maxPeakDb = -1.0);
+
+    // Limitador con anticipación, fuera de línea: en `out` (largo del audio) la ganancia de cada muestra (0..1)
+    // para que audio · gain · out no pase de `ceiling` (lineal). El pico de cada muestra incluye una estimación
+    // entre muestras (cúbica a media muestra), para acercarse al pico real. La ganancia baja durante `lookahead`
+    // muestras antes de cada pico (media de un mínimo hacia adelante: llega a tiempo y sin saltos) y vuelve con
+    // un polo de `release` muestras. Devuelve la mayor reducción en dB (0 si no hizo falta).
+    double limiterGains (const juce::AudioBuffer<float>& audio, float gain, float ceiling, int lookahead, int release,
+                         std::vector<float>& out);
 }

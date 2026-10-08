@@ -1931,15 +1931,18 @@ void MixEditor::Impl::updatePanel()
     toneUpBtn.setEnabled (seg->transpose < 12);
     if (! gainEdit.isBeingEdited())
         gainEdit.setText (gainText (seg->gainDb), juce::dontSendNotification);
-    // Nivelado del último render: "Niv +3,2 dB" ("tope" si no llegó al objetivo para no saturar)
+    // Nivelado del último render: "Niv +5,4 dB · lim -6,2" (cuánto bajó el limitador los picos; "tope" en naranja
+    // si ni con 12 dB llegó al objetivo)
     if (proj->levelLufs < 0.0 && juce::isPositiveAndBelow (index, (int) segmentLevels.size()))
     {
         const auto& lv = segmentLevels[(size_t) index];
         if (lv.lufs > -99.0)
         {
-            levelInfo.setText ("Niv " + gainText (lv.gainDb) + (lv.peakLimited ? juce::String (" (tope)") : juce::String()),
+            levelInfo.setText ("Niv " + gainText (lv.gainDb)
+                                   + (lv.limiterDb < -0.1 ? dot() + "lim " + decimal (lv.limiterDb, 1) : juce::String())
+                                   + (lv.belowTarget ? juce::String (" (tope)") : juce::String()),
                                juce::dontSendNotification);
-            levelInfo.setColour (juce::Label::textColourId, lv.peakLimited ? offBeatColour : juce::Colours::lightgrey);
+            levelInfo.setColour (juce::Label::textColourId, lv.belowTarget ? offBeatColour : juce::Colours::lightgrey);
         }
     }
 
@@ -2077,7 +2080,7 @@ void MixEditor::Impl::layout()
                            { &nameCaption, 48 }, { &labelEdit, 70, true, 60 } }, 3);
         layoutRow (p, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                         { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
-                        { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 104, false, 70 }, { nullptr, 6 },
+                        { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 150, false, 90 }, { nullptr, 6 },
                         { &fadeCaption, 54 }, { &fadeBox, 110 }, { nullptr, 0, true } }, 3);
         return;
     }
@@ -2095,7 +2098,7 @@ void MixEditor::Impl::layout()
                        { &fadeCaption, 54, false, 48 }, { &fadeBox, 110, false, 96 }, { nullptr, 0, true } }, 3);
     layoutRow (row3, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                        { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
-                       { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 104, false, 70 }, { nullptr, 0, true } }, 3);
+                       { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 150, false, 90 }, { nullptr, 0, true } }, 3);
 }
 
 void MixEditor::Impl::paintFrame (juce::Graphics& g)

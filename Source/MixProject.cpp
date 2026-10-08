@@ -856,39 +856,75 @@ namespace mix
                 report();
                 continue;
             }
-            double levelDb = 0.0;
+            const float userDb = juce::jlimit (-24.0f, 12.0f, seg.gainDb);
+            float gain = juce::Decibels::decibelsToGain (userDb);
+            std::vector<float> limiter;   // con nivelado: ganancia del limitador por muestra del mix desde m0
             if (project.levelLufs < 0.0)
             {
-                // Sonoridad del cuerpo del tramo (desde la unión), tal como sonará antes de los fundidos
-                const int b0 = juce::jlimit (m0, m1, (int) std::ceil (p.outStart * sampleRate));
-                juce::AudioBuffer<float> body (2, juce::jmax (1, m1 - b0));
-                body.clear();
+                // El tramo alineado con el mix (ceros donde la fuente no tiene audio) y su cuerpo, desde la unión: lo
+                // que se mide (sin el audio previo del fundido de entrada)
+                juce::AudioBuffer<float> aligned (2, m1 - m0);
+                aligned.clear();
                 const float* srcL = audio.getReadPointer (0);
                 const float* srcR = audio.getReadPointer (juce::jmin (1, channels - 1));
-                for (int m = b0; m < m1; ++m)
+                for (int m = m0; m < m1; ++m)
                 {
                     const juce::int64 k = offset + (m - m0);
                     if (k >= 0 && k < (juce::int64) audio.getNumSamples())
                     {
-                        body.setSample (0, m - b0, srcL[k]);
-                        body.setSample (1, m - b0, srcR[k]);
+                        aligned.setSample (0, m - m0, srcL[k]);
+                        aligned.setSample (1, m - m0, srcR[k]);
                     }
                 }
-                const auto measured = loudness::measure (body, sampleRate, {}).whole;
-                if (measured.lufs > loudness::unknown + 1.0)
+                const int b0 = juce::jlimit (0, m1 - m0, (int) std::ceil (p.outStart * sampleRate) - m0);
+                auto bodyLufs = [&] (const std::vector<float>* lim, float g)
                 {
-                    const double wanted = project.levelLufs - measured.lufs;
-                    levelDb = juce::jlimit (-12.0, 12.0, loudness::gainToTarget (measured, project.levelLufs, -1.0));
+                    juce::AudioBuffer<float> body (2, juce::jmax (1, m1 - m0 - b0));
+                    body.clear();
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int j = b0; j < m1 - m0; ++j)
+                            body.setSample (ch, j - b0, aligned.getSample (ch, j) * g * (lim != nullptr ? (*lim)[(size_t) j] : 1.0f));
+                    return loudness::measure (body, sampleRate, {}, false).whole.lufs;
+                };
+                const double measured = bodyLufs (nullptr, 1.0f);
+                if (measured > loudness::unknown + 1.0)
+                {
+                    // Ganancia hasta el objetivo (tope ±12 dB); el limitador corta solo los picos que pasarían de -1 dB
+                    // y, como eso baja algo la sonoridad, se vuelve a medir y a corregir (hasta tres pasadas)
+                    const double target = project.levelLufs;
+                    const int lookahead = juce::jmax (1, (int) std::lround (limiterLookahead * sampleRate));
+                    const int release = juce::jmax (1, (int) std::lround (limiterRelease * sampleRate));
+                    const float ceiling = juce::Decibels::decibelsToGain ((float) limiterCeilingDb);
+                    double levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, target - measured);
+                    double after = measured + levelDb, reduction = 0.0;
+                    for (int pass = 0;; ++pass)
+                    {
+                        // El limitador siempre es el de la ganancia final (cada corrección vuelve a pasar por aquí)
+                        const float total = juce::Decibels::decibelsToGain ((float) levelDb + userDb);
+                        reduction = loudness::limiterGains (aligned, total, ceiling, lookahead, release, limiter);
+                        if (reduction > -0.01)
+                        {
+                            limiter.clear();   // no hizo falta
+                            after = measured + levelDb;
+                            break;
+                        }
+                        after = bodyLufs (&limiter, total) - userDb;
+                        const double missing = target - after;
+                        if (pass == 2 || std::abs (missing) < 0.15 || levelDb >= maxLevelDb - 1.0e-6)
+                            break;
+                        levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, levelDb + missing);
+                    }
+                    gain = juce::Decibels::decibelsToGain ((float) levelDb + userDb);
                     if (levels != nullptr)
                     {
                         auto& lv = (*levels)[(size_t) i];
                         lv.gainDb = levelDb;
-                        lv.lufs = measured.lufs + levelDb;
-                        lv.peakLimited = levelDb < wanted - 0.1;
+                        lv.lufs = after;
+                        lv.limiterDb = reduction;
+                        lv.belowTarget = after < target - 0.5;
                     }
                 }
             }
-            const float gain = juce::Decibels::decibelsToGain ((float) levelDb + juce::jlimit (-24.0f, 12.0f, seg.gainDb));
             const bool squareIn = coherentIn[(size_t) i], squareOut = coherentOut[(size_t) i];
             const float* inL = audio.getReadPointer (0);
             const float* inR = audio.getReadPointer (juce::jmin (1, channels - 1));
@@ -918,7 +954,7 @@ namespace mix
                     const double c = std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - fadeOutStart) / fadeOut));
                     g *= squareOut ? c * c : c;
                 }
-                const float v = gain * (float) g;
+                const float v = gain * (float) g * (limiter.empty() ? 1.0f : limiter[(size_t) (m - m0)]);
                 outL[m] += inL[k] * v;
                 outR[m] += inR[k] * v;
             }

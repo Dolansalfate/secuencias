@@ -84,7 +84,8 @@ struct MixLevel
 {
     double gainDb = 0.0;        // lo que subió o bajó el nivelado (sin la ganancia propia del tramo)
     double lufs = -100.0;       // sonoridad del tramo ya nivelado (-100 = sin medir: tramo muy corto o en silencio)
-    bool peakLimited = false;   // no llegó al objetivo para no pasar de -1 dBTP (o por el tope de 12 dB)
+    double limiterDb = 0.0;     // la mayor reducción del limitador en los picos (0 = no actuó)
+    bool belowTarget = false;   // quedó más de 0,5 LU bajo el objetivo (el tope de 12 dB no alcanzó)
 };
 
 // Cómo queda cada tramo en el mix (resultado de mix::layout, uno por tramo, mismo orden)
@@ -104,6 +105,11 @@ namespace mix
     constexpr double cutFadeSeconds = 0.010;     // fundido de una unión sin fundido musical (corte)
     constexpr double edgeFadeSeconds = 0.002;    // fundido de entrada del primer tramo (o sin audio previo)
     constexpr double renderSampleRate = 44100.0; // la de los modelos de separación: nadie remuestrea después
+    // Nivelado de los tramos: tope de la ganancia y limitador de picos (techo, anticipación y vuelta)
+    constexpr double maxLevelDb = 12.0;
+    constexpr double limiterCeilingDb = -1.5;   // techo de muestras (y de la estimación entre muestras): pico real cerca de -1 dBTP
+    constexpr double limiterLookahead = 0.005;
+    constexpr double limiterRelease = 0.1;
 
     // Tempo detectado de un tramo: con los tiempos de la fuente dentro de [start - 0,05, end + 0,05],
     // 60 · (último - primero en índices) / (último - primero en segundos). Así un tramo cortado de un
@@ -177,8 +183,10 @@ namespace mix
     // el primero entra con edgeFadeSeconds lineal) y lo suma en su lugar. Estéreo a `sampleRate`, de
     // largo ceil(length · sampleRate). Buffer vacío si se abortó o falló (con `error`).
     // Con levelLufs < 0, cada tramo se mide (EBU R128, solo su cuerpo: de la unión a su final, sin el audio
-    // previo del fundido de entrada) y se lleva a esa sonoridad sin que su pico real pase de -1 dBTP, con
-    // tope de ±12 dB; su ganancia propia va encima. `levels` (si no es nullptr) recibe lo aplicado.
+    // previo del fundido de entrada) y recibe la ganancia que lo lleva a esa sonoridad (tope ±12 dB), con su
+    // ganancia propia encima; los picos que pasarían de limiterCeilingDb los baja un limitador con anticipación
+    // (loudness::limiterGains), y como eso resta algo de sonoridad se vuelve a medir y a corregir (hasta tres
+    // pasadas: queda a menos de 0,15 LU). `levels` (si no es nullptr) recibe lo aplicado.
     juce::AudioBuffer<float> render (const MixProject&, double sampleRate, juce::AudioFormatManager&,
                                      const std::function<bool()>& shouldAbort,
                                      const std::function<void (float)>& progress, juce::String& error,

@@ -71,9 +71,11 @@ El mismo código sigue compilando en macOS.
   marca blanca desde donde suena "Escuchar"; el clic derecho ofrece "Inicio del tramo aquí" y
   "Fin del tramo aquí". Arriba, "Nivelar a -14 LUFS" (o -12, -16, -18, o "Sin nivelar") deja cada
   tramo a la misma sonoridad, así un tema no suena más fuerte que el otro en el mix; los mixes nuevos
-  empiezan en -14. Un tramo nunca se sube tanto que sus picos pasen de -1 dBTP: si una grabación
-  antigua tiene picos altos, queda algo más baja (el panel del tramo dice "Niv +x dB (tope)" y el
-  pie avisa cuántos tramos quedaron así). La ganancia de cada tramo se suma encima. Abajo ves
+  empiezan en -14. Si una grabación antigua es baja pero tiene picos altos, un limitador baja solo
+  esos picos para que llegue sin saturar (el panel del tramo dice cuánto: "Niv +6,2 dB · lim -3,9",
+  y el pie, en cuántos tramos actuó). Si te parece que aplana los golpes, elige -16 o -18: el
+  limitador trabaja menos. Se oye al volver a "Escuchar el mix" (se prepara de nuevo). La ganancia de
+  cada tramo se suma encima. Abajo ves
   los tramos en orden: cada uno se ajusta al tempo del mix de modo que las uniones caen exactas en
   el pulso (puedes elegir "Cada tramo a su tempo" o darle a un tramo su propio tempo). Por tramo
   puedes moverlo, quitarlo, alargarlo o acortarlo por compases, cambiarle el tono, la ganancia y el
