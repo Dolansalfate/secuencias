@@ -382,6 +382,7 @@ private:
     struct MixCapture
     {
         bool active = false, autoSegments = false, segmentsDone = false, createStarted = false, selectionDone = true;
+        bool renderStarted = false;   // con --mixtramos también se prepara el mix (se ve el nivelado de cada tramo)
         int createMode = 0, selFirst = -1, selLast = -1;
     } mixCapture;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)

@@ -61,7 +61,12 @@ modelo que usa Moises).
   mix en orden. Cada borde de la selección se arrastra solo (por su línea o por su asa en la regla),
   Shift + clic lleva ahí el borde más cercano, el clic derecho ofrece "Inicio / Fin del tramo aquí", y
   en la cabecera de la fuente los compases se escriben ("Compases [8] a [16]"; sin análisis, tiempos
-  m:ss). Un clic suelto solo mueve el cabezal desde donde escucha "Escuchar". Cada tramo se estira con razón constante para durar exactamente sus tiempos al
+  m:ss). Un clic suelto solo mueve el cabezal desde donde escucha "Escuchar". **Nivelado** (selector de
+  la cabecera: sin nivelar o -12/-14/-16/-18 LUFS; los mixes nuevos empiezan en -14): al renderizar,
+  cada tramo se mide (EBU R128) y se lleva a esa sonoridad sin pasar de -1 dBTP (tope ±12 dB), con su
+  ganancia propia encima; el panel muestra "Niv +x dB" (naranja con "tope" si no llegó para no
+  saturar) y el pie la sonoridad del mix y cuántos tramos quedaron más bajos. Así la canción que se
+  separa ya va pareja. Cada tramo se estira con razón constante para durar exactamente sus tiempos al
   tempo del mix (el del primer tramo o el que se escriba; o "Cada tramo a su tempo"), así cada
   unión cae justo en la rejilla, y dentro del tramo se conserva el pulso de la grabación. Por
   tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
@@ -864,7 +869,7 @@ Pasos de `run()`:
   nombre de cada fila (`isOnPlayButton`, solo con filas de 11 px o más) llama a `onMidiAudition`.
 
 ### 5.4i MixProject y MixEditor (armar mix antes de separar)
-- Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, sources: [{ name, file, length,
+- Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, levelLufs, sources: [{ name, file, length,
   analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats }] }`),
   `fuentes/` (copias de las canciones originales) y `mezcla.wav` (último render, 44,1 kHz, 24 bits).
   La carpeta es la identidad del mix (`Library::legalFolderName`: sin puntos ni espacios al final,
@@ -883,7 +888,13 @@ Pasos de `run()`:
   previo disponible). Sin análisis, ratio = 1.
 - `mix::render` lee de cada fuente solo su tramo (`readRange`, con remuestreo sinc a 44,1 kHz),
   lo estira y transpone con `stretcher::renderBuffer` y un `TimeMap` de una sección (o lo copia si
-  no hace falta), aplica ganancia y fundidos y lo suma. `mix::describeSong` arma la canción: tiempos
+  no hace falta), aplica ganancia y fundidos y lo suma. Con `levelLufs` < 0 (0 = sin nivelar; los mixes
+  guardados sin el campo quedan así; `MixProject::create` pone `defaultLevelLufs` = -14), antes de los
+  fundidos mide el cuerpo del tramo (desde la unión, sin el audio previo del fundido) con
+  `loudness::measure` y le suma `gainToTarget (medida, objetivo, -1 dBTP)` acotado a ±12 dB; lo
+  aplicado sale en `MixLevel` (`render (..., &levels)`: dB, sonoridad resultante, `peakLimited`).
+  `renderMix` (MainComponent) mide además el mix entero para el pie y pasa los niveles al editor
+  (`MixEditor::setSegmentLevels`, que `changed()` vacía en la próxima edición). `mix::describeSong` arma la canción: tiempos
   y acordes llevados al mix con `toMix` (acordes y tonalidad transpuestos con
   `music::transposeChord` / `transposeKey`), una sección de tempo por tramo (unidas si coinciden),
   un marcador por tramo, `bpm` y `clickOffset`.
@@ -898,7 +909,9 @@ Pasos de `run()`:
   `selToEdit`, `updateSelectionFields`, `selectionFieldEdited`) usan `mix::barCount` y `mix::barRange`
   (compases first a last: del primer tiempo de first al de last + 1, o al final; 0 = desde el inicio);
   `selectionFirstBar` mira 0,1 s después del inicio (el corte ajustado queda unos ms antes del 1).
-  `MixEditor::selectBars` hace lo mismo desde fuera (`--captura --mix=... --mixsel=5-8`).
+  `MixEditor::selectBars` hace lo mismo desde fuera (`--captura --mix=... --mixsel=5-8`). El selector
+  `levelBox` (cabecera) edita `levelLufs`; `levelInfo` (panel) muestra el `MixLevel` del tramo elegido.
+  En la captura, `--mixtramos` también renderiza el mix (se ve el nivelado).
 - En `MainComponent`: `openMix` descarga la canción (`unloadSong`; se recuerda por carpeta en
   `mixReturnFolder`, que se conserva al pasar de un mix a otro) y pone el editor encima del área
   de la canción; no se abre mientras la canción se analiza o se nivela (el resultado se aplica a
@@ -1147,7 +1160,9 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
 - **v0.7.1**: selección del armado de mix: cada borde se arrastra solo (asas en la regla), Shift + clic,
   "Inicio / Fin del tramo aquí" en el menú y compases escritos en la cabecera ("Compases [8] a [16]");
   antes, arrastrar desde un borde empezaba una selección nueva y el inicio saltaba al clic.
-  `mix::barCount`, `mix::barRange`, `MixEditor::selectBars`, `--mixsel`.
+  `mix::barCount`, `mix::barRange`, `MixEditor::selectBars`, `--mixsel`. Nivelado del mix por tramo a
+  -12/-14/-16/-18 LUFS (`MixProject::levelLufs`, `MixLevel`, -14 en los mixes nuevos, sin pasar de
+  -1 dBTP), selector en la cabecera, "Niv" en el panel y sonoridad del mix en el pie.
 - **v0.7.0 (pistas MIDI)**: `MidiTracks` (golpes congelados y editables, filas con sonido propio),
   `SongInfo::midiTracks` en song.json, `shiftGrid` los mueve, segundo conjunto de líneas en el
   motor (`setMidiSamplers`, `rawVelocity`), pista MIDI editable en la vista de arreglo, canales

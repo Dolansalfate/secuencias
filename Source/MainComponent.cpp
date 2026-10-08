@@ -4794,6 +4794,8 @@ void MainComponent::renderMix (std::function<void (bool)> then)
         bool ok = false;
         float reducedDb = 0.0f;
         SongInfo meta;
+        std::vector<MixLevel> levels;
+        double mixLufs = loudness::unknown;
         try
         {
             auto abort = [this, gen] { return gen != mixGeneration.load() || abortJobs.load(); };
@@ -4805,7 +4807,7 @@ void MainComponent::renderMix (std::function<void (bool)> then)
                         safe->mixEditor->setStatus (tr ("Preparando el mix... ") + juce::String (juce::roundToInt (p * 100.0f)) + " %");
                 });
             };
-            auto buffer = mix::render (copy, mix::renderSampleRate, formatManager, abort, progress, error);
+            auto buffer = mix::render (copy, mix::renderSampleRate, formatManager, abort, progress, error, &levels);
             if (buffer.getNumSamples() > 0)
             {
                 // Sin margen se recortaría al escribir en 24 bits (y la distorsión pasaría a los stems):
@@ -4820,14 +4822,18 @@ void MainComponent::renderMix (std::function<void (bool)> then)
                 if (! ok)
                     error = tr ("No se pudo escribir ") + copy.renderFile().getFullPathName();
                 else
+                {
                     mix::describeSong (copy, meta);
+                    if (copy.levelLufs < 0.0 && ! abort())
+                        mixLufs = loudness::measure (buffer, mix::renderSampleRate, {}).whole.lufs;   // cómo quedó el mix entero
+                }
             }
             else if (error.isEmpty() && ! abort())
                 error = tr ("El mix quedó vacío");
         }
         catch (const std::bad_alloc&) { error = tr ("No hay memoria suficiente para preparar el mix"); }
         catch (const std::exception& e) { error = tr ("Error al preparar el mix: ") + juce::String (e.what()); }
-        juce::MessageManager::callAsync ([safe, ok, error, version, gen, then, meta, reducedDb]
+        juce::MessageManager::callAsync ([safe, ok, error, version, gen, then, meta, reducedDb, levels, mixLufs]
         {
             auto* self = safe.getComponent();
             if (self == nullptr || gen != self->mixGeneration.load())
@@ -4839,10 +4845,27 @@ void MainComponent::renderMix (std::function<void (bool)> then)
             {
                 self->mixRenderedVersion = version;
                 self->mixRenderedInfo = meta;
+                // Nivelado: cómo quedó el mix y cuántos tramos no llegaron al objetivo para no saturar
+                juce::String level;
+                if (mixLufs > loudness::unknown + 1.0)
+                {
+                    int limited = 0;
+                    for (auto& lv : levels)
+                        limited += lv.peakLimited ? 1 : 0;
+                    level = tr (" · ") + juce::String (mixLufs, 1).replaceCharacter ('.', ',') + " LUFS"
+                          + (limited == 1 ? tr (" (1 tramo queda más bajo para no saturar)")
+                                          : limited > 1 ? tr (" (") + juce::String (limited) + tr (" tramos quedan más bajos para no saturar)")
+                                                        : juce::String());
+                }
                 if (self->mixEditor != nullptr)
+                {
+                    if (version == self->mixVersion)
+                        self->mixEditor->setSegmentLevels (levels);
                     self->mixEditor->setStatus (tr ("Mix listo: ") + ui::formatTime (self->mixProject != nullptr ? mix::length (*self->mixProject) : 0.0)
+                                                + level
                                                 + (reducedDb > 0.05f ? tr (" · se bajó ") + juce::String (reducedDb, 1) + tr (" dB para no saturar") : juce::String())
                                                 + tr (" · clic en «Click» para comprobar las uniones con el metrónomo"));
+                }
             }
             else if (error.isNotEmpty() && version != self->mixVersion)
             {
@@ -5133,7 +5156,7 @@ bool MainComponent::isMixBusy() const
     if (! mixCapture.active || mixProject == nullptr)
         return false;
     return mixCopyJobs > 0 || mixAnalyzingFile.isNotEmpty() || ! mixAnalysisQueue.empty() || mixRendering
-           || (mixCapture.autoSegments && ! mixCapture.segmentsDone) || ! mixCapture.selectionDone
+           || (mixCapture.autoSegments && ! (mixCapture.segmentsDone && mixCapture.renderStarted)) || ! mixCapture.selectionDone
            || (mixCapture.createMode > 0 && ! mixCapture.createStarted);
 }
 
@@ -5206,6 +5229,13 @@ void MainComponent::mixCaptureStep()
                 mixEditor->selectSegment ((int) mixProject->segments.size() - 1);
             mixEdited();
         }
+        return;
+    }
+    if (mixCapture.autoSegments && ! mixCapture.renderStarted)
+    {
+        mixCapture.renderStarted = true;
+        if (! mixProject->segments.empty())
+            renderMix ({});
         return;
     }
     if (! mixCapture.selectionDone)

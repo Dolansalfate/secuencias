@@ -35,6 +35,8 @@ public:
     // Cabezal: qué suena (0 nada, 1 la fuente `source`, 2 el mix), en segundos de eso, y si suena
     void setPlayback (int kind, int source, double seconds, bool playing);
     void setStatus (const juce::String&);   // línea de estado al pie
+    // Nivelado aplicado a cada tramo en el último render (se muestra en el panel del tramo hasta la próxima edición)
+    void setSegmentLevels (std::vector<MixLevel>);
     void setBusy (bool rendering);          // mientras se renderiza: deshabilita Crear canción
 
     int getSelectedSource() const  { return selectedSource; }

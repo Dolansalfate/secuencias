@@ -1653,6 +1653,8 @@ int main()
         MixProject proj;
         CHECK (MixProject::load (projFolder, proj));
         CHECK (proj.name == "Mix de prueba" && proj.sources.empty() && proj.segments.empty() && proj.folder == projFolder);
+        CHECK (std::abs (proj.levelLufs - MixProject::defaultLevelLufs) < 1.0e-9);   // los mixes nuevos se nivelan a -14
+        proj.levelLufs = 0.0;   // los casos de render de abajo miden niveles exactos: sin nivelar
         CHECK (proj.addSource (fileA, formats) == 0);
         CHECK (proj.addSource (fileB, formats) == 1);
         CHECK (proj.addSource (fileC, formats) == 2);
@@ -1911,6 +1913,89 @@ int main()
             CHECK (failed.getNumSamples() == 0 && err.contains ("fuente-a"));
             p2.segments.clear();
             CHECK (mix::render (p2, mix::renderSampleRate, formats, {}, {}, err).getNumSamples() == 0 && err.isNotEmpty());
+        }
+
+        {
+            std::cout << "  nivelado: cada tramo a la sonoridad pedida, sin pasar de -1 dBTP, con su ganancia encima\n";
+            auto sine = [] (float amp)
+            {
+                juce::AudioBuffer<float> b (2, (int) (44100.0 * 4.0));
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                        b.setSample (ch, i, amp * (float) std::sin (juce::MathConstants<double>::twoPi * 997.0 * i / 44100.0));
+                return b;
+            };
+            const auto quietFile = mixFiles.getChildFile ("seno-suave.wav"), loudFile = mixFiles.getChildFile ("seno-fuerte.wav");
+            const auto clicksFile = mixFiles.getChildFile ("golpes-sueltos.wav");
+            writeWav (quietFile, sine (0.05f), 44100.0);   // unos -26,7 LUFS
+            writeWav (loudFile, sine (0.2f), 44100.0);     // unos -14,7 LUFS (12 dB más)
+            writeWav (clicksFile, clickTrack (44100.0, 4.0, 2, { 0.5, 1.5, 2.5, 3.5 }, 0.8f), 44100.0);   // poca sonoridad, pico alto
+            auto p3 = proj;
+            p3.bpm = 0.0;
+            p3.keepTempos = false;
+            const int qi = p3.addSource (quietFile, formats), li = p3.addSource (loudFile, formats), ci = p3.addSource (clicksFile, formats);
+            CHECK (qi >= 0 && li >= 0 && ci >= 0);
+            MixSegment a, b;
+            a.source = qi;
+            b.source = li;
+            a.start = b.start = 0.5;
+            a.end = b.end = 3.5;
+            p3.segments = { a, b };
+            p3.levelLufs = -14.0;
+            auto sectionLufs = [&] (const juce::AudioBuffer<float>& rendered, const MixProject& p)
+            {
+                const auto places = mix::layout (p);
+                std::vector<loudness::Section> secs;
+                for (auto& pl : places)
+                    secs.push_back ({ pl.outStart + 0.2, pl.outEnd - 0.2, {} });   // sin los bordes (fundidos)
+                std::vector<double> values;
+                for (auto& sec : loudness::measure (rendered, mix::renderSampleRate, secs).sections)
+                    values.push_back (sec.result.lufs);
+                return values;
+            };
+            std::vector<MixLevel> levels;
+            juce::String err;
+            auto rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
+            auto lufs = sectionLufs (rendered, p3);
+            CHECK (err.isEmpty() && levels.size() == 2 && lufs.size() == 2);
+            if (lufs.size() == 2 && levels.size() == 2)
+            {
+                CHECK (std::abs (lufs[0] + 14.0) < 0.3 && std::abs (lufs[1] + 14.0) < 0.3);   // los dos tramos quedan parejos
+                CHECK (std::abs ((levels[0].gainDb - levels[1].gainDb) - 12.04) < 0.2);
+                CHECK (! levels[0].peakLimited && ! levels[1].peakLimited && std::abs (levels[0].lufs + 14.0) < 0.2);
+                if (std::abs (lufs[0] + 14.0) >= 0.3 || std::abs (lufs[1] + 14.0) >= 0.3)
+                    std::cout << "  tramos nivelados a " << lufs[0] << " y " << lufs[1] << " LUFS\n";
+            }
+            // La ganancia propia del tramo va encima del nivelado
+            p3.segments[1].gainDb = -6.0f;
+            rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
+            lufs = sectionLufs (rendered, p3);
+            CHECK (lufs.size() == 2 && std::abs (lufs[1] + 20.0) < 0.3);
+            // Golpes sueltos: para llegar a -14 pasarían de -1 dBTP, así que quedan en el tope
+            p3.segments = { a };
+            p3.segments[0].source = ci;
+            rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
+            CHECK (levels.size() == 1 && levels[0].peakLimited && levels[0].lufs < -15.0);
+            const float peakDb = juce::Decibels::gainToDecibels (rendered.getMagnitude (0, rendered.getNumSamples()));
+            CHECK (peakDb <= -0.9f);
+            // Sin nivelar: nada cambia
+            p3.levelLufs = 0.0;
+            p3.segments = { a };
+            rendered = mix::render (p3, mix::renderSampleRate, formats, {}, {}, err, &levels);
+            CHECK (levels.size() == 1 && std::abs (levels[0].gainDb) < 1.0e-12 && levels[0].lufs < -99.0);
+            CHECK (std::abs (rendered.getMagnitude (0, rendered.getNumSamples()) - 0.05f) < 0.002f);
+
+            // mix.json: los nuevos a -14; el valor se guarda; uno sin el campo (de antes) queda sin nivelar
+            const auto levelFolder = MixProject::create (mixRoot, "Nivelado");
+            MixProject lp;
+            CHECK (MixProject::load (levelFolder, lp) && std::abs (lp.levelLufs + 14.0) < 1.0e-9);
+            lp.levelLufs = -16.0;
+            CHECK (lp.save());
+            MixProject lp2;
+            CHECK (MixProject::load (levelFolder, lp2) && std::abs (lp2.levelLufs + 16.0) < 1.0e-9);
+            levelFolder.getChildFile ("mix.json").replaceWithText ("{ \"name\": \"Viejo\" }");
+            MixProject lp3;
+            CHECK (MixProject::load (levelFolder, lp3) && std::abs (lp3.levelLufs) < 1.0e-12);
         }
 
         {

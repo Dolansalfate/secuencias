@@ -1,5 +1,6 @@
 #include "MixProject.h"
 #include "Arrangement.h"
+#include "Loudness.h"
 #include "Music.h"
 #include "Stretcher.h"
 #include "TempoMap.h"
@@ -149,6 +150,7 @@ bool MixProject::save() const
     obj->setProperty ("name", name);
     obj->setProperty ("bpm", bpm);
     obj->setProperty ("keepTempos", keepTempos);
+    obj->setProperty ("levelLufs", levelLufs);
     juce::Array<juce::var> srcs, segs;
     for (auto& s : sources)
         srcs.add (toVar (s));
@@ -175,6 +177,9 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
         p.name = mixFolder.getFileName();
     p.bpm = clampBpm (finiteIn ((double) v.getProperty ("bpm", 0.0), 0.0, 400.0, 0.0));
     p.keepTempos = (bool) v.getProperty ("keepTempos", false);
+    p.levelLufs = finiteIn ((double) v.getProperty ("levelLufs", 0.0), -30.0, 0.0, 0.0);
+    if (p.levelLufs > -6.0)
+        p.levelLufs = 0.0;   // fuera de lo razonable (o 0): sin nivelar
 
     if (auto* arr = v.getProperty ("sources", juce::var()).getArray())
         for (auto& sv : *arr)
@@ -279,6 +284,7 @@ juce::File MixProject::create (const juce::File& mixesRoot, const juce::String& 
     MixProject p;
     p.name = display;
     p.folder = dir;
+    p.levelLufs = defaultLevelLufs;
     if (! p.save())
     {
         dir.deleteRecursively();
@@ -729,10 +735,13 @@ namespace mix
 
     juce::AudioBuffer<float> render (const MixProject& project, double sampleRate, juce::AudioFormatManager& formats,
                                      const std::function<bool()>& shouldAbort,
-                                     const std::function<void (float)>& progress, juce::String& error)
+                                     const std::function<void (float)>& progress, juce::String& error,
+                                     std::vector<MixLevel>* levels)
     {
         error.clear();
         const auto places = layout (project);
+        if (levels != nullptr)
+            levels->assign (places.size(), MixLevel());
         const double totalSeconds = places.empty() ? 0.0 : places.back().outEnd;
         if (! (totalSeconds > 0.0) || ! (sampleRate > 0.0))
         {
@@ -841,13 +850,45 @@ namespace mix
                 offset = std::llround (((p.srcStart - from) * p.ratio + (double) m0 / sampleRate - p.outStart) * sampleRate);
             }
 
-            const float gain = juce::Decibels::decibelsToGain (juce::jlimit (-24.0f, 12.0f, seg.gainDb));
             const int channels = audio.getNumChannels();
             if (channels <= 0)
             {
                 report();
                 continue;
             }
+            double levelDb = 0.0;
+            if (project.levelLufs < 0.0)
+            {
+                // Sonoridad del cuerpo del tramo (desde la unión), tal como sonará antes de los fundidos
+                const int b0 = juce::jlimit (m0, m1, (int) std::ceil (p.outStart * sampleRate));
+                juce::AudioBuffer<float> body (2, juce::jmax (1, m1 - b0));
+                body.clear();
+                const float* srcL = audio.getReadPointer (0);
+                const float* srcR = audio.getReadPointer (juce::jmin (1, channels - 1));
+                for (int m = b0; m < m1; ++m)
+                {
+                    const juce::int64 k = offset + (m - m0);
+                    if (k >= 0 && k < (juce::int64) audio.getNumSamples())
+                    {
+                        body.setSample (0, m - b0, srcL[k]);
+                        body.setSample (1, m - b0, srcR[k]);
+                    }
+                }
+                const auto measured = loudness::measure (body, sampleRate, {}).whole;
+                if (measured.lufs > loudness::unknown + 1.0)
+                {
+                    const double wanted = project.levelLufs - measured.lufs;
+                    levelDb = juce::jlimit (-12.0, 12.0, loudness::gainToTarget (measured, project.levelLufs, -1.0));
+                    if (levels != nullptr)
+                    {
+                        auto& lv = (*levels)[(size_t) i];
+                        lv.gainDb = levelDb;
+                        lv.lufs = measured.lufs + levelDb;
+                        lv.peakLimited = levelDb < wanted - 0.1;
+                    }
+                }
+            }
+            const float gain = juce::Decibels::decibelsToGain ((float) levelDb + juce::jlimit (-24.0f, 12.0f, seg.gainDb));
             const bool squareIn = coherentIn[(size_t) i], squareOut = coherentOut[(size_t) i];
             const float* inL = audio.getReadPointer (0);
             const float* inR = audio.getReadPointer (juce::jmin (1, channels - 1));

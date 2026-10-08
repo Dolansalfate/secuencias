@@ -1199,6 +1199,8 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     // Cabecera
     juce::Label mixCaption, nameEdit, bpmCaption, bpmEdit;
     juce::TextButton keepTemposBtn, createBtn, closeBtn;
+    juce::ComboBox levelBox;                // sin nivelar o la sonoridad a la que se lleva cada tramo
+    std::vector<MixLevel> segmentLevels;    // lo que aplicó el nivelado en el último render (vacío tras una edición)
     // Canciones
     juce::Label sourcesCaption;
     juce::TextButton addSourceBtn;
@@ -1222,6 +1224,7 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     juce::Label startCaption, endCaption;
     juce::TextButton startEarlierBtn, startLaterBtn, endEarlierBtn, endLaterBtn;
     juce::Label tempoCaption, segTempoEdit, toneCaption, toneValue, gainCaption, gainEdit, fadeCaption, nameCaption, labelEdit;
+    juce::Label levelInfo;                  // "Niv +3,2 dB": lo que el nivelado le dio al tramo elegido
     juce::TextButton toneDownBtn, toneUpBtn;
     juce::ComboBox fadeBox;
     // Pie
@@ -1252,6 +1255,23 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
             proj->keepTempos = keepTemposBtn.getToggleState();
             changed();
         }
+    };
+    levelBox.addItem ("Sin nivelar", 1);
+    levelBox.addItem ("Nivelar a -12 LUFS", 2);
+    levelBox.addItem ("Nivelar a -14 LUFS", 3);
+    levelBox.addItem ("Nivelar a -16 LUFS", 4);
+    levelBox.addItem ("Nivelar a -18 LUFS", 5);
+    levelBox.onChange = [this]
+    {
+        auto* proj = project();
+        const int id = levelBox.getSelectedId();
+        if (proj == nullptr || id <= 0)
+            return;
+        const double lufs = id == 1 ? 0.0 : -12.0 - 2.0 * (id - 2);
+        if (std::abs (lufs - proj->levelLufs) < 1.0e-6)
+            return;
+        proj->levelLufs = lufs;
+        changed();
     };
     createBtn.setButtonText (tr ("Crear canción..."));
     createBtn.setColour (juce::TextButton::buttonColourId, ui::accent.darker (0.6f));
@@ -1375,6 +1395,7 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
             beginEdit (labelEdit, seg->label.isNotEmpty() ? seg->label : project()->sources[(size_t) seg->source].name);
     };
     labelEdit.onTextChange = [this] { segmentLabelEdited(); };
+    styleCaption (levelInfo, {});
 
     for (auto* b : std::initializer_list<juce::TextButton*> { &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startEarlierBtn,
                                                                &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn })
@@ -1386,7 +1407,7 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
     statusLabel.setInterceptsMouseClicks (false, false);
 
     for (auto* c : std::initializer_list<juce::Component*> {
-             &mixCaption, &nameEdit, &bpmCaption, &bpmEdit, &keepTemposBtn, &createBtn, &closeBtn,
+             &mixCaption, &nameEdit, &bpmCaption, &bpmEdit, &keepTemposBtn, &levelBox, &createBtn, &closeBtn,
              &sourcesCaption, &addSourceBtn, &sourceViewport,
              &snapBox, &playSourceBtn, &stopSourceBtn, &addToMixBtn, &replaceBtn, &sourceWave, &sourceScroll,
              &selCaption, &selFromEdit, &selToCaption, &selToEdit, &selInfo,
@@ -1394,7 +1415,7 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
              &segCaption, &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startCaption, &startEarlierBtn, &startLaterBtn,
              &endCaption, &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit, &toneCaption, &toneDownBtn,
              &toneValue, &toneUpBtn, &gainCaption, &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit,
-             &statusLabel })
+             &levelInfo, &statusLabel })
         owner.addAndMakeVisible (c);
 }
 
@@ -1708,6 +1729,7 @@ void MixEditor::Impl::recomputeLayout()
 // Una edición hecha aquí: recalcular, redibujar y avisar al dueño
 void MixEditor::Impl::changed()
 {
+    segmentLevels.clear();   // lo medido era del render anterior
     recomputeLayout();
     mixLine.layoutChanged();
     sourceWave.repaint();
@@ -1734,6 +1756,16 @@ void MixEditor::Impl::updateControls()
         bpmEdit.setText (bpmText (proj->effectiveBpm()) + " BPM", juce::dontSendNotification);
     bpmEdit.setColour (juce::Label::textColourId, proj->keepTempos ? juce::Colours::grey : juce::Colours::white);
     keepTemposBtn.setToggleState (proj->keepTempos, juce::dontSendNotification);
+    {
+        int levelId = proj->levelLufs < 0.0 ? 0 : 1;
+        for (int id = 2; id <= 5; ++id)
+            if (std::abs (proj->levelLufs - (-12.0 - 2.0 * (id - 2))) < 0.05)
+                levelId = id;
+        if (levelId > 0)
+            levelBox.setSelectedId (levelId, juce::dontSendNotification);
+        else
+            levelBox.setText ("Nivelar a " + decimal (proj->levelLufs, 1) + " LUFS", juce::dontSendNotification);   // escrito a mano
+    }
     createBtn.setEnabled (! proj->segments.empty() && ! busy);
 
     updateListSize();
@@ -1869,6 +1901,7 @@ void MixEditor::Impl::updatePanel()
                                                               &toneCaption, &toneDownBtn, &toneValue, &toneUpBtn, &gainCaption,
                                                               &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit })
         c->setEnabled (on);
+    levelInfo.setText ({}, juce::dontSendNotification);
     if (! on)
     {
         segCaption.setText ("Sin tramo", juce::dontSendNotification);
@@ -1898,6 +1931,17 @@ void MixEditor::Impl::updatePanel()
     toneUpBtn.setEnabled (seg->transpose < 12);
     if (! gainEdit.isBeingEdited())
         gainEdit.setText (gainText (seg->gainDb), juce::dontSendNotification);
+    // Nivelado del último render: "Niv +3,2 dB" ("tope" si no llegó al objetivo para no saturar)
+    if (proj->levelLufs < 0.0 && juce::isPositiveAndBelow (index, (int) segmentLevels.size()))
+    {
+        const auto& lv = segmentLevels[(size_t) index];
+        if (lv.lufs > -99.0)
+        {
+            levelInfo.setText ("Niv " + gainText (lv.gainDb) + (lv.peakLimited ? juce::String (" (tope)") : juce::String()),
+                               juce::dontSendNotification);
+            levelInfo.setColour (juce::Label::textColourId, lv.peakLimited ? offBeatColour : juce::Colours::lightgrey);
+        }
+    }
 
     // Fundido: el valor que coincida con una opción; si no (escrito a mano en mix.json), su texto
     const int meter = segmentMeter (*seg);
@@ -1977,7 +2021,7 @@ void MixEditor::Impl::layout()
     headerArea = r.removeFromTop (headerHeight);
     layoutRow (headerArea.reduced (10, 5), { { &mixCaption, 36 }, { &nameEdit, 220, false, 100 }, { nullptr, 12, false, 4 },
                                              { &bpmCaption, 94, false, 84 }, { &bpmEdit, 86, false, 76 },
-                                             { &keepTemposBtn, 168, false, 150 }, { nullptr, 12, true },
+                                             { &keepTemposBtn, 168, false, 150 }, { &levelBox, 156, false, 118 }, { nullptr, 12, true },
                                              { &createBtn, 128, false, 120 }, { &closeBtn, 76, false, 64 } });
     statusLabel.setBounds (r.removeFromBottom (statusHeight).reduced (12, 0));
     r.reduce (6, 6);
@@ -2033,7 +2077,7 @@ void MixEditor::Impl::layout()
                            { &nameCaption, 48 }, { &labelEdit, 70, true, 60 } }, 3);
         layoutRow (p, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                         { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
-                        { &gainCaption, 60 }, { &gainEdit, 70 }, { nullptr, 6 },
+                        { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 104, false, 70 }, { nullptr, 6 },
                         { &fadeCaption, 54 }, { &fadeBox, 110 }, { nullptr, 0, true } }, 3);
         return;
     }
@@ -2051,7 +2095,7 @@ void MixEditor::Impl::layout()
                        { &fadeCaption, 54, false, 48 }, { &fadeBox, 110, false, 96 }, { nullptr, 0, true } }, 3);
     layoutRow (row3, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                        { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
-                       { &gainCaption, 60 }, { &gainEdit, 70 }, { nullptr, 0, true } }, 3);
+                       { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 104, false, 70 }, { nullptr, 0, true } }, 3);
 }
 
 void MixEditor::Impl::paintFrame (juce::Graphics& g)
@@ -2946,6 +2990,12 @@ void MixEditor::selectSource (int index)
 void MixEditor::selectSegment (int index)
 {
     impl->chooseSegment (index);
+}
+
+void MixEditor::setSegmentLevels (std::vector<MixLevel> levels)
+{
+    impl->segmentLevels = std::move (levels);
+    impl->updatePanel();
 }
 
 void MixEditor::selectBars (int firstBar, int lastBar)

@@ -43,6 +43,10 @@ struct MixProject
     juce::File folder;          // <biblioteca>/_mixes/<nombre>
     double bpm = 0.0;           // tempo del mix; <= 0 = el tempo detectado del primer tramo
     bool keepTempos = false;    // true: cada tramo suena a su tempo original (sin estirar salvo playBpm propio)
+    // Nivelado: cada tramo se lleva a esta sonoridad (LUFS, EBU R128) antes de su ganancia propia; 0 = sin nivelar.
+    // Los mixes nuevos empiezan en -14 (MixProject::create); los guardados sin el campo, sin nivelar.
+    double levelLufs = 0.0;
+    static constexpr double defaultLevelLufs = -14.0;
     std::vector<MixSource> sources;
     std::vector<MixSegment> segments;   // en el orden en que suenan
 
@@ -73,6 +77,14 @@ struct MixProject
     int addSource (const juce::File& audioFile, juce::AudioFormatManager&);
     // Quita la fuente y sus tramos, reindexa los tramos de las demás y borra su archivo de fuentes/
     void removeSource (int index);
+};
+
+// Nivelado de un tramo en el último render (mix::render, uno por tramo, mismo orden)
+struct MixLevel
+{
+    double gainDb = 0.0;        // lo que subió o bajó el nivelado (sin la ganancia propia del tramo)
+    double lufs = -100.0;       // sonoridad del tramo ya nivelado (-100 = sin medir: tramo muy corto o en silencio)
+    bool peakLimited = false;   // no llegó al objetivo para no pasar de -1 dBTP (o por el tope de 12 dB)
 };
 
 // Cómo queda cada tramo en el mix (resultado de mix::layout, uno por tramo, mismo orden)
@@ -164,7 +176,11 @@ namespace mix
     // de 0 a 1 en [outStart - fadeIn, outStart]; salida: coseno de 1 a 0 en [outEnd - fadeOut, outEnd];
     // el primero entra con edgeFadeSeconds lineal) y lo suma en su lugar. Estéreo a `sampleRate`, de
     // largo ceil(length · sampleRate). Buffer vacío si se abortó o falló (con `error`).
+    // Con levelLufs < 0, cada tramo se mide (EBU R128, solo su cuerpo: de la unión a su final, sin el audio
+    // previo del fundido de entrada) y se lleva a esa sonoridad sin que su pico real pase de -1 dBTP, con
+    // tope de ±12 dB; su ganancia propia va encima. `levels` (si no es nullptr) recibe lo aplicado.
     juce::AudioBuffer<float> render (const MixProject&, double sampleRate, juce::AudioFormatManager&,
                                      const std::function<bool()>& shouldAbort,
-                                     const std::function<void (float)>& progress, juce::String& error);
+                                     const std::function<void (float)>& progress, juce::String& error,
+                                     std::vector<MixLevel>* levels = nullptr);
 }
