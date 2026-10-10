@@ -52,7 +52,8 @@ public:
     void analyzeCurrentSong() { startAnalysis(); }
     void levelCurrentSong()   { measureAndLevel(); }
     bool isRendering() const  { return rendering || tempoDirtySince != 0; }
-    void editForCapture (double cutSeconds, double moveMs);   // corta los stems y desplaza el tramo que sigue (herramienta de captura)
+    // Corta los stems y desplaza el tramo que sigue (herramienta de captura); con lane >= 0, solo esa pista
+    void editForCapture (double cutSeconds, double moveMs, int lane = -1);
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
@@ -165,7 +166,7 @@ private:
     void requestRender();                          // con retardo, desde el Timer
     void renderTempo();
     void songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap, int transpose,
-                       std::vector<Clip> clips, std::shared_ptr<SamplerSet> samplers, int generation);
+                       std::vector<Clip> clips, std::vector<TrackClips> trackClips, std::shared_ptr<SamplerSet> samplers, int generation);
 
     // Triggers (punto 1): golpes de las pistas que disparan bancos de muestras
     struct BankCache
@@ -290,7 +291,10 @@ private:
     bool linkedSongNeedsRebuild (int index);   // true: hay que volver a armarla antes de cargarla (ver loadSongAt)
     void openLinkedMix (int index);
     void unlinkSong (int index);
-    bool linkedSongMenu (const SongInfo&);    // menú de tramos en una canción ligada; true si lo mostró
+    // Menú de tramos en una canción ligada (abrir su mix o editar aquí, que la desliga tras preguntar y llama a
+    // `afterUnlink`); true si lo mostró
+    bool linkedSongMenu (const SongInfo&, std::function<void()> afterUnlink = {});
+    void confirmUnlink (int index, std::function<void()> afterUnlink);
     static juce::String separationKey (const SeparationOptions&);
     static SeparationOptions optionsFromKey (const juce::String&);
     bool startSeparationWith (const juce::File& file, const juce::String& songName, const SeparationOptions&);
@@ -312,7 +316,12 @@ private:
 
     // Arreglo (fase 4): cortar, mover, eliminar y unir tramos de audio; deshacer
     std::vector<TimelineView::ClipView> mappedClips() const;
+    std::vector<TimelineView::LaneClips> mappedLaneClips() const;   // pistas con arreglo propio, por carril
+    const StemInfo* stemForLane (int lane) const;                   // la pista del carril (lo que suena), o nullptr
+    static juce::StringArray stemFilesOf (const SongInfo&);         // archivos de los stems por índice (render del arreglo)
     void clipMenu (double playbackSeconds, int lane);
+    // Una edición de una sola pista (ids 21 a 29 del menú del carril) en el instante `songSeconds`
+    void trackClipAction (int action, double songSeconds, const juce::String& stemFile);
     // Portapapeles de tramos: el tramo copiado con la grilla (tiempos y acordes) de su rango y el tempo de su sección
     struct ClipClipboard
     {
@@ -321,11 +330,13 @@ private:
         Clip clip;
         arrangement::GridSlice grid;
         std::vector<TempoRegion> regions;   // secciones de tempo del rango, con inicio relativo al tramo
+        juce::String stem;                  // copiado de una sola pista (se pega solo en ella); vacío = de toda la canción
+        std::vector<TrackClips> trackParts; // de toda la canción: lo que sonaba en las pistas con arreglo propio (relativo)
     };
     void copyClip (int index);
     void pasteClipboard (double songSeconds, bool insert);   // insert: abre espacio (audio y grilla); si no, superpone
     void duplicateClip (int index);                          // copia y pega insertando justo después del tramo
-    void clipDragged (double playbackSeconds, double deltaSeconds, int lane);
+    void clipDragged (double playbackSeconds, double deltaSeconds, int lane, bool trackOnly);
     int cutMode() const { return cutModeBox.getSelectedId(); }          // 1 libre, 2 a la rejilla, 3 a la transiente
     double nearestGridTime (double songSeconds) const;                   // tiempo detectado (o de la rejilla fija) más cercano
     double onsetNear (double songSeconds, int lane, double window) const; // transiente en la pista del carril (o en la mezcla); -1 si no hay
@@ -386,6 +397,7 @@ private:
     std::shared_ptr<LoadedSong> sourceSong;    // los archivos originales, para volver a renderizar
     std::shared_ptr<LoadedSong> arrangedSong;  // el arreglo (tramos colocados), en la línea de tiempo de la canción
     std::vector<Clip> renderedClips;           // tramos con los que se renderizó lo que suena
+    std::vector<TrackClips> renderedTrackClips;   // y los arreglos propios de las pistas
     juce::File midiSamplersFolder;             // canción para la que se armaron las líneas de midiSamplers
     std::shared_ptr<SamplerSet> samplers;      // triggers de lo que suena
     std::shared_ptr<SamplerSet> midiSamplers;  // filas con sonido de las pistas MIDI de lo que suena

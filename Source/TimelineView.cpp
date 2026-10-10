@@ -415,10 +415,13 @@ public:
             if (owner.onLaneMenu) owner.onLaneMenu (t, index);
             return;
         }
-        if (e.mods.isShiftDown() && ! owner.clips.empty())
+        const bool trackOnly = e.mods.isShiftDown() && (e.mods.isCtrlDown() || e.mods.isCommandDown());
+        if (e.mods.isShiftDown() && (trackOnly || ! owner.clips.empty()))
         {
-            // Shift + arrastre: mover el tramo de audio que está bajo el mouse (todos los stems)
+            // Shift + arrastre: mover el tramo de audio que está bajo el mouse (todos los stems); con Ctrl, solo el de
+            // esta pista (aunque no tenga cortes: se corre entera)
             owner.clipDragging = true;
+            owner.clipDragTrackOnly = trackOnly;
             owner.clipDragFrom = t;
             owner.clipDragDelta = 0.0;
             owner.clipDragLane = index;
@@ -452,7 +455,7 @@ public:
         owner.clipDragDelta = 0.0;
         owner.repaintOverlay();
         if (std::abs (delta) > 1.0e-4 && owner.onClipDragged)
-            owner.onClipDragged (owner.clipDragFrom, delta, owner.clipDragLane);
+            owner.onClipDragged (owner.clipDragFrom, delta, owner.clipDragLane, owner.clipDragTrackOnly);
     }
 
     void paint (juce::Graphics& g) override
@@ -487,11 +490,63 @@ public:
                 g.fillRect (x, getHeight() - 1 - h, 2, h);
             }
         }
+        drawClips (g);
     }
 
     LoadedTrack& getTrack() { return track; }
 
 private:
+    // Con pistas de arreglo propio, los bordes y huecos de los tramos van por carril: los suyos (con una franja de
+    // color en la cabecera) o los de la canción. Durante Ctrl + Shift + arrastre en este carril, su tramo desplazado.
+    void drawClips (juce::Graphics& g)
+    {
+        if (! owner.anyOwnLane())
+            return;
+        const bool own = juce::isPositiveAndBelow (index, (int) owner.laneClips.size()) && owner.laneClips[(size_t) index].own;
+        const auto& list = own ? owner.laneClips[(size_t) index].clips : owner.clips;
+        if (own)
+        {
+            g.setColour (ui::accent);
+            g.fillRect (headerWidth - 4, 0, 3, getHeight());
+        }
+        if (! own && list.empty())
+            return;   // la canción sin cortes
+        juce::Graphics::ScopedSaveState state (g);
+        g.reduceClipRegion (headerWidth, 0, getWidth() - headerWidth, getHeight());
+        auto shade = [&] (double a, double b)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.45f));
+            g.fillRect (headerWidth + owner.timeToX (a), 0, juce::jmax (1, owner.timeToX (b) - owner.timeToX (a)), getHeight());
+        };
+        double lastEnd = 0.0;
+        for (auto& c : list)
+        {
+            if (c.start > lastEnd + 1.0e-6)
+                shade (lastEnd, c.start);
+            lastEnd = juce::jmax (lastEnd, c.end);
+            g.setColour (juce::Colours::white.withAlpha (0.35f));
+            g.fillRect (headerWidth + owner.timeToX (c.start), 0, 1, getHeight());
+            g.fillRect (headerWidth + owner.timeToX (c.end), 0, 1, getHeight());
+        }
+        if (own && owner.lengthSeconds() > lastEnd + 1.0e-6)
+            shade (lastEnd, owner.lengthSeconds());   // después de su último tramo la pista no suena
+        if (owner.clipDragging && owner.clipDragTrackOnly && owner.clipDragLane == index)
+            for (auto& c : list)
+                if (owner.clipDragFrom >= c.start && owner.clipDragFrom < c.end)
+                {
+                    const int a = headerWidth + owner.timeToX (c.start + owner.clipDragDelta), b = headerWidth + owner.timeToX (c.end + owner.clipDragDelta);
+                    g.setColour (ui::accent.withAlpha (0.25f));
+                    g.fillRect (a, 0, juce::jmax (1, b - a), getHeight());
+                    g.setColour (ui::accent);
+                    g.fillRect (a, 0, 1, getHeight());
+                    g.fillRect (b, 0, 1, getHeight());
+                    g.setFont (ui::font (12.0f, true));
+                    g.setColour (juce::Colours::white);
+                    g.drawText (juce::String::formatted ("%+.0f ms", owner.clipDragDelta * 1000.0), a + 4, 2, 120, 16, juce::Justification::centredLeft);
+                    break;
+                }
+    }
+
     void renderImage()
     {
         const int w = juce::jmax (1, getWidth() - headerWidth), h = juce::jmax (1, getHeight());
@@ -1370,11 +1425,13 @@ public:
             g.fillRect (a, 0, 1, getHeight());
             g.fillRect (b, 0, 1, getHeight());
         }
-        // Tramos del arreglo: bordes y huecos; durante Shift + arrastre, el tramo desplazado
+        // Tramos del arreglo: bordes y huecos; durante Shift + arrastre, el tramo desplazado (con pistas de arreglo
+        // propio, los bordes los dibuja cada carril y aquí solo va el arrastre de la canción entera)
+        const bool perLane = owner.anyOwnLane();
         if (! owner.clips.empty())
         {
             double lastEnd = 0.0;
-            for (auto& c : owner.clips)
+            for (auto& c : perLane ? std::vector<ClipView>() : owner.clips)
             {
                 if (c.start > lastEnd + 1.0e-6)
                 {
@@ -1386,7 +1443,7 @@ public:
                 g.fillRect (headerWidth + owner.timeToX (c.start), 0, 1, getHeight());
                 g.fillRect (headerWidth + owner.timeToX (c.end), 0, 1, getHeight());
             }
-            if (owner.clipDragging)
+            if (owner.clipDragging && ! owner.clipDragTrackOnly)
                 for (auto& c : owner.clips)
                     if (owner.clipDragFrom >= c.start && owner.clipDragFrom < c.end)
                     {
@@ -1582,11 +1639,28 @@ void TimelineView::setClips (const std::vector<ClipView>& c)
 {
     clips = c;
     overlay->repaint();
+    for (auto* lane : lanes)
+        lane->repaint();
+}
+
+void TimelineView::setLaneClips (const std::vector<LaneClips>& perLane)
+{
+    laneClips = perLane;
+    overlay->repaint();
+    for (auto* lane : lanes)
+        lane->repaint();
+}
+
+bool TimelineView::anyOwnLane() const
+{
+    return std::any_of (laneClips.begin(), laneClips.end(), [] (const LaneClips& l) { return l.own; });
 }
 
 void TimelineView::repaintOverlay()
 {
     overlay->repaint();
+    if (clipDragTrackOnly && juce::isPositiveAndBelow (clipDragLane, lanes.size()))
+        lanes[clipDragLane]->repaint();   // el arrastre de una sola pista se dibuja en su carril
 }
 
 void TimelineView::setLevelingEnabled (bool enabled)

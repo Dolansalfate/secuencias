@@ -151,6 +151,147 @@ namespace arrangement
         return true;
     }
 
+    void splitAllAt (std::vector<Clip>& clips, double t)
+    {
+        for (int i = (int) clips.size(); --i >= 0;)
+        {
+            auto& c = clips[(size_t) i];
+            const double offset = t - c.position;
+            if (offset > 0.001 && offset < c.length() - 0.001)
+            {
+                Clip second { c.srcStart + offset, c.srcEnd, t };
+                c.srcEnd = c.srcStart + offset;
+                clips.insert (clips.begin() + i + 1, second);
+            }
+        }
+        sortClips (clips);
+    }
+
+    namespace
+    {
+        // Fin del audio de un arreglo propio (vacío = la pista no suena: 0)
+        double ownEnd (const std::vector<Clip>& clips)
+        {
+            double end = 0.0;
+            for (auto& c : clips)
+                end = std::max (end, c.end());
+            return end;
+        }
+
+        bool isRecording (const SongInfo& info, const juce::String& stemFile)
+        {
+            return std::any_of (info.stems.begin(), info.stems.end(),
+                                [&stemFile] (const StemInfo& s) { return s.fileName == stemFile && s.songTime; });
+        }
+
+        // Cada arreglo propio que sigue las ediciones de la canción (no los de las grabaciones)
+        template <typename Fn>
+        void forEachOwn (SongInfo& info, Fn&& fn)
+        {
+            for (auto& own : info.trackClips)
+                if (! isRecording (info, own.stem))
+                    fn (own.clips);
+        }
+    }
+
+    std::vector<Clip> clipsOf (const SongInfo& info, const StemInfo& stem, double sourceLength)
+    {
+        if (const auto* own = info.ownClips (stem.fileName))
+            return *own;
+        if (stem.songTime)
+            return { Clip { 0.0, sourceLength, 0.0 } };
+        auto clips = info.clips;
+        ensureClips (clips, sourceLength);
+        return clips;
+    }
+
+    std::vector<Clip>& ownClips (SongInfo& info, const StemInfo& stem, double sourceLength)
+    {
+        if (auto* own = info.ownClips (stem.fileName))
+            return *own;
+        TrackClips own { stem.fileName, clipsOf (info, stem, sourceLength) };
+        info.trackClips.push_back (std::move (own));
+        return info.trackClips.back().clips;
+    }
+
+    void dropOwnClips (SongInfo& info, const juce::String& stemFile)
+    {
+        info.trackClips.erase (std::remove_if (info.trackClips.begin(), info.trackClips.end(),
+                                               [&stemFile] (const TrackClips& own) { return own.stem == stemFile; }),
+                               info.trackClips.end());
+    }
+
+    double songLength (const SongInfo& info, double sourceLength)
+    {
+        double length = lengthSeconds (info.clips, sourceLength);
+        for (auto& own : info.trackClips)
+            if (std::any_of (info.stems.begin(), info.stems.end(), [&own] (const StemInfo& s) { return s.fileName == own.stem; }))
+                length = std::max (length, ownEnd (own.clips));
+        return length;
+    }
+
+    bool isPlainArrangement (const SongInfo& info, double sourceLength)
+    {
+        return info.trackClips.empty() && isIdentity (info.clips, sourceLength);
+    }
+
+    void cutOwnAt (SongInfo& info, double t)
+    {
+        forEachOwn (info, [t] (std::vector<Clip>& clips) { splitAllAt (clips, t); });
+    }
+
+    void moveOwnRange (SongInfo& info, double from, double to, double delta, bool andFollowing)
+    {
+        if (! std::isfinite (delta) || std::abs (delta) < 1.0e-12)
+            return;
+        forEachOwn (info, [=] (std::vector<Clip>& clips)
+        {
+            splitAllAt (clips, from);
+            if (! andFollowing)
+                splitAllAt (clips, to);
+            for (auto& c : clips)
+                if (c.position >= from - 1.0e-6 && (andFollowing || c.position < to - 1.0e-6))
+                    c.position = std::max (0.0, c.position + delta);
+            sortClips (clips);
+        });
+    }
+
+    void removeOwnRange (SongInfo& info, double from, double to, bool closeGap)
+    {
+        if (! (to > from))
+            return;
+        forEachOwn (info, [=] (std::vector<Clip>& clips)
+        {
+            splitAllAt (clips, from);
+            splitAllAt (clips, to);
+            clips.erase (std::remove_if (clips.begin(), clips.end(),
+                                         [=] (const Clip& c) { return c.position >= from - 1.0e-6 && c.end() <= to + 1.0e-6; }),
+                         clips.end());
+            if (closeGap)
+                for (auto& c : clips)
+                    if (c.position >= from - 1.0e-6)
+                        c.position = std::max (from, c.position - (to - from));
+            sortClips (clips);
+        });
+    }
+
+    void insertOwnGap (SongInfo& info, double at, double length)
+    {
+        forEachOwn (info, [=] (std::vector<Clip>& clips) { insertGap (clips, at, length); });
+    }
+
+    std::vector<Clip> clipsInRange (const std::vector<Clip>& clips, double from, double to)
+    {
+        std::vector<Clip> out;
+        for (auto& c : clips)
+        {
+            const double a = std::max (c.position, from), b = std::min (c.end(), to);
+            if (b - a > 1.0e-6)
+                out.push_back ({ c.srcStart + (a - c.position), c.srcStart + (b - c.position), a - from });
+        }
+        return out;
+    }
+
     void shiftGrid (SongInfo& info, double from, double delta)
     {
         // delta < 0: lo que había en [from, from - delta) desaparece y lo demás se adelanta; delta > 0: se abre un hueco
@@ -254,12 +395,14 @@ namespace arrangement
         }
     }
 
-    void moveMidiHits (SongInfo& info, double from, double to, double delta)
+    void moveMidiHits (SongInfo& info, double from, double to, double delta, const juce::String& sourceFile)
     {
         if (! std::isfinite (delta) || std::abs (delta) < 1.0e-12)
             return;
         for (auto& mt : info.midiTracks)
         {
+            if (sourceFile.isNotEmpty() && mt.sourceFile != sourceFile)
+                continue;
             for (auto& h : mt.hits)
                 if (inRange (h.seconds, from, to))
                     h.seconds = std::max (0.0, h.seconds + delta);
@@ -267,20 +410,52 @@ namespace arrangement
         }
     }
 
-    void removeMidiHits (SongInfo& info, double from, double to)
+    void removeMidiHits (SongInfo& info, double from, double to, const juce::String& sourceFile)
     {
         for (auto& mt : info.midiTracks)
-            mt.hits.erase (std::remove_if (mt.hits.begin(), mt.hits.end(),
-                                           [from, to] (const MidiHit& h) { return inRange (h.seconds, from, to); }),
-                           mt.hits.end());
+            if (sourceFile.isEmpty() || mt.sourceFile == sourceFile)
+                mt.hits.erase (std::remove_if (mt.hits.begin(), mt.hits.end(),
+                                               [from, to] (const MidiHit& h) { return inRange (h.seconds, from, to); }),
+                               mt.hits.end());
     }
 
-    void midiHitsToSource (SongInfo& info, const std::vector<Clip>& clips)
+    void remapMidiHits (SongInfo& info, const juce::String& sourceFile, const std::vector<Clip>& from, const std::vector<Clip>& to)
     {
-        if (clips.empty())
-            return;   // ya es el audio original
         for (auto& mt : info.midiTracks)
         {
+            if (mt.sourceFile != sourceFile)
+                continue;
+            for (int i = (int) mt.hits.size(); --i >= 0;)
+            {
+                auto& h = mt.hits[(size_t) i];
+                bool placed = false;
+                if (const int c = clipAt (from, h.seconds); c >= 0)
+                {
+                    const double src = from[(size_t) c].srcStart + (h.seconds - from[(size_t) c].position);
+                    for (auto& d : to)
+                        if (src >= d.srcStart - 1.0e-9 && src < d.srcEnd)
+                        {
+                            h.seconds = std::max (0.0, d.position + (src - d.srcStart));
+                            placed = true;
+                            break;
+                        }
+                }
+                if (! placed)
+                    mt.hits.erase (mt.hits.begin() + i);   // ese audio no suena en el arreglo nuevo
+            }
+            mt.sortHits();
+        }
+    }
+
+    void midiHitsToSource (SongInfo& info, const std::vector<Clip>& songClips)
+    {
+        for (auto& mt : info.midiTracks)
+        {
+            // Los tramos que suenan en su pista de origen: los suyos si tiene arreglo propio
+            const auto* own = info.ownClips (mt.sourceFile);
+            if (own == nullptr && songClips.empty())
+                continue;   // ya es el audio original
+            const auto& clips = own != nullptr ? *own : songClips;
             for (int i = (int) mt.hits.size(); --i >= 0;)
             {
                 auto& h = mt.hits[(size_t) i];
@@ -312,12 +487,14 @@ namespace arrangement
         }
     }
 
-    void copyMidiHits (const SongInfo& info, double from, double to, GridSlice& slice)
+    void copyMidiHits (const SongInfo& info, double from, double to, GridSlice& slice, const juce::String& sourceFile)
     {
         slice.midi.clear();
         for (size_t m = 0; m < info.midiTracks.size(); ++m)
         {
             const auto& mt = info.midiTracks[m];
+            if (sourceFile.isNotEmpty() && mt.sourceFile != sourceFile)
+                continue;
             MidiSlice s;
             s.track = (int) m;
             s.name = mt.name;
@@ -422,16 +599,37 @@ namespace arrangement
         return (from + start * hop) / sr;
     }
 
-    std::shared_ptr<LoadedSong> render (std::shared_ptr<LoadedSong> source, const std::vector<Clip>& clips, double sr,
-                                        const std::function<bool()>& shouldAbort)
+    std::shared_ptr<LoadedSong> render (std::shared_ptr<LoadedSong> source, const std::vector<Clip>& songClipsIn, double sr,
+                                        const std::function<bool()>& shouldAbort,
+                                        const std::vector<TrackClips>& trackClips, const juce::StringArray& stemFiles)
     {
         if (source == nullptr)
             return nullptr;
         const double sourceLength = (double) source->length / sr;
-        if (isIdentity (clips, sourceLength))
+        // El arreglo propio de una pista, por el archivo de su stem
+        auto ownOf = [&trackClips, &stemFiles] (const LoadedTrack& t) -> const std::vector<Clip>*
+        {
+            if (! juce::isPositiveAndBelow (t.stemIndex, stemFiles.size()))
+                return nullptr;
+            for (auto& own : trackClips)
+                if (own.stem == stemFiles[t.stemIndex])
+                    return &own.clips;
+            return nullptr;
+        };
+        bool anyOwn = false;
+        double length = lengthSeconds (songClipsIn, sourceLength);
+        for (auto& t : source->tracks)
+            if (const auto* own = ownOf (*t))
+            {
+                anyOwn = true;
+                length = std::max (length, ownEnd (*own));
+            }
+        if (! anyOwn && isIdentity (songClipsIn, sourceLength))
             return source;
+        auto clips = songClipsIn;
+        ensureClips (clips, sourceLength);
 
-        const int outLen = juce::jmax (1, (int) std::llround (lengthSeconds (clips, sourceLength) * sr));
+        const int outLen = juce::jmax (1, (int) std::llround (length * sr));
         const int fadeN = juce::jmax (1, (int) std::llround (fadeSeconds * sr));
         auto out = std::make_shared<LoadedSong>();
         out->sampleRate = sr;
@@ -452,7 +650,8 @@ namespace arrangement
             t->buffer.setSize (2, outLen);
             t->buffer.clear();
             const int channels = juce::jmin (2, src->buffer.getNumChannels());
-            if (src->songTime)
+            const auto* own = ownOf (*src);
+            if (src->songTime && own == nullptr)
             {
                 // Grabación hecha sobre el arreglo: ya está en la línea de tiempo de la canción, se copia tal cual
                 const int n = juce::jmin (outLen, src->buffer.getNumSamples());
@@ -462,7 +661,7 @@ namespace arrangement
                 out->tracks.push_back (std::move (t));
                 continue;
             }
-            for (auto& c : clips)
+            for (auto& c : own != nullptr ? *own : clips)
             {
                 const int s0 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcStart * sr));
                 const int s1 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcEnd * sr));

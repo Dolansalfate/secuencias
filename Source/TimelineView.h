@@ -38,6 +38,15 @@ public:
         double start = 0.0, end = 0.0;
     };
     void setClips (const std::vector<ClipView>&);
+    // Pistas con su propio arreglo (cortadas o movidas solas), en el orden de los carriles, con sus tramos en tiempo de
+    // reproducción. Si hay alguna, cada carril dibuja sus bordes y huecos (los suyos o los de la canción) en vez de la
+    // capa de encima.
+    struct LaneClips
+    {
+        bool own = false;
+        std::vector<ClipView> clips;
+    };
+    void setLaneClips (const std::vector<LaneClips>&);
     void setAnalysis (const Analysis&);   // tiempos y acordes detectados (vacío = rejilla fija por BPM)
     void setLevelingEnabled (bool);       // mostrar la ganancia de nivelado de cada tramo
     void setPosition (double seconds);
@@ -90,7 +99,8 @@ public:
     std::function<void (int noteIndex, double seconds)> onNoteClicked;     // clic derecho en la fila de notas (-1 = hueco)
     std::function<void (int chordIndex, double seconds)> onChordClicked;   // clic derecho en la fila de acordes (-1 = sin acorde ahí)
     std::function<void (double seconds, int lane)> onLaneMenu;                        // clic derecho sobre un carril (menú del audio)
-    std::function<void (double seconds, double deltaSeconds, int lane)> onClipDragged; // Shift + arrastre sobre un carril: mover el tramo
+    // Shift + arrastre sobre un carril: mover el tramo en todas las pistas; Ctrl + Shift + arrastre: solo en esa pista
+    std::function<void (double seconds, double deltaSeconds, int lane, bool trackOnly)> onClipDragged;
     std::function<void (int track, bool state)> onMute, onSolo, onTrigger;
     std::function<void (int track)> onLaneHeaderMenu;   // clic derecho en la cabecera de un carril (trigger)
     // Pistas MIDI (índices de golpe = índices en MidiLaneView::hits; tiempos de reproducción)
@@ -144,7 +154,10 @@ private:
     std::vector<TempoBand> tempoBands;
     std::vector<NoteView> notes;
     std::vector<ClipView> clips;
+    std::vector<LaneClips> laneClips;              // por carril (setLaneClips)
+    bool anyOwnLane() const;
     bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo
+    bool clipDragTrackOnly = false;                // con Ctrl: solo el tramo de esa pista
     double clipDragFrom = 0.0, clipDragDelta = 0.0;
     int clipDragLane = 0;
     Analysis analysis;

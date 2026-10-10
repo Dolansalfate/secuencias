@@ -414,7 +414,7 @@ MainComponent::MainComponent()
             clickControlsFromSong();   // la fila del click muestra lo mismo
         }
     };
-    timeline.onClipDragged = [this] (double t, double delta, int lane) { clipDragged (t, delta, lane); };
+    timeline.onClipDragged = [this] (double t, double delta, int lane, bool trackOnly) { clipDragged (t, delta, lane, trackOnly); };
     timeline.onMarkerClicked = [this] (int i, bool popup) { if (popup) markerMenu (i); else jumpToMarker (i); };
     timeline.onMarkerMoved = [this] (int i, double t)
     {
@@ -1106,7 +1106,7 @@ void MainComponent::loadSongAt (int index)
                 {
                     // Arreglo (tramos cortados o movidos) y, si hay tempo o tono guardados, el estirado: la
                     // versión que suena se renderiza antes de mostrarla
-                    arranged = arrangement::render (source, info.clips, sr, abort);
+                    arranged = arrangement::render (source, info.clips, sr, abort, info.trackClips, stemFilesOf (info));
                     song = arranged;
                     if (arranged != nullptr)
                     {
@@ -1158,6 +1158,7 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     arrangedSong = arranged != nullptr ? arranged : source;
     auto* info = currentInfo();
     renderedClips = info != nullptr ? info->clips : std::vector<Clip>();
+    renderedTrackClips = info != nullptr ? info->trackClips : std::vector<TrackClips>();
     renderedTriggers = info != nullptr ? triggersOf (*info) : std::vector<TriggerSettings>();
     undoStack.clear();
     loadedFolder = info != nullptr ? info->folder : juce::File();
@@ -1276,6 +1277,7 @@ void MainComponent::syncTimelineMarkers()
         timeline.setLevelingEnabled (info->levelingEnabled);
         timeline.setTempoBands (mappedTempoBands());
         timeline.setClips (mappedClips());
+        timeline.setLaneClips (mappedLaneClips());
         std::vector<TimelineView::NoteView> notes;
         for (auto& n : info->notes)
             notes.push_back ({ timeMap.toPlayback (n.seconds), n.text });
@@ -1287,6 +1289,7 @@ void MainComponent::syncTimelineMarkers()
         timeline.setMarkers ({}, 120.0, 0.0);
         timeline.setTempoBands ({});
         timeline.setClips ({});
+        timeline.setLaneClips ({});
         timeline.setNotes ({});
     }
 }
@@ -1453,6 +1456,16 @@ static bool sameClips (const std::vector<Clip>& a, const std::vector<Clip>& b)
     return true;
 }
 
+static bool sameTrackClips (const std::vector<TrackClips>& a, const std::vector<TrackClips>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].stem != b[i].stem || ! sameClips (a[i].clips, b[i].clips))
+            return false;
+    return true;
+}
+
 void MainComponent::renderTempo()
 {
     tempoDirtySince = 0;
@@ -1462,8 +1475,9 @@ void MainComponent::renderTempo()
     const double sr = engine.getSampleRate();
     const double sourceLength = (double) sourceSong->length / sr;
     const auto clips = info->clips;
-    const bool clipsChanged = ! sameClips (clips, renderedClips);
-    const auto newMap = TimeMap::build (*info, arrangement::lengthSeconds (clips, sourceLength));
+    const auto trackClips = info->trackClips;
+    const bool clipsChanged = ! sameClips (clips, renderedClips) || ! sameTrackClips (trackClips, renderedTrackClips);
+    const auto newMap = TimeMap::build (*info, arrangement::songLength (*info, sourceLength));
     const bool stretchChanged = clipsChanged || ! sameStretch (newMap, timeMap) || info->transpose != renderedTranspose;
     const auto trig = triggersOf (*info);
     bool triggersChanged = trig.size() != renderedTriggers.size();
@@ -1491,7 +1505,7 @@ void MainComponent::renderTempo()
     const auto banksDir = library.banksFolder();
     sepLabel.setText (! stretchChanged ? tr ("Detectando golpes...") : clipsChanged ? tr ("Renderizando el arreglo...") : tr ("Renderizando tempo y tono..."), juce::dontSendNotification);
     juce::Component::SafePointer<MainComponent> safe (this);
-    loaderPool.addJob ([this, safe, source, arrangedBefore, renderedBefore, clips, newMap, transpose, sr, gen, rgen, infoCopy, banksDir]
+    loaderPool.addJob ([this, safe, source, arrangedBefore, renderedBefore, clips, trackClips, newMap, transpose, sr, gen, rgen, infoCopy, banksDir]
     {
         auto abort = [this, gen, rgen] { return gen != loadGeneration.load() || rgen != renderGeneration || abortJobs.load(); };
         auto progress = [safe] (float p)
@@ -1507,23 +1521,24 @@ void MainComponent::renderTempo()
         try
         {
             if (arranged == nullptr)
-                arranged = arrangement::render (source, clips, sr, abort);
+                arranged = arrangement::render (source, clips, sr, abort, trackClips, stemFilesOf (infoCopy));
             if (arranged != nullptr && rendered == nullptr)
                 rendered = stretcher::render (arranged, newMap, sr, abort, progress);
             if (rendered != nullptr)
                 samplerSet = buildSamplers (*rendered, infoCopy, sr, banksDir, formatManager, bankCache);
         }
         catch (const std::exception&) {}
-        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, samplerSet, rgen]
+        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, trackClips, samplerSet, rgen]
         {
             if (auto* self = safe.getComponent())
-                self->songRendered (rendered, arranged, newMap, transpose, clips, samplerSet, rgen);
+                self->songRendered (rendered, arranged, newMap, transpose, clips, trackClips, samplerSet, rgen);
         });
     });
 }
 
 void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap map,
-                                  int transpose, std::vector<Clip> clips, std::shared_ptr<SamplerSet> samplerSet, int rgen)
+                                  int transpose, std::vector<Clip> clips, std::vector<TrackClips> trackClips,
+                                  std::shared_ptr<SamplerSet> samplerSet, int rgen)
 {
     if (rgen != renderGeneration)
         return;
@@ -1540,6 +1555,7 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
     timeMap = map;
     renderedTranspose = transpose;
     renderedClips = std::move (clips);
+    renderedTrackClips = std::move (trackClips);
     if (auto* info = currentInfo())
         renderedTriggers = triggersOf (*info);
     arrangedSong = arranged;
@@ -1570,7 +1586,8 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
         tempoControlsFromSong();
         updateLoopRegion();
         const bool plain = timeMap.isPlain();
-        const bool cut = sourceSong != nullptr && ! arrangement::isIdentity (renderedClips, (double) sourceSong->length / engine.getSampleRate());
+        const bool cut = sourceSong != nullptr && (! renderedTrackClips.empty()
+                                                    || ! arrangement::isIdentity (renderedClips, (double) sourceSong->length / engine.getSampleRate()));
         sepLabel.setText (plain ? (cut ? tr ("Arreglo aplicado") : tr ("Tempo y tono originales")) : tr ("Tempo y tono aplicados"),
                           juce::dontSendNotification);
     });
@@ -2274,6 +2291,47 @@ double MainComponent::songLengthSeconds() const
     return arrangedSong != nullptr ? (double) arrangedSong->length / engine.getSampleRate() : 0.0;
 }
 
+std::vector<TimelineView::LaneClips> MainComponent::mappedLaneClips() const
+{
+    std::vector<TimelineView::LaneClips> out;
+    if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()) || currentSong == nullptr)
+        return out;
+    const auto& info = library.songs[(size_t) currentIndex];
+    if (info.trackClips.empty())
+        return out;
+    for (auto& t : currentSong->tracks)
+    {
+        TimelineView::LaneClips lane;
+        if (juce::isPositiveAndBelow (t->stemIndex, (int) info.stems.size()))
+            if (const auto* own = info.ownClips (info.stems[(size_t) t->stemIndex].fileName))
+            {
+                lane.own = true;
+                for (auto& c : *own)
+                    lane.clips.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()) });
+            }
+        out.push_back (lane);
+    }
+    return out;
+}
+
+const StemInfo* MainComponent::stemForLane (int lane) const
+{
+    if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()) || currentSong == nullptr
+        || ! juce::isPositiveAndBelow (lane, (int) currentSong->tracks.size()))
+        return nullptr;
+    const auto& info = library.songs[(size_t) currentIndex];
+    const int stem = currentSong->tracks[(size_t) lane]->stemIndex;
+    return juce::isPositiveAndBelow (stem, (int) info.stems.size()) ? &info.stems[(size_t) stem] : nullptr;
+}
+
+juce::StringArray MainComponent::stemFilesOf (const SongInfo& info)
+{
+    juce::StringArray files;
+    for (auto& st : info.stems)
+        files.add (st.fileName);
+    return files;
+}
+
 std::vector<TimelineView::ClipView> MainComponent::mappedClips() const
 {
     std::vector<TimelineView::ClipView> out;
@@ -2312,6 +2370,7 @@ void MainComponent::undoLastEdit()
     }
     restored.stems = info->stems;   // la mezcla (faders, mute, salidas) no se deshace
     restored.name = info->name;
+    restored.mixLink = info->mixLink;   // tampoco el enlace con su mix (desligarla no se deshace)
     // Tampoco lo que no pasa por pushUndo en las pistas MIDI: la mezcla de las filas, sus nombres y sonidos, el nombre de la
     // pista y sus silencios. Se toma de la pista actual con el mismo origen (la n-ésima con ese archivo) y de su fila con la
     // misma nota; lo que no tiene pareja (una fila quitada que vuelve, una nota cambiada) queda como se guardó
@@ -2383,7 +2442,7 @@ void MainComponent::arrangementEdited()
 bool MainComponent::arrangementReady()
 {
     auto* info = currentInfo();
-    if (info != nullptr && sameClips (info->clips, renderedClips))
+    if (info != nullptr && sameClips (info->clips, renderedClips) && sameTrackClips (info->trackClips, renderedTrackClips))
         return true;
     sepLabel.setText (tr ("El arreglo se está preparando: prueba en un momento"), juce::dontSendNotification);
     return false;
@@ -5566,17 +5625,17 @@ void MainComponent::unlinkSong (int index)
 }
 
 // En una canción ligada, los tramos se editan en su mix (cortar o mover aquí se perdería al actualizarla)
-bool MainComponent::linkedSongMenu (const SongInfo& info)
+bool MainComponent::linkedSongMenu (const SongInfo& info, std::function<void()> afterUnlink)
 {
     if (! info.mixLink.isLinked())
         return false;
     juce::PopupMenu m;
-    m.addSectionHeader (tr ("Ligada al mix «") + info.mixLink.folder + tr ("»: los tramos se editan en el mix"));
-    m.addItem (1, tr ("Abrir el mix"));
-    m.addItem (2, tr ("Desligar del mix (editar los tramos aquí)"));
+    m.addSectionHeader (tr ("Ligada al mix «") + info.mixLink.folder + tr ("»: se actualiza sola cuando cambias el mix"));
+    m.addItem (1, tr ("Abrir el mix (los tramos se editan allí)"));
+    m.addItem (2, tr ("Editar aquí, también cada pista por separado (la desliga del mix)..."));
     const auto folder = info.folder;
     juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options(), [safe, folder] (int result)
+    m.showMenuAsync (juce::PopupMenu::Options(), [safe, folder, afterUnlink] (int result)
     {
         auto* self = safe.getComponent();
         if (self == nullptr || result == 0)
@@ -5587,9 +5646,38 @@ bool MainComponent::linkedSongMenu (const SongInfo& info)
         if (result == 1)
             self->openLinkedMix (i);
         else
-            self->unlinkSong (i);
+            self->confirmUnlink (i, afterUnlink);
     });
     return true;
+}
+
+// Desligar una canción de su mix para editarla aquí: deja de actualizarse sola (el mix no cambia)
+void MainComponent::confirmUnlink (int index, std::function<void()> afterUnlink)
+{
+    if (! juce::isPositiveAndBelow (index, (int) library.songs.size()))
+        return;
+    const auto& s = library.songs[(size_t) index];
+    auto* w = new juce::AlertWindow (tr ("Editar aquí"),
+        tr ("«") + s.name + tr ("» dejará de actualizarse cuando cambies su mix «") + s.mixLink.folder
+            + tr ("» (el mix no se borra ni cambia; con él puedes crear otra canción cuando quieras).\n\nDespués puedes cortar, mover, "
+                  "borrar, copiar y pegar aquí los tramos de todas las pistas o de cada pista por separado. ¿Desligarla?"),
+        juce::MessageBoxIconType::QuestionIcon, this);
+    w->addButton (tr ("Desligar y editar"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    const auto folder = s.folder;
+    juce::Component::SafePointer<MainComponent> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, folder, afterUnlink] (int result)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || result != 1)
+            return;
+        const int i = self->songIndexForFolder (folder);
+        if (i < 0)
+            return;
+        self->unlinkSong (i);
+        if (afterUnlink)
+            afterUnlink();
+    }), true);
 }
 
 void MainComponent::applyMixSongInfo (int songIndex, const SongInfo& meta)
@@ -5803,7 +5891,10 @@ void MainComponent::mixCaptureStep()
 void MainComponent::clipMenu (double playbackSeconds, int lane)
 {
     auto* info = currentInfo();
-    if (info == nullptr || sourceSong == nullptr || arrangedSong == nullptr || linkedSongMenu (*info))
+    if (info == nullptr || sourceSong == nullptr || arrangedSong == nullptr)
+        return;
+    // En una canción ligada, editar aquí la desliga de su mix (se pregunta); después se abre este mismo menú
+    if (linkedSongMenu (*info, [this, playbackSeconds, lane] { clipMenu (playbackSeconds, lane); }))
         return;
     const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
     juce::String how;
@@ -5811,17 +5902,25 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     auto clips = info->clips;
     arrangement::ensureClips (clips, sourceLength);
     const int idx = arrangement::clipAt (clips, t);
+    // La pista del carril: sus tramos (los propios o los de la canción)
+    const auto* stem = stemForLane (lane);
+    const auto laneClips = stem != nullptr ? arrangement::clipsOf (*info, *stem, sourceLength) : std::vector<Clip>();
+    const int laneIdx = arrangement::clipAt (laneClips, t);
+    const bool own = stem != nullptr && info->ownClips (stem->fileName) != nullptr;
+    const bool anyOwn = ! info->trackClips.empty();
+    const juce::String stemFile = stem != nullptr ? stem->fileName : juce::String();
 
     juce::PopupMenu m;
+    const juce::String scope = anyOwn || stem != nullptr ? tr ("Todas las pistas · ") : juce::String();
     if (idx >= 0)
     {
         const auto& c = clips[(size_t) idx];
-        m.addSectionHeader (tr ("Tramo ") + juce::String (idx + 1) + ": " + formatTime (timeMap.toPlayback (c.position)) + " - " + formatTime (timeMap.toPlayback (c.end()))
+        m.addSectionHeader (scope + tr ("Tramo ") + juce::String (idx + 1) + ": " + formatTime (timeMap.toPlayback (c.position)) + " - " + formatTime (timeMap.toPlayback (c.end()))
                             + tr ("  (audio original ") + formatTime (c.srcStart) + " - " + formatTime (c.srcEnd) + ")");
     }
     else
-        m.addSectionHeader (tr ("Silencio en ") + formatTime (playbackSeconds));
-    m.addItem (1, tr ("Cortar los stems en ") + formatTime (timeMap.toPlayback (t)) + how, idx >= 0);
+        m.addSectionHeader (scope + tr ("Silencio en ") + formatTime (playbackSeconds));
+    m.addItem (1, tr ("Cortar todas las pistas en ") + formatTime (timeMap.toPlayback (t)) + how, idx >= 0);
     m.addItem (2, tr ("Desplazar este tramo..."), idx >= 0);
     m.addItem (3, tr ("Desplazar este tramo y los siguientes..."), idx >= 0);
     m.addItem (4, tr ("Alinear el inicio del tramo al tiempo más cercano"), idx >= 0 && ! info->analysis.beats.empty());
@@ -5832,22 +5931,54 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     m.addItem (11, tr ("Copiar tramo"), idx >= 0);
     m.addItem (12, tr ("Duplicar tramo (pegar a continuación)"), idx >= 0);
     juce::String pegarEn = formatTime (timeMap.toPlayback (t));
-    const bool canPaste = clipboard.valid && clipboard.folder == info->folder;   // un tramo es del audio de su canción
+    const bool sameSong = clipboard.valid && clipboard.folder == info->folder;   // un tramo es del audio de su canción
+    const bool canPaste = sameSong && clipboard.stem.isEmpty();
     m.addItem (13, tr ("Pegar insertando en ") + pegarEn + (canPaste ? juce::String::formatted (" (%.1f s)", clipboard.clip.length()) : juce::String()), canPaste);
     m.addItem (14, tr ("Pegar encima en ") + pegarEn, canPaste);
+    if (stem != nullptr)
+    {
+        // Solo la pista del carril: le da su propio arreglo (las demás no se mueven)
+        m.addSeparator();
+        juce::String header = tr ("Solo «") + stem->name + tr ("»");
+        if (! own)
+            header += tr (" (hoy sigue los tramos de la canción)");
+        else if (laneIdx >= 0)
+            header += tr (" · su tramo ") + formatTime (timeMap.toPlayback (laneClips[(size_t) laneIdx].position)) + " - "
+                    + formatTime (timeMap.toPlayback (laneClips[(size_t) laneIdx].end()));
+        else
+            header += tr (" · silencio aquí");
+        m.addSectionHeader (header);
+        m.addItem (21, tr ("Cortar solo esta pista en ") + formatTime (timeMap.toPlayback (t)) + how, laneIdx >= 0);
+        m.addItem (22, tr ("Desplazar este tramo de la pista..."), laneIdx >= 0);
+        m.addItem (23, tr ("Desplazar este tramo de la pista y los siguientes..."), laneIdx >= 0);
+        m.addItem (24, tr ("Alinear el inicio de este tramo de la pista al tiempo más cercano"), laneIdx >= 0 && ! info->analysis.beats.empty());
+        m.addItem (25, tr ("Unir con el tramo anterior de la pista"), arrangement::canJoinWithPrevious (laneClips, laneIdx));
+        m.addItem (26, tr ("Eliminar este tramo de la pista (deja silencio)"), laneIdx >= 0);
+        m.addItem (27, tr ("Copiar este tramo de la pista"), laneIdx >= 0);
+        const bool canPasteHere = sameSong && clipboard.stem == stem->fileName;
+        m.addItem (28, tr ("Pegar encima en esta pista en ") + pegarEn
+                       + (canPasteHere ? juce::String::formatted (" (%.1f s)", clipboard.clip.length()) : juce::String()), canPasteHere);
+        m.addItem (29, tr ("Volver a los tramos de la canción en esta pista"), own);
+    }
     m.addSeparator();
     m.addItem (8, tr ("Deshacer la última edición (Ctrl+Z)"), ! undoStack.empty());
-    m.addItem (9, tr ("Restaurar el audio original (sin cortes)"), ! info->clips.empty());
+    m.addItem (9, anyOwn ? tr ("Restaurar el audio original (sin cortes en ninguna pista)") : tr ("Restaurar el audio original (sin cortes)"),
+               ! info->clips.empty() || anyOwn);
     m.addSeparator();
-    m.addItem (10, tr ("Shift + arrastrar sobre un carril mueve el tramo"), false);
+    m.addItem (10, tr ("Shift + arrastrar mueve el tramo en todas las pistas; Ctrl + Shift + arrastrar, solo en esa pista"), false);
 
     const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
-                     [this, t, idx, sourceLength] (int result)
+                     [this, t, idx, sourceLength, stemFile] (int result)
     {
         auto* inf = currentInfo();
         if (inf == nullptr || result == 0)
             return;
+        if (result >= 21 && result <= 29)
+        {
+            trackClipAction (result, t, stemFile);
+            return;
+        }
         if (result == 8)
         {
             undoLastEdit();
@@ -5871,6 +6002,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
                     const auto c = s->clips[(size_t) idx];
                     const double delta = juce::jmax (ms / 1000.0, -c.position);   // lo que moveClip mueve de verdad
                     arrangement::moveClip (s->clips, idx, ms / 1000.0, result == 3);
+                    arrangement::moveOwnRange (*s, c.position, c.end(), delta, result == 3);   // y en las pistas con arreglo propio
                     arrangement::moveMidiHits (*s, c.position, result == 3 ? std::numeric_limits<double>::max() : c.end(), delta);
                 }
                 arrangementEdited();
@@ -5883,7 +6015,9 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         bool gridChanged = false;
         if (result == 1)
         {
-            if (! arrangement::cutAt (cl, t, sourceLength))
+            const bool cutSong = arrangement::cutAt (cl, t, sourceLength);
+            arrangement::cutOwnAt (*inf, t);
+            if (! cutSong && inf->trackClips.empty())
             {
                 undoStack.pop_back();
                 return;
@@ -5895,19 +6029,22 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
             if (nb >= 0)
             {
                 const auto c = cl[(size_t) idx];
-                const double d = inf->analysis.beats[(size_t) nb].seconds - c.position;
+                const double d = juce::jmax (inf->analysis.beats[(size_t) nb].seconds - c.position, -c.position);
                 arrangement::moveClip (cl, idx, d, false);
-                arrangement::moveMidiHits (*inf, c.position, c.end(), juce::jmax (d, -c.position));
+                arrangement::moveOwnRange (*inf, c.position, c.end(), d, false);
+                arrangement::moveMidiHits (*inf, c.position, c.end(), d);
             }
         }
         else if (result == 5)
             arrangement::joinWithPrevious (cl, idx);
-        else if (result == 6 || result == 7)
+        else if ((result == 6 || result == 7) && juce::isPositiveAndBelow (idx, (int) cl.size()))
         {
             double from = 0.0, length = 0.0;
-            if (result == 6 && juce::isPositiveAndBelow (idx, (int) cl.size()))
-                arrangement::removeMidiHits (*inf, cl[(size_t) idx].position, cl[(size_t) idx].end());   // dejando silencio
+            const auto removed = cl[(size_t) idx];
+            if (result == 6)
+                arrangement::removeMidiHits (*inf, removed.position, removed.end());   // dejando silencio
             arrangement::removeClip (cl, idx, result == 7, from, length);   // cerrando el hueco: shiftGrid mueve los golpes
+            arrangement::removeOwnRange (*inf, removed.position, removed.end(), result == 7);
             if (result == 7 && length > 0.0)
             {
                 arrangement::shiftGrid (*inf, from, -length);
@@ -5918,6 +6055,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         {
             arrangement::midiHitsToSource (*inf, inf->clips);   // cada golpe vuelve al audio original que sonaba bajo él
             inf->clips.clear();
+            inf->trackClips.clear();
         }
         else
         {
@@ -5931,6 +6069,136 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     });
 }
 
+void MainComponent::trackClipAction (int action, double t, const juce::String& stemFile)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    auto findStem = [stemFile] (const SongInfo& s) -> const StemInfo*
+    {
+        for (auto& st : s.stems)
+            if (st.fileName == stemFile)
+                return &st;
+        return nullptr;
+    };
+    const auto* stem = findStem (*info);
+    if (stem == nullptr)
+        return;
+    const auto current = arrangement::clipsOf (*info, *stem, sourceLength);
+    const int idx = arrangement::clipAt (current, t);
+    const auto name = stem->name;
+
+    if (action == 27)
+    {
+        // Copiar el tramo de esta pista (con los golpes de sus pistas MIDI): se pega solo en ella
+        if (! juce::isPositiveAndBelow (idx, (int) current.size()))
+            return;
+        const auto c = current[(size_t) idx];
+        clipboard = ClipClipboard();
+        clipboard.valid = true;
+        clipboard.folder = info->folder;
+        clipboard.clip = c;
+        clipboard.stem = stemFile;
+        arrangement::copyMidiHits (*info, c.position, c.end(), clipboard.grid, stemFile);
+        sepLabel.setText (tr ("Tramo de «") + name + tr ("» copiado (") + juce::String (c.length(), 1).replaceCharacter ('.', ',')
+                              + tr (" s): «Pegar encima en esta pista» en su carril"), juce::dontSendNotification);
+        return;
+    }
+    if (action == 22 || action == 23)
+    {
+        askText (tr ("Desplazamiento de este tramo de «") + name + tr ("» en milisegundos (+ = más tarde, - = antes)"), "0",
+                 [this, idx, action, sourceLength, stemFile, findStem] (const juce::String& text)
+        {
+            auto* s = currentInfo();
+            const double ms = text.replace (",", ".").getDoubleValue();
+            const auto* st = s != nullptr ? findStem (*s) : nullptr;
+            if (st == nullptr || std::abs (ms) < 0.01)
+                return;
+            pushUndo();
+            auto& own = arrangement::ownClips (*s, *st, sourceLength);
+            if (juce::isPositiveAndBelow (idx, (int) own.size()))
+            {
+                const auto c = own[(size_t) idx];
+                const double delta = juce::jmax (ms / 1000.0, -c.position);
+                arrangement::moveClip (own, idx, ms / 1000.0, action == 23);
+                arrangement::moveMidiHits (*s, c.position, action == 23 ? std::numeric_limits<double>::max() : c.end(), delta, stemFile);
+            }
+            arrangementEdited();
+        });
+        return;
+    }
+
+    pushUndo();
+    if (action == 29)
+    {
+        // Vuelve a los tramos de la canción: los golpes de sus pistas MIDI siguen a su audio
+        arrangement::dropOwnClips (*info, stemFile);
+        if (const auto* st = findStem (*info))
+            arrangement::remapMidiHits (*info, stemFile, current, arrangement::clipsOf (*info, *st, sourceLength));
+        arrangementEdited();
+        sepLabel.setText (tr ("«") + name + tr ("» vuelve a seguir los tramos de la canción"), juce::dontSendNotification);
+        return;
+    }
+    if (action == 28)
+    {
+        if (! clipboard.valid || clipboard.folder != info->folder || clipboard.stem != stemFile)
+        {
+            undoStack.pop_back();
+            return;
+        }
+        double at = t;
+        if (cutMode() == 2)
+            if (const double g = nearestGridTime (at); g >= 0.0)
+                at = g;
+        at = juce::jmax (0.0, at);
+        auto& own = arrangement::ownClips (*info, *stem, sourceLength);
+        arrangement::pasteClip (own, clipboard.clip, at, false);
+        arrangement::pasteMidiHits (*info, clipboard.grid, at);
+        arrangementEdited();
+        sepLabel.setText (tr ("Tramo pegado en «") + name + tr ("» en ") + formatTime (timeMap.toPlayback (at)), juce::dontSendNotification);
+        return;
+    }
+
+    const bool hadOwn = info->ownClips (stemFile) != nullptr;
+    auto& own = arrangement::ownClips (*info, *stem, sourceLength);
+    bool changed = false;
+    if (action == 21)
+        changed = ! own.empty() && arrangement::cutAt (own, t, sourceLength);
+    else if (action == 24 && juce::isPositiveAndBelow (idx, (int) own.size()))
+    {
+        const int nb = info->analysis.nearestBeat (own[(size_t) idx].position, 0.5);
+        if (nb >= 0)
+        {
+            const auto c = own[(size_t) idx];
+            const double d = juce::jmax (info->analysis.beats[(size_t) nb].seconds - c.position, -c.position);
+            arrangement::moveClip (own, idx, d, false);
+            arrangement::moveMidiHits (*info, c.position, c.end(), d, stemFile);
+            changed = std::abs (d) > 1.0e-9;
+        }
+    }
+    else if (action == 25)
+        changed = arrangement::joinWithPrevious (own, idx);
+    else if (action == 26 && juce::isPositiveAndBelow (idx, (int) own.size()))
+    {
+        const auto c = own[(size_t) idx];
+        double from = 0.0, length = 0.0;
+        arrangement::removeClip (own, idx, false, from, length);
+        arrangement::removeMidiHits (*info, c.position, c.end(), stemFile);
+        changed = true;
+    }
+    if (! changed)
+    {
+        // Nada que hacer: tampoco queda un arreglo propio igual al de la canción
+        if (! hadOwn)
+            arrangement::dropOwnClips (*info, stemFile);
+        undoStack.pop_back();
+        return;
+    }
+    arrangementEdited();
+    sepLabel.setText (tr ("Editado solo en «") + name + tr ("» (las demás pistas no cambian)"), juce::dontSendNotification);
+}
+
 void MainComponent::copyClip (int index)
 {
     auto* info = currentInfo();
@@ -5941,13 +6209,21 @@ void MainComponent::copyClip (int index)
     if (! juce::isPositiveAndBelow (index, (int) clips.size()))
         return;
     const auto& c = clips[(size_t) index];
+    clipboard = ClipClipboard();
     clipboard.valid = true;
     clipboard.folder = info->folder;
     clipboard.clip = c;
     clipboard.grid = arrangement::copyGrid (info->analysis, c.position, c.end());   // la grilla que se ve sobre ese tramo
     arrangement::copyMidiHits (*info, c.position, c.end(), clipboard.grid);          // y los golpes de las pistas MIDI
+    // Lo que suena en ese rango en las pistas con arreglo propio (las grabaciones no siguen los tramos de la canción)
+    for (auto& own : info->trackClips)
+    {
+        const bool isRecording = std::any_of (info->stems.begin(), info->stems.end(),
+                                              [&own] (const StemInfo& st) { return st.fileName == own.stem && st.songTime; });
+        if (! isRecording)
+            clipboard.trackParts.push_back ({ own.stem, arrangement::clipsInRange (own.clips, c.position, c.end()) });
+    }
     // Secciones de tempo del rango: la vigente al inicio y las que empiezan dentro, relativas al tramo
-    clipboard.regions.clear();
     const int first = info->tempoRegionAt (c.position);
     if (first >= 0)
         clipboard.regions.push_back ({ 0.0, info->tempoRegions[(size_t) first].origBpm, info->tempoRegions[(size_t) first].playBpm });
@@ -5957,10 +6233,35 @@ void MainComponent::copyClip (int index)
     sepLabel.setText (juce::String::formatted ("Tramo copiado (%.1f s, ", c.length()) + juce::String ((int) clipboard.grid.beats.size()) + tr (" tiempos)"), juce::dontSendNotification);
 }
 
+// Pistas con arreglo propio al pegar un tramo de toda la canción: abren el mismo hueco (insertando) y reciben lo suyo de
+// ese rango (o, si no tenían arreglo propio al copiar, el mismo tramo de la canción)
+static void pasteIntoOwnClips (SongInfo& info, const std::vector<TrackClips>& parts, const Clip& songClip, double at, bool insert)
+{
+    for (auto& own : info.trackClips)
+    {
+        const bool recording = std::any_of (info.stems.begin(), info.stems.end(),
+                                            [&own] (const StemInfo& st) { return st.fileName == own.stem && st.songTime; });
+        if (recording)
+            continue;
+        if (insert)
+            arrangement::insertGap (own.clips, at, songClip.length());
+        const auto part = std::find_if (parts.begin(), parts.end(), [&own] (const TrackClips& p) { return p.stem == own.stem; });
+        if (part != parts.end())
+            for (auto c : part->clips)
+            {
+                c.position += at;
+                own.clips.push_back (c);
+            }
+        else
+            own.clips.push_back ({ songClip.srcStart, songClip.srcEnd, at });
+        arrangement::sortClips (own.clips);
+    }
+}
+
 void MainComponent::pasteClipboard (double at, bool insert)
 {
     auto* info = currentInfo();
-    if (info == nullptr || sourceSong == nullptr || ! clipboard.valid || clipboard.folder != info->folder)
+    if (info == nullptr || sourceSong == nullptr || ! clipboard.valid || clipboard.folder != info->folder || clipboard.stem.isNotEmpty())
         return;
     const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
     if (cutMode() == 2)
@@ -5972,6 +6273,7 @@ void MainComponent::pasteClipboard (double at, bool insert)
     if (! insert)
     {
         arrangement::pasteClip (info->clips, clipboard.clip, at, false);
+        pasteIntoOwnClips (*info, clipboard.trackParts, clipboard.clip, at, false);
         arrangement::pasteMidiHits (*info, clipboard.grid, at);
         arrangementEdited();
         sepLabel.setText (tr ("Tramo pegado encima en ") + formatTime (timeMap.toPlayback (at)), juce::dontSendNotification);
@@ -5983,6 +6285,7 @@ void MainComponent::pasteClipboard (double at, bool insert)
     const double dstBpm = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].origBpm : 0.0;
     const double dstPlay = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].playBpm : 0.0;
     arrangement::pasteClip (info->clips, clipboard.clip, at, true);
+    pasteIntoOwnClips (*info, clipboard.trackParts, clipboard.clip, at, true);
     arrangement::shiftGrid (*info, at, len);                 // abre el hueco en tiempos, acordes, marcadores, secciones y golpes MIDI
     arrangement::pasteGrid (info->analysis, clipboard.grid, at);
     arrangement::pasteMidiHits (*info, clipboard.grid, at);
@@ -6030,21 +6333,24 @@ void MainComponent::duplicateForCapture (double seconds)
     std::cout << "captura: duplicado el tramo " << idx << ", tramos " << info->clips.size() << ", largo " << arrangement::lengthSeconds (info->clips, (double) sourceSong->length / engine.getSampleRate()) << "\n";
 }
 
-void MainComponent::clipDragged (double playbackSeconds, double delta, int lane)
+void MainComponent::clipDragged (double playbackSeconds, double delta, int lane, bool trackOnly)
 {
     auto* info = currentInfo();
     if (info == nullptr || sourceSong == nullptr)
         return;
-    if (info->mixLink.isLinked())
-    {
-        sepLabel.setText (tr ("Esta canción está ligada a su mix: los tramos se mueven en «Armar mix» (o desligándola, clic derecho)"),
-                          juce::dontSendNotification);
+    // Ligada a su mix: editar aquí la desliga (se pregunta; después se vuelve a arrastrar)
+    if (linkedSongMenu (*info, [this] { sepLabel.setText (tr ("Desligada: ya puedes mover los tramos aquí"), juce::dontSendNotification); }))
         return;
-    }
     const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
     const double t0 = timeMap.toOriginal (playbackSeconds);
     double d0 = timeMap.toOriginal (playbackSeconds + delta) - t0;
-    auto clips = info->clips;
+    // Con Ctrl: el tramo de la pista del carril (su arreglo propio, o el de la canción que pasa a ser suyo)
+    const auto* stem = trackOnly ? stemForLane (lane) : nullptr;
+    if (trackOnly && stem == nullptr)
+        return;
+    const juce::String stemFile = stem != nullptr ? stem->fileName : juce::String();
+    const juce::String stemName = stem != nullptr ? stem->name : juce::String();
+    auto clips = stem != nullptr ? arrangement::clipsOf (*info, *stem, sourceLength) : info->clips;
     arrangement::ensureClips (clips, sourceLength);
     const int idx = arrangement::clipAt (clips, t0);
     if (idx < 0 || std::abs (d0) < 1.0e-4)
@@ -6079,12 +6385,27 @@ void MainComponent::clipDragged (double playbackSeconds, double delta, int lane)
     if (std::abs (d0) < 1.0e-4)
         return;
     pushUndo();
-    info->clips = clips;
-    const auto moved = info->clips[(size_t) idx];
-    arrangement::moveClip (info->clips, idx, d0, false);
-    arrangement::moveMidiHits (*info, moved.position, moved.end(), juce::jmax (d0, -moved.position));
+    const auto moved = clips[(size_t) idx];
+    const double actual = juce::jmax (d0, -moved.position);   // lo que moveClip mueve de verdad
+    if (stem != nullptr)
+    {
+        if (const auto* st = [&]() -> const StemInfo* { for (auto& s : info->stems) if (s.fileName == stemFile) return &s; return nullptr; }())
+        {
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            arrangement::moveClip (own, idx, d0, false);
+            arrangement::moveMidiHits (*info, moved.position, moved.end(), actual, stemFile);
+        }
+    }
+    else
+    {
+        info->clips = clips;
+        arrangement::moveClip (info->clips, idx, d0, false);
+        arrangement::moveOwnRange (*info, moved.position, moved.end(), actual, false);   // y en las pistas con arreglo propio
+        arrangement::moveMidiHits (*info, moved.position, moved.end(), actual);
+    }
     arrangementEdited();
-    sepLabel.setText (juce::String::formatted ("Tramo desplazado %+.0f ms", d0 * 1000.0) + note, juce::dontSendNotification);
+    sepLabel.setText ((stem != nullptr ? tr ("Tramo de «") + stemName + tr ("» desplazado ") : tr ("Tramo desplazado "))
+                          + juce::String::formatted ("%+.0f ms", d0 * 1000.0) + note, juce::dontSendNotification);
 }
 
 double MainComponent::nearestGridTime (double t) const
@@ -6145,28 +6466,57 @@ double MainComponent::snapCutTime (double t, int lane, juce::String& how) const
     return t;
 }
 
-void MainComponent::editForCapture (double cutSeconds, double moveMs)
+void MainComponent::editForCapture (double cutSeconds, double moveMs, int onlyLane)
 {
     auto* info = currentInfo();
     if (info == nullptr || sourceSong == nullptr)
         return;
     const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
-    int lane = -1;
-    if (arrangedSong != nullptr)
+    int lane = onlyLane;
+    if (lane < 0 && arrangedSong != nullptr)
         for (int i = 0; i < (int) arrangedSong->tracks.size(); ++i)
             if (Analyzer::isDrumsTrack (arrangedSong->tracks[(size_t) i]->name, {})) lane = i;
     juce::String how;
     cutSeconds = snapCutTime (cutSeconds, lane, how);
-    std::cout << "captura: corte en " << cutSeconds << how << "\n";
+    std::cout << "captura: corte en " << cutSeconds << how << (onlyLane >= 0 ? " (solo una pista)" : "") << "\n";
+    if (onlyLane >= 0)
+    {
+        // Solo esa pista: el mismo camino que el menú del carril (cortar) y el arrastre con Ctrl + Shift
+        const auto* stem = stemForLane (onlyLane);
+        if (stem == nullptr)
+            return;
+        const auto file = stem->fileName;
+        trackClipAction (21, cutSeconds, file);
+        if (std::abs (moveMs) > 0.0)
+        {
+            pushUndo();
+            if (const auto* st = stemForLane (onlyLane))
+            {
+                auto& own = arrangement::ownClips (*info, *st, sourceLength);
+                const int idx = arrangement::clipAt (own, cutSeconds + 0.001);
+                if (idx >= 0)
+                {
+                    const auto c = own[(size_t) idx];
+                    arrangement::moveClip (own, idx, moveMs / 1000.0, false);
+                    arrangement::moveMidiHits (*info, c.position, c.end(), juce::jmax (moveMs / 1000.0, -c.position), file);
+                }
+            }
+            arrangementEdited();
+        }
+        return;
+    }
     pushUndo();
     arrangement::ensureClips (info->clips, sourceLength);
     arrangement::cutAt (info->clips, cutSeconds, sourceLength);
+    arrangement::cutOwnAt (*info, cutSeconds);
     const int idx = arrangement::clipAt (info->clips, cutSeconds + 0.001);
     if (idx >= 0 && std::abs (moveMs) > 0.0)
     {
         const auto c = info->clips[(size_t) idx];
+        const double delta = juce::jmax (moveMs / 1000.0, -c.position);
         arrangement::moveClip (info->clips, idx, moveMs / 1000.0, false);
-        arrangement::moveMidiHits (*info, c.position, c.end(), juce::jmax (moveMs / 1000.0, -c.position));
+        arrangement::moveOwnRange (*info, c.position, c.end(), delta, false);
+        arrangement::moveMidiHits (*info, c.position, c.end(), delta);
     }
     arrangementEdited();
 }

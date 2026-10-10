@@ -108,9 +108,11 @@ El mismo código sigue compilando en macOS.
   sola en unos segundos. Para eso, al separar, la app separa cada canción original entera una sola
   vez y guarda sus pistas en el mix: los cambios de tramos no vuelven a separar (solo una canción
   nueva que agregues al mix). Tus marcadores, notas y pistas MIDI se mueven con su tramo, y la mezcla
-  de cada pista (faders, salidas, triggers) se conserva. Los cortes de tramos se hacen en el mix: en
-  la canción, clic derecho en el setlist > "Abrir su mix" (o "Desligar del mix" si quieres editarla
-  por su cuenta). Ocupa bastante disco: las pistas de las canciones originales quedan en el mix.
+  de cada pista (faders, salidas, triggers) se conserva. Mientras está ligada, los tramos se
+  editan en el mix (clic derecho en el setlist > "Abrir su mix"). Si prefieres cortar o mover aquí
+  (también cada pista por separado), el clic derecho sobre un carril ofrece "Editar aquí": la
+  canción se desliga de su mix (pregunta antes; el mix no cambia) y desde ahí se edita sola.
+  Ocupa bastante disco: las pistas de las canciones originales quedan en el mix.
 - **Instrumentos VST3 / AU (por ejemplo Addictive Drums)**: botón "Instrumentos" arriba. La primera
   vez, "Buscar instrumentos instalados" (recorre las carpetas habituales de VST3, y de AU en Mac;
   si tienes plugins en otra carpeta, "Buscar en una carpeta..."). Después, "Añadir instrumento" y
@@ -176,13 +178,19 @@ El mismo código sigue compilando en macOS.
   un mix donde el análisis se enreda) o define compases de N tiempos. Clic derecho en la fila de acordes para cambiar, quitar,
   dividir, unir o añadir acordes.
 - **Cortar y mover el audio** sin tocar la grilla: clic derecho sobre un carril para cortar
-  los stems en ese punto (siempre todos a la vez, así nunca se desalinean), desplazar el
+  todas las pistas en ese punto (así no se desalinean), desplazar el
   tramo en milisegundos, alinear su inicio al tiempo más cercano, unir, eliminar (dejando
   silencio o cerrando el hueco) o restaurar el audio original. También copiar un tramo y
   pegarlo en otro punto insertando (se abre espacio y todo lo que sigue, audio y grilla, se
   corre; la copia lleva sus tiempos y acordes) o encima, y duplicarlo a continuación: así se
   reordena una canción o se repite un coro. Shift + arrastrar sobre un carril mueve el tramo
-  a mano. Ctrl+Z deshace la última edición. El selector junto a
+  a mano. **Cada pista por separado**: en el mismo menú, la parte "Solo «Bajo»" (la pista del
+  carril donde hiciste clic) corta, desplaza, alinea, une, borra (deja silencio), copia y pega
+  encima solo en esa pista; las demás no se mueven. Ctrl + Shift + arrastrar mueve el tramo
+  solo en esa pista (aunque no tenga cortes: se corre entera). Una pista con su propio arreglo
+  tiene una franja de color en su cabecera y sus cortes se ven solo en su carril; los cortes y
+  movimientos de "todas las pistas" la siguen igual, y "Volver a los tramos de la canción en
+  esta pista" deshace lo suyo. Ctrl+Z deshace la última edición. El selector junto a
   "+ Marcador" elige cómo corta: libre, a la rejilla (al tiempo más cercano) o a la
   transiente (al golpe más cercano de la pista donde haces clic; usa la batería, que marca
   mejor el inicio de cada tiempo). Con el mismo modo, al arrastrar un tramo su inicio o su

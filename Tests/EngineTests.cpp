@@ -1129,6 +1129,158 @@ int main()
         CHECK (out2->tracks[1]->songTime);
     }
 
+    std::cout << "[Arrangement] pistas con arreglo propio: cortar y mover una sola pista, y las ediciones de toda la canción\n";
+    {
+        auto near = [] (double a, double b, double tol = 1.0e-9) { return std::abs (a - b) < tol; };
+        // Tres pistas de 2 s con una rampa (el valor dice el instante de la fuente): voz, bajo y una grabación
+        auto rampSong = std::make_shared<LoadedSong>();
+        rampSong->sampleRate = sr;
+        rampSong->length = (juce::int64) (2.0 * sr);
+        for (int k = 0; k < 3; ++k)
+        {
+            auto t = std::make_unique<LoadedTrack>();
+            t->name = k == 0 ? "voz" : k == 1 ? "bajo" : "toma";
+            t->stemIndex = k;
+            t->songTime = k == 2;
+            t->buffer.setSize (2, (int) (2.0 * sr));
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < (int) (2.0 * sr); ++i)
+                    t->buffer.setSample (ch, i, (float) i / (float) sr);
+            rampSong->tracks.push_back (std::move (t));
+        }
+        SongInfo arr;
+        arr.stems = { stem ("Voz", "voz.wav"), stem ("Bajo", "bajo.wav"), stem ("Toma", "toma.wav") };
+        arr.stems[2].songTime = true;
+        const auto files = juce::StringArray { "voz.wav", "bajo.wav", "toma.wav" };
+        auto valueAt = [] (const std::shared_ptr<LoadedSong>& s, int track, double t)
+        {
+            return (double) s->tracks[(size_t) track]->buffer.getSample (0, (int) std::llround (t * sr));
+        };
+
+        // Lo que suena hoy en cada pista: la canción sin cortes; la grabación, todo su audio en 0
+        CHECK (arrangement::clipsOf (arr, arr.stems[0], 2.0).size() == 1 && near (arrangement::clipsOf (arr, arr.stems[0], 2.0)[0].srcEnd, 2.0));
+        CHECK (arrangement::isPlainArrangement (arr, 2.0) && arrangement::render (rampSong, arr.clips, sr, {}, arr.trackClips, files) == rampSong);
+
+        // Mover solo el bajo 0,25 s más tarde: la voz no cambia y la canción se alarga
+        {
+            auto& own = arrangement::ownClips (arr, arr.stems[1], 2.0);
+            CHECK (own.size() == 1 && arr.trackClips.size() == 1 && arr.ownClips ("bajo.wav") == &own);
+            arrangement::moveClip (own, 0, 0.25, false);
+        }
+        CHECK (! arrangement::isPlainArrangement (arr, 2.0) && near (arrangement::songLength (arr, 2.0), 2.25));
+        auto rendered = arrangement::render (rampSong, arr.clips, sr, {}, arr.trackClips, files);
+        CHECK (rendered != nullptr && rendered->length == (juce::int64) std::llround (2.25 * sr));
+        CHECK (near (valueAt (rendered, 0, 0.5), 0.5, 1.0e-4) && near (valueAt (rendered, 1, 0.5), 0.25, 1.0e-4) && near (valueAt (rendered, 2, 0.5), 0.5, 1.0e-4));
+        CHECK (near (valueAt (rendered, 1, 0.1), 0.0, 1.0e-6));   // antes de su tramo, silencio
+
+        // Ediciones de toda la canción: también en el bajo, por tiempo; la grabación no
+        arrangement::ownClips (arr, arr.stems[2], 2.0);   // la toma con arreglo propio (todo su audio en 0)
+        arrangement::ensureClips (arr.clips, 2.0);
+        CHECK (arrangement::cutAt (arr.clips, 1.0, 2.0));
+        arrangement::cutOwnAt (arr, 1.0);
+        const auto* bass = arr.ownClips ("bajo.wav");
+        const auto* take = arr.ownClips ("toma.wav");
+        CHECK (bass != nullptr && bass->size() == 2 && near ((*bass)[1].position, 1.0) && near ((*bass)[1].srcStart, 0.75));
+        CHECK (take != nullptr && take->size() == 1);
+        // Quitar el segundo tramo de la canción cerrando el hueco: [1, 2) desaparece en todas
+        double from = 0.0, length = 0.0;
+        arrangement::removeClip (arr.clips, 1, true, from, length);
+        arrangement::removeOwnRange (arr, 1.0, 2.0, true);
+        CHECK (arr.clips.size() == 1 && bass->size() == 2);
+        if (bass->size() == 2)
+            CHECK (near ((*bass)[0].position, 0.25) && near ((*bass)[0].end(), 1.0) && near ((*bass)[1].position, 1.0)
+                   && near ((*bass)[1].srcStart, 1.75) && near ((*bass)[1].end(), 1.25));
+        // Mover un rango (el primer tramo de la canción, 0 a 1) 0,1 s: el bajo que empieza ahí se corre con él
+        arrangement::moveOwnRange (arr, 0.0, 1.0, 0.1, false);
+        CHECK (near ((*bass)[0].position, 0.35) && near ((*bass)[1].position, 1.0));
+        // Abrir un hueco de 0,5 s en 0,5: el tramo del bajo que lo atraviesa se parte
+        arrangement::insertOwnGap (arr, 0.5, 0.5);
+        CHECK (bass->size() == 3 && near ((*bass)[1].position, 1.0) && near ((*bass)[1].srcStart, 0.15) && near ((*bass)[2].position, 1.5));
+        CHECK (take->size() == 1 && near ((*take)[0].position, 0.0));   // la toma nunca siguió los tramos de la canción
+        // Lo que suena en un rango, relativo a su inicio (para copiar)
+        const auto part = arrangement::clipsInRange (*bass, 0.4, 1.2);
+        CHECK (part.size() == 2 && near (part[0].position, 0.0) && near (part[0].srcStart, 0.05) && near (part[1].position, 0.6)
+               && near (part[1].srcEnd, 0.35));
+        arrangement::splitAllAt (arr.clips, 0.3);
+        CHECK (arr.clips.size() == 2);
+
+        // Una pista sin tramos (se borró todo su audio) no suena; volver a los tramos de la canción
+        {
+            SongInfo silent;
+            silent.stems = arr.stems;
+            silent.trackClips.push_back ({ "voz.wav", {} });
+            const auto r = arrangement::render (rampSong, {}, sr, {}, silent.trackClips, files);
+            CHECK (r != nullptr && r != rampSong && r->tracks[0]->buffer.getMagnitude (0, r->tracks[0]->buffer.getNumSamples()) < 1.0e-9f
+                   && near (valueAt (r, 1, 0.5), 0.5, 1.0e-4));
+            arrangement::dropOwnClips (silent, "voz.wav");
+            CHECK (silent.trackClips.empty() && silent.ownClips ("voz.wav") == nullptr);
+        }
+
+        // Golpes MIDI: los de la pista que se mueve sola van con ella; volver a los tramos de la canción los reubica
+        {
+            SongInfo m;
+            m.stems = arr.stems;
+            MidiTrack fromBass, fromVoice;
+            fromBass.sourceFile = "bajo.wav";
+            fromBass.hits = { { 0.5, 36, 100 }, { 1.5, 38, 100 } };
+            fromVoice.sourceFile = "voz.wav";
+            fromVoice.hits = { { 0.5, 36, 100 } };
+            m.midiTracks = { fromBass, fromVoice };
+            arrangement::moveMidiHits (m, 0.0, 1.0, 0.25, "bajo.wav");
+            CHECK (near (m.midiTracks[0].hits[0].seconds, 0.75) && near (m.midiTracks[1].hits[0].seconds, 0.5));
+            arrangement::removeMidiHits (m, 1.0, 2.0, "voz.wav");
+            CHECK (m.midiTracks[0].hits.size() == 2);
+            // El bajo tenía su tramo corrido 0,25 s: al volver a la canción (sin cortes), sus golpes vuelven 0,25 s
+            const std::vector<Clip> moved { { 0.0, 2.0, 0.25 } };
+            arrangement::remapMidiHits (m, "bajo.wav", moved, { { 0.0, 2.0, 0.0 } });
+            CHECK (near (m.midiTracks[0].hits[0].seconds, 0.5) && near (m.midiTracks[0].hits[1].seconds, 1.25));
+            // Restaurar el audio original: cada pista MIDI por los tramos de su pista
+            m.trackClips.push_back ({ "bajo.wav", moved });
+            m.clips = { { 0.0, 2.0, 0.0 } };
+            arrangement::midiHitsToSource (m, m.clips);
+            CHECK (near (m.midiTracks[0].hits[0].seconds, 0.25) && near (m.midiTracks[1].hits[0].seconds, 0.5));
+        }
+
+        // song.json: los arreglos propios se guardan (también uno vacío) y la batería que se separa en partes los reparte
+        {
+            const auto libRoot = tmp.getChildFile ("ownLib-pistas-propias");
+            const auto songDir = libRoot.getChildFile ("Cancion");
+            songDir.createDirectory();
+            writeSine (songDir.getChildFile ("drums.wav"), 44100.0, 1.0, 2);
+            writeSine (songDir.getChildFile ("bass.wav"), 44100.0, 1.0, 2);
+            Library ownLib (libRoot);
+            ownLib.load();
+            CHECK (ownLib.songs.size() == 1);
+            if (ownLib.songs.size() == 1)
+            {
+                auto& s = ownLib.songs[0];
+                s.trackClips.push_back ({ "drums.wav", { { 0.0, 0.5, 0.2 }, { 0.5, 1.0, 0.8 } } });
+                s.trackClips.push_back ({ "bass.wav", {} });
+                CHECK (ownLib.saveSong (s));
+                Library again (libRoot);
+                again.load();
+                const auto& back = again.songs[0];
+                CHECK (back.trackClips.size() == 2 && back.ownClips ("drums.wav") != nullptr && back.ownClips ("drums.wav")->size() == 2
+                       && near ((*back.ownClips ("drums.wav"))[1].position, 0.8) && back.ownClips ("bass.wav") != nullptr
+                       && back.ownClips ("bass.wav")->empty());
+                // Separar la batería en partes: cada parte se queda con el arreglo de la batería
+                const auto parts = tmp.getChildFile ("partes-propias");
+                parts.createDirectory();
+                writeSine (parts.getChildFile ("drums_kick.wav"), 44100.0, 1.0, 2);
+                writeSine (parts.getChildFile ("drums_snare.wav"), 44100.0, 1.0, 2);
+                int drums = -1;
+                for (int i = 0; i < (int) again.songs[0].stems.size(); ++i)
+                    if (again.songs[0].stems[(size_t) i].fileName == "drums.wav")
+                        drums = i;
+                CHECK (drums >= 0 && again.replaceStem (0, drums, parts));
+                const auto& split = again.songs[0];
+                CHECK (split.ownClips ("drums.wav") == nullptr && split.ownClips ("drums_kick.wav") != nullptr
+                       && split.ownClips ("drums_snare.wav") != nullptr && split.ownClips ("drums_kick.wav")->size() == 2
+                       && split.ownClips ("bass.wav") != nullptr);
+            }
+        }
+    }
+
     std::cout << "[AudioEngine] sampler de triggers: dispara muestras en las posiciones exactas\n";
     {
         engine.setClick (false, 120.0, 0.0, 0.0f, 0);

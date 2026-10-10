@@ -4,10 +4,12 @@
 #include <functional>
 
 // Arreglo (fase 4): la canción es una lista de tramos (`Clip`) del audio original colocados en
-// la línea de tiempo de la canción. Cortar, mover, eliminar o unir tramos afecta a todos los
-// stems a la vez, así nunca se desalinean. La grilla (tiempos, acordes, secciones de tempo,
-// marcadores) vive en la línea de tiempo de la canción y no se mueve con el audio, salvo al
-// cerrar un hueco. El resultado se renderiza a RAM (`render`) y de ahí sale el estirado.
+// la línea de tiempo de la canción. Cortar, mover, eliminar o unir tramos de la canción afecta a
+// todos los stems a la vez. Además una pista puede tener su propio arreglo (`TrackClips`: se
+// cortó, movió o borró sola); las ediciones de la canción entera se aplican también a esas
+// pistas, por tiempo (cutOwnAt, moveOwnRange...). La grilla (tiempos, acordes, secciones de
+// tempo, marcadores) vive en la línea de tiempo de la canción y no se mueve con el audio, salvo
+// al cerrar un hueco. El resultado se renderiza a RAM (`render`) y de ahí sale el estirado.
 namespace arrangement
 {
     constexpr double fadeSeconds = 0.005;   // fundido en los bordes de cada tramo
@@ -30,6 +32,26 @@ namespace arrangement
     bool canJoinWithPrevious (const std::vector<Clip>&, int index);     // continúa en la fuente y en la posición
     bool joinWithPrevious (std::vector<Clip>&, int index);
     void sortClips (std::vector<Clip>&);
+    void splitAllAt (std::vector<Clip>&, double seconds);              // parte en ese instante todo tramo que lo atraviese
+
+    // --- Pistas con su propio arreglo ---
+    // Los tramos de la pista: los suyos o los de la canción (con todo el audio si no hay cortes). En una grabación
+    // (songTime) sin tramos propios: todo su audio en 0.
+    std::vector<Clip> clipsOf (const SongInfo&, const StemInfo&, double sourceLength);
+    // Le da a la pista su propio arreglo (la copia de lo que suena hoy, clipsOf) y lo devuelve
+    std::vector<Clip>& ownClips (SongInfo&, const StemInfo&, double sourceLength);
+    void dropOwnClips (SongInfo&, const juce::String& stemFile);   // vuelve a seguir los tramos de la canción
+    double songLength (const SongInfo&, double sourceLength);       // el más largo: los tramos de la canción o los de una pista
+    bool isPlainArrangement (const SongInfo&, double sourceLength); // sin cortes en la canción ni pistas con arreglo propio
+
+    // Ediciones de toda la canción en las pistas con arreglo propio (no en las grabaciones, que tampoco siguen los tramos
+    // de la canción): lo mismo, por tiempo. Mover y quitar parten antes en los bordes del rango.
+    void cutOwnAt (SongInfo&, double seconds);
+    void moveOwnRange (SongInfo&, double from, double to, double delta, bool andFollowing);   // los que empiezan en [from, to) (o desde from)
+    void removeOwnRange (SongInfo&, double from, double to, bool closeGap);
+    void insertOwnGap (SongInfo&, double at, double length);
+    // Lo que suena de una lista en [from, to), con posiciones relativas a `from` (para copiar)
+    std::vector<Clip> clipsInRange (const std::vector<Clip>&, double from, double to);
 
     // Desplaza la grilla (tiempos, acordes, marcadores, secciones de tempo, inicio del click) al
     // cerrar un hueco: con delta < 0 lo que había en [from, from - delta) desaparece y lo que
@@ -62,17 +84,22 @@ namespace arrangement
     // cerrar o abrir un hueco los mueve shiftGrid). Todos dejan los golpes ordenados.
     // - Mover un tramo: los de [from, to) se corren delta, nunca antes de 0 (to = infinito para "este y los
     //   siguientes"; delta = lo que el tramo se movió de verdad, que moveClip acota).
-    void moveMidiHits (SongInfo&, double fromSeconds, double toSeconds, double deltaSeconds);
+    //   Con `sourceFile`, solo los de las pistas MIDI de esa pista (un tramo movido en una sola pista).
+    void moveMidiHits (SongInfo&, double fromSeconds, double toSeconds, double deltaSeconds, const juce::String& sourceFile = {});
     // - Eliminar un tramo dejando silencio: los de [from, to) se borran.
-    void removeMidiHits (SongInfo&, double fromSeconds, double toSeconds);
+    void removeMidiHits (SongInfo&, double fromSeconds, double toSeconds, const juce::String& sourceFile = {});
+    // - Una pista que cambia de arreglo (vuelve a los tramos de la canción): cada golpe de sus pistas MIDI pasa del
+    //   instante de su audio en `from` al del mismo audio en `to` (el primer tramo que lo tenga); si no está, se borra.
+    void remapMidiHits (SongInfo&, const juce::String& sourceFile, const std::vector<Clip>& from, const std::vector<Clip>& to);
     // - Volver al audio original (antes de vaciar los tramos): cada golpe pasa al instante del audio original que
     //   sonaba bajo él (el tramo de arriba, como clipAt); los que caían en un hueco se borran, y las copias que un
     //   tramo duplicado deja en el mismo instante (misma nota a menos de 1 ms) quedan en una, la más fuerte. Con
     //   tramos pegados encima, los golpes del tramo de abajo en el solape siguen al de arriba (no se sabe de cuál venían).
+    //   Las pistas MIDI de una pista con arreglo propio usan esos tramos.
     void midiHitsToSource (SongInfo&, const std::vector<Clip>&);
     // - Copiar y pegar un tramo: los golpes de [from, to) van en slice.midi (se reemplazan), y pasteMidiHits los suma
     //   desplazados a `at` (tras abrir el hueco con shiftGrid al pegar insertando; encima de los que hay al pegar encima).
-    void copyMidiHits (const SongInfo&, double fromSeconds, double toSeconds, GridSlice&);
+    void copyMidiHits (const SongInfo&, double fromSeconds, double toSeconds, GridSlice&, const juce::String& sourceFile = {});
     void pasteMidiHits (SongInfo&, const GridSlice&, double at);
 
     // Transiente (ataque) más cercana a `aroundSeconds`, buscada en ±`windowSeconds` sobre la
@@ -85,6 +112,8 @@ namespace arrangement
 
     // Audio del arreglo: mismo puntero si es identidad; nullptr si se abortó. Los tramos que se
     // solapan se suman (con los fundidos de 5 ms es un crossfade); los huecos quedan en silencio.
+    // Una pista con arreglo propio (`trackClips`, por el archivo de su stem: stemFiles[stemIndex]) usa sus tramos.
     std::shared_ptr<LoadedSong> render (std::shared_ptr<LoadedSong> source, const std::vector<Clip>&, double sampleRate,
-                                        const std::function<bool()>& shouldAbort = {});
+                                        const std::function<bool()>& shouldAbort = {},
+                                        const std::vector<TrackClips>& trackClips = {}, const juce::StringArray& stemFiles = {});
 }

@@ -40,6 +40,14 @@ struct Clip
     double end() const    { return position + length(); }
 };
 
+// Arreglo propio de una pista (cortada o movida sola): sus tramos reemplazan a los de la canción en esa pista. Los
+// tramos son del audio de esa pista (el original; en una grabación, la línea de tiempo de la canción).
+struct TrackClips
+{
+    juce::String stem;           // StemInfo::fileName
+    std::vector<Clip> clips;     // ordenados por posición; vacío = la pista no suena (se borró todo su audio)
+};
+
 // Nota de texto anclada a un instante de la canción: se muestra en la guía de escenario
 struct SongNote
 {
@@ -213,6 +221,7 @@ struct SongInfo
     Analysis analysis;
     std::vector<TempoRegion> tempoRegions;   // ordenadas; vacío = un solo tramo con el tempo del análisis o del click
     std::vector<Clip> clips;                 // arreglo del audio; vacío = el audio original entero
+    std::vector<TrackClips> trackClips;      // pistas con su propio arreglo (cortadas o movidas solas)
     std::vector<SongNote> notes;             // notas de texto, ordenadas por tiempo
     std::vector<MidiTrack> midiTracks;       // pistas MIDI (golpes congelados y editables)
     std::vector<SongMarker> markers;  // siempre ordenados por tiempo
@@ -225,6 +234,9 @@ struct SongInfo
     void sortTempoRegions();      // ordena y deja la primera en 0
     void mergeEqualTempoRegions();   // une secciones vecinas con el mismo tempo original y de reproducción
     int tempoRegionAt (double originalSeconds) const;   // índice de la sección que contiene ese instante, o -1 si no hay
+    // Los tramos propios de esa pista (por su archivo), o nullptr si sigue los de la canción
+    const std::vector<Clip>* ownClips (const juce::String& stemFile) const;
+    std::vector<Clip>* ownClips (const juce::String& stemFile);
 };
 
 // Biblioteca en ~/Music/Secuencias: una carpeta por canción + setlist.json

@@ -101,7 +101,8 @@ modelo que usa Moises).
   entre al mix). Los marcadores de los tramos, tiempos, acordes y secciones de tempo se rehacen;
   los marcadores propios, las notas y los golpes MIDI van con su tramo; la mezcla, los triggers y
   las salidas de cada pista se conservan. En una canción ligada los tramos (cortar, mover, pegar)
-  se editan en el mix; el menú del setlist ofrece "Abrir su mix" y "Desligar del mix".
+  se editan en el mix; el menú del setlist ofrece "Abrir su mix" y "Desligar del mix", y el clic derecho
+  (o Shift + arrastre) sobre un carril ofrece "Editar aquí", que la desliga tras preguntar (`confirmUnlink`).
 - Importar stems: varios archivos o una carpeta (o arrastrar varios archivos a la ventana).
   Formatos: wav, aiff, flac, mp3, ogg (m4a solo en macOS: JUCE no decodifica AAC en Linux).
 - **Vista de arreglo** (`TimelineView`): regla con marcadores (clic = ir, arrastrar = mover,
@@ -245,6 +246,11 @@ modelo que usa Moises).
   salvo al cerrar o abrir un hueco (`shiftGrid`). Los bordes de los tramos se
   dibujan sobre los carriles y los huecos quedan sombreados. Ctrl+Z (o el menú) deshace la
   última edición de audio o de grilla (hasta 30 pasos; la mezcla no se deshace).
+  **Cada pista por separado** (`SongInfo::trackClips`): la sección "Solo «pista»" del mismo menú corta,
+  desplaza (el tramo o el tramo y los siguientes), alinea, une, borra (deja silencio), copia y pega encima
+  solo en la pista del carril, y "Volver a los tramos de la canción en esta pista" quita su arreglo propio;
+  Ctrl + Shift + arrastre mueve su tramo. Las ediciones de todas las pistas también alcanzan, por tiempo, a
+  las pistas con arreglo propio (salvo a las grabaciones, que no siguen los tramos de la canción).
 - **Modo de corte** (selector junto a "+ Marcador", ajuste `cutMode`): "Corte libre" corta
   donde se hizo clic; "Corte a la rejilla" en el tiempo detectado más cercano (o de la
   rejilla fija del click); "Corte a la transiente" busca el ataque más cercano (±200 ms) en la
@@ -584,7 +590,10 @@ Secuencias/
   acordes se guardan como los escribe madmom (siempre con sostenidos) y la tonalidad
   traducida ("Mib mayor"); la escritura se decide al mostrar.
 - Arreglo: `clips`: `[{ "start", "end", "at" }]`, tramos del audio original (segundos) y
-  dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. Todo lo demás
+  dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. `trackClips`:
+  `[{ "stem" (archivo), "clips": [...] }]`, las pistas con su propio arreglo (`TrackClips`; una
+  lista vacía = la pista no suena); se usan en vez de `clips` en esa pista. Al separar una pista en
+  partes (batería) cada parte hereda su arreglo propio, y los de pistas que ya no están se quitan. Todo lo demás
   (tiempos, acordes, marcadores, secciones de tempo, nivelado) está en la línea de tiempo de
   la canción, no en la del audio original.
 - Triggers: por stem, `trigger`: `{ enabled, keepAudio (false = solo suena el trigger), sound
@@ -779,9 +788,24 @@ Pasos de `run()`:
   batería si no hay carril (captura).
 - Deshacer: `pushUndo` guarda una copia de `SongInfo` antes de cada edición de audio o de
   grilla (menús de tramo, tiempo, acorde y sección de tempo); `undoLastEdit` restaura todo
-  salvo `stems` y llama a `refreshFromInfo`. `--captura --corte=T --desplazar=ms
-  [--modocorte=1|2|3]` corta (con el modo elegido; imprime dónde cayó el corte) y desplaza
-  para revisar el render.
+  salvo `stems` y `mixLink` (desligar no se deshace) y llama a `refreshFromInfo`. `--captura --corte=T
+  --desplazar=ms [--modocorte=1|2|3] [--pista=N]` corta (con el modo elegido; imprime dónde cayó el corte)
+  y desplaza para revisar el render; con `--pista` solo en ese carril (1 = el primero).
+- Pistas con arreglo propio (`TrackClips` en `SongInfo::trackClips`, por archivo del stem): `clipsOf` (los suyos,
+  los de la canción o, en una grabación, todo su audio en 0), `ownClips` (los crea copiando lo que suena hoy),
+  `dropOwnClips`, `songLength`, `isPlainArrangement`. `render (..., trackClips, stemFiles)` usa la lista propia de
+  cada pista (por `LoadedTrack::stemIndex`; vacía = silencio) y el largo es el mayor. Las ediciones de toda la
+  canción se repiten por tiempo en las listas propias (`cutOwnAt` con `splitAllAt`, `moveOwnRange`,
+  `removeOwnRange`, `insertOwnGap`; no en las grabaciones), y copiar un tramo de la canción guarda lo de cada pista
+  propia en ese rango (`clipsInRange`, `ClipClipboard::trackParts`; `pasteIntoOwnClips` al pegar). Las de una sola
+  pista (`trackClipAction`, ids 21 a 29 del menú; `clipDragged` con `trackOnly`) mueven solo los golpes de sus pistas
+  MIDI (`moveMidiHits`/`removeMidiHits`/`copyMidiHits` con `sourceFile`); volver a los tramos de la canción los
+  reubica (`remapMidiHits`) y `midiHitsToSource` usa los tramos de la pista de origen. Copiar un tramo de una pista
+  (`ClipClipboard::stem`) solo se pega encima en esa pista. Si una edición no cambia nada, no queda un arreglo
+  propio creado de paso. `renderedTrackClips` / `sameTrackClips` deciden si hay que volver a renderizar.
+  `TimelineView::setLaneClips` (`LaneClips`, `mappedLaneClips`): con alguna pista propia, cada carril dibuja sus
+  bordes y huecos (con una franja de acento en la cabecera) y la capa de encima solo el arrastre de toda la canción;
+  `onClipDragged (..., trackOnly)` con Ctrl + Shift (`clipDragTrackOnly`, el carril dibuja el arrastre).
 
 ### 5.4f Triggers (golpes y sampler)
 - `triggers::detect (buffer, sr, umbralDb, sensibilidad, minMs)`: envolvente RMS en dB por
@@ -1045,8 +1069,8 @@ Pasos de `run()`:
   `stemsKey` con las opciones de arriba y separa las fuentes usadas que falten; `noteMixStems` le da al mix las pistas de
   una separación si no tenía otras. `mixSongBuilds` cuenta los armados en curso (`isMixBusy` los espera). Un marcador del mix
   renombrado o movido a mano pasa a ser propio (`fromMix = false`). El menú de
-  tramos de una canción ligada (`linkedSongMenu`) y Shift + arrastre remiten al mix; "Separar canción
-  (IA)" también; `openLinkedMix`, `unlinkSong`; borrar un mix desliga sus canciones.
+  tramos de una canción ligada (`linkedSongMenu`) y Shift + arrastre ofrecen abrir el mix o editar aquí, que la
+  desliga tras preguntar (`confirmUnlink`, y vuelve a abrir el menú); "Separar canción (IA)" remite al mix; `openLinkedMix`, `unlinkSong`; borrar un mix desliga sus canciones.
 - `mix::render` y `mix::renderStems` comparten `makePlan` (ubicación, fundidos, uniones coherentes),
   `readLayer` (lee y estira el tramo de un archivo, alineado con el mix), `levelSegment` (ganancia y
   limitador, siempre medidos en la fuente original) y `addSegment` (fundidos y suma): las pistas reciben
@@ -1231,8 +1255,9 @@ Pasos de `run()`:
 Acordado con el usuario el 2026-09-24. Objetivo: que la ventana funcione como un DAW simple
 (sin plugins) sin perder el modo en vivo. Decisiones tomadas:
 - **Edición**: el arreglo se edita a nivel de canción (cortar, eliminar, mover o duplicar
-  tramos afecta a todos los stems a la vez, así nunca se desalinean) y además se pueden
-  silenciar tramos por pista. No hay clips independientes por pista.
+  tramos afecta a todos los stems a la vez, así nunca se desalinean) y, desde el 2026-10-09 (a
+  pedido del usuario, que prefiere esto a mantener la canción ligada a su mix), también cada pista
+  por separado: cortar, mover, borrar, copiar y pegar en una sola pista (`trackClips`).
 - **Tempo**: cambios de BPM en varios puntos de la canción (mapa de tempo) que estiran el
   audio **sin cambiar el tono**. La transposición existe aparte, solo si el usuario la pide.
   Sirve para igualar el BPM de varias canciones y mezclarlas.
@@ -1260,8 +1285,9 @@ Fases, en orden:
 4. **Edición** (en curso): `song.json` guarda el arreglo como lista de tramos del audio
    original (`clips`) colocados en la línea de tiempo. Hecho: cortar (todos los stems), mover
    (en ms, al tiempo más cercano o con Shift + arrastre), eliminar (con o sin cerrar el hueco),
-   unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer. Pendiente:
-   rehacer, silenciar tramos por pista, recorte de inicio y fin como gesto directo.
+   unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer, y lo mismo por pista
+   (borrar un tramo de una pista lo silencia). Pendiente: rehacer, recorte de inicio y fin como
+   gesto directo, pegar insertando en una sola pista.
 
 **Plan de estudio en vivo** (acordado el 2026-09-27): 1) triggers de las pistas separadas con
 sampler interno y bancos grabados (hecho, v0.4.0), 2) grabación de entradas como pistas nuevas y
@@ -1280,6 +1306,13 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.10.0 (cada pista por separado)**: arreglo propio por pista (`TrackClips`, `SongInfo::trackClips` en
+  song.json, `arrangement::clipsOf` / `ownClips` / `dropOwnClips` / `songLength`, render por pista), ediciones de toda
+  la canción repetidas por tiempo en esas pistas (`cutOwnAt`, `moveOwnRange`, `removeOwnRange`, `insertOwnGap`,
+  `trackParts` al copiar), sección "Solo «pista»" en el menú del carril (`trackClipAction`), Ctrl + Shift + arrastre
+  (`trackOnly`), golpes MIDI que siguen a su pista (`sourceFile`, `remapMidiHits`), bordes por carril
+  (`setLaneClips`), partes de la batería que heredan el arreglo (`replaceStemFiles`), y en una canción ligada
+  "Editar aquí" la desliga tras preguntar (`confirmUnlink`); deshacer no vuelve a ligarla. `--captura --pista=N`.
 - **v0.9.0 (solapes y pistas por tramo)**: solape entre tramos (`overlapBars`, `overlapBlend`, `MixPlacement::overlap`,
   `riseIn`, `barSeconds`; tiempos, acordes y marcador del que entra; `remapTime` por el último tramo), ajustes por pista
   en cada tramo (`MixStemSettings`, `MixProject::stemsKey`, `bestCachedStemsKey`; render por capas con `LayerWindow`,

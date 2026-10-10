@@ -1713,6 +1713,7 @@ namespace mix
         song.bpm = generated.bpm;
         song.clickOffset = generated.clickOffset;
         song.clips.clear();
+        song.trackClips.clear();
 
         // Marcadores: los del mix se rehacen; los propios van con su tramo
         std::vector<SongMarker> markers;
