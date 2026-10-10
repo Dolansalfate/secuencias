@@ -2872,6 +2872,315 @@ int main()
         CHECK (lb.size() == 16 && lb[8].beatInBar == 1 && lb[7].beatInBar == 4);
     }
 
+    std::cout << "[Mix] solape entre tramos y ajustes por pista (silenciar, entrar antes, seguir después, correr)\n";
+    {
+        auto approx = [] (double x, double y, double tol = 1.0e-9) { return std::abs (x - y) < tol; };
+        const double rate = mix::renderSampleRate;
+        const auto files = tmp.getChildFile ("mix-solape-fuentes");
+        files.createDirectory();
+        // Fuentes de 16 s a 120 BPM (tiempos cada 0,5 s desde 0; compases de 2 s), con nivel constante: lo que se
+        // mide en cada instante es la suma de las envolventes
+        auto constant = [&] (const juce::String& name, float level)
+        {
+            juce::AudioBuffer<float> b (2, (int) (rate * 16.0));
+            for (int ch = 0; ch < 2; ++ch)
+                juce::FloatVectorOperations::fill (b.getWritePointer (ch), level, b.getNumSamples());
+            const auto f = files.getChildFile (name);
+            writeWav (f, b, rate);
+            return f;
+        };
+        Analysis an;
+        for (int k = 0; k < 32; ++k)
+            an.beats.push_back ({ 0.5 * k, k % 4 + 1 });
+        an.bpm = 120.0;
+        an.meter = 4;
+        auto makeMix = [&] (const juce::String& name, float levelD, float levelE)
+        {
+            MixProject p;
+            MixProject::load (MixProject::create (tmp.getChildFile ("mix-solape").getChildFile (Library::mixesFolderName()), name), p);
+            p.levelLufs = 0.0;
+            p.bpm = 120.0;
+            p.addSource (constant (name + "-d.wav", levelD), formats);
+            p.addSource (constant (name + "-e.wav", levelE), formats);
+            for (auto& s : p.sources)
+                s.analysis = an;
+            p.sources[0].analysis.chords = { { 0.0, 16.0, "C" } };
+            p.sources[1].analysis.chords = { { 0.0, 16.0, "G" } };
+            MixSegment d, e;
+            d.source = 0;
+            d.start = 0.0;
+            d.end = 8.0;
+            e.source = 1;
+            e.start = 0.0;
+            e.end = 8.0;
+            e.overlapBars = 1;   // E entra un compás (2 s) antes de que termine D
+            p.segments = { d, e };
+            p.ensureSegmentIds();
+            return p;
+        };
+        auto valueAt = [rate] (const juce::AudioBuffer<float>& b, double t)
+        {
+            const int i = (int) std::llround (t * rate);
+            return i >= 0 && i < b.getNumSamples() ? (double) b.getSample (0, i) : -1.0;
+        };
+
+        std::cout << "  solape: ubicación, compases que caben, sin solape con silencio ni en el primero\n";
+        auto ov = makeMix ("Solape", 0.2f, 0.1f);
+        {
+            const auto pl = mix::layout (ov);
+            CHECK (pl.size() == 2 && approx (pl[1].overlap, 2.0) && approx (pl[1].outStart, 6.0) && approx (pl[1].outEnd, 14.0));
+            CHECK (approx (pl[1].fadeIn, 0.0) && approx (pl[1].riseIn, 0.0) && approx (pl[0].fadeOut, 2.0) && approx (pl[1].barSeconds, 2.0));
+            CHECK (approx (mix::length (ov), 14.0));
+            auto many = ov;
+            many.segments[1].overlapBars = 8;   // 16 s: caben 3 compases (menos que la duración de cada uno)
+            CHECK (approx (mix::layout (many)[1].overlap, 6.0) && approx (mix::layout (many)[1].outStart, 2.0));
+            auto withSilence = ov;
+            withSilence.segments[1].silenceBars = 1;
+            const auto ps = mix::layout (withSilence);
+            CHECK (approx (ps[1].overlap, 0.0) && approx (ps[1].outStart, 10.0));
+            auto firstOverlap = ov;
+            firstOverlap.segments[0].overlapBars = 2;
+            CHECK (approx (mix::layout (firstOverlap)[0].outStart, 0.0));
+            auto both = ov;
+            both.segments[1].overlapBlend = MixSegment::blendBoth;
+            CHECK (approx (mix::layout (both)[0].fadeOut, mix::cutFadeSeconds));
+            auto cross = ov;
+            cross.segments[1].overlapBlend = MixSegment::blendCrossfade;
+            CHECK (approx (mix::layout (cross)[1].riseIn, 2.0) && approx (mix::layout (cross)[0].fadeOut, 2.0));
+        }
+
+        std::cout << "  solape: los tiempos, acordes y el marcador pasan al que entra\n";
+        {
+            SongInfo described;
+            mix::describeSong (ov, described);
+            const auto& b = described.analysis.beats;
+            CHECK (b.size() == 28);   // 12 de D (0 a 5,5) y 16 de E (6 a 13,5)
+            bool even = b.size() == 28;
+            for (size_t k = 1; k < b.size(); ++k)
+                even = even && approx (b[k].seconds - b[k - 1].seconds, 0.5, 1.0e-6);
+            CHECK (even);
+            if (b.size() == 28)
+                CHECK (approx (b[12].seconds, 6.0) && b[12].beatInBar == 1 && b[11].beatInBar == 4);
+            const auto& chords = described.analysis.chords;
+            CHECK (chords.size() == 2);
+            if (chords.size() == 2)
+                CHECK (chords[0].name == "C" && approx (chords[0].end, 6.0) && chords[1].name == "G" && approx (chords[1].start, 6.0));
+            CHECK (described.markers.size() == 2 && approx (described.markers[1].seconds, 6.0));
+            CHECK (described.tempoRegions.size() == 1);
+        }
+
+        std::cout << "  solape: las tres mezclas (baja la que sale, fundido cruzado, las dos completas)\n";
+        {
+            juce::String err;
+            auto r = mix::render (ov, rate, formats, {}, {}, err);
+            CHECK (err.isEmpty() && r.getNumSamples() == (int) std::ceil (14.0 * rate));
+            CHECK (approx (valueAt (r, 5.0), 0.2, 1.0e-4));
+            CHECK (approx (valueAt (r, 7.0), 0.2 * std::cos (juce::MathConstants<double>::pi / 4.0) + 0.1, 1.0e-3));
+            CHECK (approx (valueAt (r, 9.0), 0.1, 1.0e-4));
+            auto cross = ov;
+            cross.segments[1].overlapBlend = MixSegment::blendCrossfade;
+            r = mix::render (cross, rate, formats, {}, {}, err);
+            const double h = std::cos (juce::MathConstants<double>::pi / 4.0);
+            CHECK (approx (valueAt (r, 7.0), 0.2 * h + 0.1 * h, 1.0e-3) && approx (valueAt (r, 6.5), 0.2 * std::cos (juce::MathConstants<double>::pi / 8.0) + 0.1 * std::sin (juce::MathConstants<double>::pi / 8.0), 1.0e-3));
+            auto both = ov;
+            both.segments[1].overlapBlend = MixSegment::blendBoth;
+            r = mix::render (both, rate, formats, {}, {}, err);
+            CHECK (approx (valueAt (r, 6.5), 0.3, 1.0e-4) && approx (valueAt (r, 7.9), 0.3, 1.0e-4) && approx (valueAt (r, 8.5), 0.1, 1.0e-4));
+        }
+
+        std::cout << "  solape: un limitador sobre la suma en la zona donde suenan los dos (y las pistas lo reciben igual)\n";
+        {
+            auto loud = makeMix ("Solape fuerte", 0.7f, 0.7f);
+            loud.segments[1].overlapBlend = MixSegment::blendBoth;
+            juce::String err;
+            std::vector<MixLevel> levels;
+            const auto r = mix::render (loud, rate, formats, {}, {}, err, &levels);
+            const float ceiling = juce::Decibels::decibelsToGain ((float) mix::limiterCeilingDb);
+            CHECK (err.isEmpty() && r.getMagnitude (0, r.getNumSamples()) <= ceiling + 1.0e-4f);
+            CHECK (approx (valueAt (r, 3.0), 0.7, 1.0e-4) && approx (valueAt (r, 11.0), 0.7, 1.0e-4));   // fuera de la zona, nada
+            CHECK (levels.size() == 2 && levels[1].joinLimiterDb < -4.0 && std::abs (levels[0].joinLimiterDb) < 1.0e-9);
+            // Las pistas reciben el mismo limitador: siguen sumando el mix
+            for (int which = 0; which < 2; ++which)
+            {
+                const auto result = tmp.getChildFile ("solape-fuerte-" + juce::String (which));
+                result.createDirectory();
+                juce::AudioBuffer<float> a ((int) 2, (int) (rate * 16.0)), b2 ((int) 2, (int) (rate * 16.0));
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    juce::FloatVectorOperations::fill (a.getWritePointer (ch), 0.7f * 0.25f, a.getNumSamples());
+                    juce::FloatVectorOperations::fill (b2.getWritePointer (ch), 0.7f * 0.75f, b2.getNumSamples());
+                }
+                writeWav (result.getChildFile ("drums.wav"), a, rate);
+                writeWav (result.getChildFile ("bass.wav"), b2, rate);
+                CHECK (MixProject::storeStems (loud.folder, loud.sources[(size_t) which].fileName, result, "4|0|0|0"));
+            }
+            juce::AudioBuffer<float> sum (2, r.getNumSamples());
+            sum.clear();
+            const bool ok = mix::renderStems (loud, "4|0|0|0", { "drums.wav", "bass.wav" }, rate, formats, {}, {}, err,
+                                              [&] (const juce::String&, const juce::AudioBuffer<float>& b)
+                                              {
+                                                  for (int ch = 0; ch < 2; ++ch)
+                                                      sum.addFrom (ch, 0, b, ch, 0, juce::jmin (b.getNumSamples(), sum.getNumSamples()));
+                                                  return true;
+                                              });
+            float diff = 0.0f;
+            for (int i = 0; i < r.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (r.getSample (0, i) - sum.getSample (0, i)));
+            CHECK (ok && diff < 1.0e-4f);
+        }
+
+        std::cout << "  solape: reubicación (manda el que entra) y huella\n";
+        {
+            const auto with = mix::pieces (ov);
+            auto without = ov;
+            without.segments[1].overlapBars = 0;
+            const auto plain = mix::pieces (without);
+            double t = 0.0;
+            CHECK (mix::remapTime (with, plain, 7.0, t) && approx (t, 9.0));   // 1 s dentro de E
+            CHECK (mix::remapTime (with, plain, 5.0, t) && approx (t, 5.0));   // en D
+            CHECK (mix::remapTime (plain, with, 9.0, t) && approx (t, 7.0));
+            CHECK (mix::renderSignature (ov) != mix::renderSignature (without));
+            auto blend = ov;
+            blend.segments[1].overlapBlend = MixSegment::blendCrossfade;
+            CHECK (mix::renderSignature (blend) != mix::renderSignature (ov));
+        }
+
+        std::cout << "  ajustes por pista: silenciar, entrar antes, seguir después; sin pistas separadas no cuentan\n";
+        auto st = makeMix ("Pistas", 0.2f, 0.1f);
+        st.segments[0].start = 4.0;   // D de 4 a 8 en 0..4; E de 4 a 8 en 4..8 (hay audio antes y después en las fuentes)
+        st.segments[1].start = 4.0;
+        st.segments[1].overlapBars = 0;
+        for (int which = 0; which < 2; ++which)
+        {
+            const float level = which == 0 ? 0.2f : 0.1f;
+            const auto result = tmp.getChildFile ("pistas-solape-" + juce::String (which));
+            result.createDirectory();
+            juce::AudioBuffer<float> a (2, (int) (rate * 16.0)), b2 (2, (int) (rate * 16.0));
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                juce::FloatVectorOperations::fill (a.getWritePointer (ch), level * 0.25f, a.getNumSamples());
+                juce::FloatVectorOperations::fill (b2.getWritePointer (ch), level * 0.75f, b2.getNumSamples());
+            }
+            writeWav (result.getChildFile ("drums.wav"), a, rate);
+            writeWav (result.getChildFile ("bass.wav"), b2, rate);
+            CHECK (MixProject::storeStems (st.folder, st.sources[(size_t) which].fileName, result, "4|0|0|0"));
+        }
+        CHECK (st.bestCachedStemsKey ({}) == "4|0|0|0" && ov.bestCachedStemsKey ({}).isEmpty());
+        st.segments[0].stemSettingsFor ("drums.wav").tailBars = 1;    // la batería de D sigue 2 s
+        st.segments[1].stemSettingsFor ("bass.wav").leadBars = 1;     // el bajo de E entra 2 s antes
+        st.segments[1].stemSettingsFor ("drums.wav").muted = true;    // sin la batería de E
+        CHECK (st.segments[1].hasStemSettings() && ! MixSegment().hasStemSettings());
+        CHECK (st.segments[0].stemSettings ("drums_kick.wav") != nullptr && st.segments[0].stemSettings ("bass.wav") == nullptr);
+        {
+            juce::String err;
+            auto r = mix::render (st, rate, formats, {}, {}, err);   // sin stemsKey: los ajustes no cuentan
+            CHECK (err.isEmpty() && approx (valueAt (r, 3.0), 0.2, 1.0e-4) && approx (valueAt (r, 5.0), 0.1, 1.0e-4));
+            st.stemsKey = "4|0|0|0";
+            r = mix::render (st, rate, formats, {}, {}, err);
+            CHECK (err.isEmpty() && r.getNumSamples() == (int) std::ceil (8.0 * rate));
+            CHECK (approx (valueAt (r, 1.0), 0.2, 1.0e-4));                    // D entero
+            CHECK (approx (valueAt (r, 3.0), 0.2 + 0.075, 1.0e-4));            // y el bajo de E que entró antes
+            CHECK (approx (valueAt (r, 5.0), 0.075 + 0.05, 1.0e-4));           // E sin batería y la batería de D que sigue
+            CHECK (approx (valueAt (r, 7.0), 0.075, 1.0e-4));                  // la batería de D ya terminó (en su último tiempo)
+            CHECK (std::abs (valueAt (r, 5.75) - 0.075 - 0.05 * std::cos (juce::MathConstants<double>::pi / 4.0)) < 1.0e-3);
+            // Una pista que sigue después del último tramo alarga el mix
+            st.segments[1].stemSettingsFor ("bass.wav").tailBars = 1;
+            r = mix::render (st, rate, formats, {}, {}, err);
+            CHECK (r.getNumSamples() == (int) std::ceil (10.0 * rate) && approx (valueAt (r, 9.0), 0.075, 1.0e-4));
+
+            // Las pistas: cada una con sus ajustes; suman el mix
+            std::map<juce::String, juce::AudioBuffer<float>> stems;
+            const bool ok = mix::renderStems (st, "4|0|0|0", { "drums.wav", "bass.wav" }, rate, formats, {}, {}, err,
+                                              [&] (const juce::String& name, const juce::AudioBuffer<float>& b) { stems[name] = b; return true; });
+            CHECK (ok && stems.size() == 2);
+            if (stems.size() == 2)
+            {
+                const auto& drums = stems["drums.wav"];
+                const auto& bass = stems["bass.wav"];
+                CHECK (approx (valueAt (drums, 5.0), 0.05, 1.0e-4) && approx (valueAt (drums, 7.0), 0.0, 1.0e-4));
+                CHECK (approx (valueAt (bass, 3.0), 0.15 + 0.075, 1.0e-4) && approx (valueAt (bass, 9.0), 0.075, 1.0e-4));
+                float diff = 0.0f;
+                for (int i = 0; i < r.getNumSamples(); ++i)
+                    diff = juce::jmax (diff, std::abs (r.getSample (0, i) - drums.getSample (0, i) - bass.getSample (0, i)));
+                CHECK (diff < 1.0e-4f);
+            }
+        }
+
+        std::cout << "  ajustes por pista: correr una pista un tiempo\n";
+        {
+            // Una fuente con un golpe en cada compás (cada 2 s); su pista "golpes" corrida un tiempo suena 0,5 s después
+            MixProject sh;
+            MixProject::load (MixProject::create (tmp.getChildFile ("mix-solape").getChildFile (Library::mixesFolderName()), "Corrida"), sh);
+            sh.levelLufs = 0.0;
+            sh.bpm = 120.0;
+            std::vector<double> downbeats;
+            for (int k = 0; k < 8; ++k)
+                downbeats.push_back (2.0 * k + 0.25);
+            juce::AudioBuffer<float> hits (2, (int) (rate * 16.0));
+            hits.clear();
+            for (double t : downbeats)
+                for (int i = 0; i < 40; ++i)
+                    for (int ch = 0; ch < 2; ++ch)
+                        hits.setSample (ch, (int) (t * rate) + i, 0.8f * (1.0f - (float) i / 40.0f));
+            const auto f = files.getChildFile ("golpes.wav");
+            writeWav (f, hits, rate);
+            sh.addSource (f, formats);
+            sh.sources[0].analysis = an;
+            const auto result = tmp.getChildFile ("pistas-corrida");
+            result.createDirectory();
+            juce::AudioBuffer<float> none (2, hits.getNumSamples());
+            none.clear();
+            writeWav (result.getChildFile ("golpes.wav"), hits, rate);
+            writeWav (result.getChildFile ("resto.wav"), none, rate);
+            CHECK (MixProject::storeStems (sh.folder, sh.sources[0].fileName, result, "4|0|0|0"));
+            MixSegment seg;
+            seg.source = 0;
+            seg.start = 2.0;
+            seg.end = 8.0;
+            seg.stemSettingsFor ("golpes.wav").shiftBeats = 1;
+            sh.segments = { seg };
+            sh.stemsKey = "4|0|0|0";
+            juce::String err;
+            const auto r = mix::render (sh, rate, formats, {}, {}, err);
+            // Sin correr, los golpes caerían en 0,25, 2,25 y 4,25 del mix; corridos un tiempo, en 0,75, 2,75 y 4,75
+            CHECK (err.isEmpty() && std::abs (valueAt (r, 0.75) - 0.8) < 0.01 && std::abs (valueAt (r, 2.75) - 0.8) < 0.01);
+            CHECK (std::abs (valueAt (r, 2.25)) < 1.0e-4);
+        }
+
+        std::cout << "  ajustes por pista y solape en mix.json (y un tramo sin ellos no cambia su huella)\n";
+        {
+            auto saved = st;
+            saved.segments[1].overlapBars = 2;
+            saved.segments[1].overlapBlend = MixSegment::blendBoth;
+            saved.segments[1].stemSettingsFor ("bass.wav").shiftBeats = -2;
+            saved.segments[0].stemSettingsFor ("voces.wav");   // sin cambios: no se guarda
+            CHECK (saved.save());
+            MixProject back;
+            CHECK (MixProject::load (saved.folder, back) && back.segments.size() == 2 && back.stemsKey == "4|0|0|0");
+            if (back.segments.size() == 2)
+            {
+                const auto& b1 = back.segments[1];
+                CHECK (b1.overlapBars == 2 && b1.overlapBlend == MixSegment::blendBoth && b1.stems.size() == 2);
+                const auto* bass = b1.stemSettings ("bass.wav");
+                const auto* drums = b1.stemSettings ("drums.wav");
+                CHECK (bass != nullptr && bass->leadBars == 1 && bass->tailBars == 1 && bass->shiftBeats == -2 && ! bass->muted);
+                CHECK (drums != nullptr && drums->muted);
+                CHECK (back.segments[0].stems.size() == 1 && back.segments[0].stemSettings ("voces.wav") == nullptr);
+            }
+            CHECK (mix::renderSignature (back) == mix::renderSignature (saved));
+            // Un mix sin solape ni ajustes por pista guarda lo mismo que antes
+            auto plain = makeMix ("Simple", 0.2f, 0.1f);
+            plain.segments[1].overlapBars = 0;
+            CHECK (plain.save());
+            const auto text = plain.folder.getChildFile ("mix.json").loadFileAsString();
+            CHECK (! text.contains ("overlap") && ! text.contains ("\"stems\"") && ! text.contains ("stemsKey"));
+            // La huella con ajustes por pista cambia al separar las pistas que usan (la mezcla sin separar las usa)
+            auto unready = st;
+            unready.stemsKey = "6|0|0|0";
+            CHECK (mix::renderSignature (unready) != mix::renderSignature (st));
+        }
+    }
+
     std::cout << "[Mix] lista de mixes con su nombre visible y nombres de carpeta válidos en todos los sistemas\n";
     {
         const auto mixesRoot = tmp.getChildFile ("mixes-con-nombre");

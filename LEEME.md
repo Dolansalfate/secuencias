@@ -82,13 +82,29 @@ El mismo código sigue compilando en macOS.
   fundido con el anterior (corte o 1-2 tiempos o compases). "Escuchar el mix" o "Escuchar la unión"
   (con "Click" para comprobar el pulso). La línea del mix muestra los compases arriba (y el tiempo
   abajo). Para dejar compases de silencio entre dos canciones (el click sigue contando: sirve de
-  cuenta para entrar), elige el tramo que viene después y usa "Silencio antes" [-] [+] en su panel,
-  o clic derecho en el tramo > "Silencio antes de este tramo". Ctrl+Z deshace. Al final, "Crear canción...": separarla con
+  cuenta para entrar), elige el tramo que viene después y usa "Unión" [-] [+] en su panel ("silencio
+  2 c."), o clic derecho en el tramo > "Silencio antes de este tramo". **Solape**: con "Unión" [-]
+  por debajo de "seguido" ("solapa 2 c."), o clic derecho > "Solape con el anterior", la canción que
+  entra empieza esos compases antes de que termine la anterior y suenan las dos juntas (por ejemplo,
+  la intro de una sobre el final de la otra). En "Mezcla" eliges cómo: "Baja el anterior" (la que
+  entra suena entera y la que sale se apaga a lo largo del solape), "Fundido cruzado" o "Los dos
+  enteros". Desde donde entra la nueva, el marcador, los compases, los acordes y el click son los
+  suyos. En la línea del mix el solape se ve partido: arriba la que sale, abajo la que entra. Si al
+  sumarse pasan del techo, un limitador baja solo esos picos (el panel dice "unión lim -2,1").
+  **Pistas por tramo**: "Separar canciones (IA)" (abajo de la lista de canciones) separa una vez las
+  canciones que usa el mix, con las opciones de pistas y calidad de arriba; quedan guardadas en el mix
+  (las mismas que usa la canción ligada). Después, "Pistas..." en el panel del tramo (o clic derecho >
+  "Pistas del tramo...") muestra una fila por pista: "Silenciar" (por ejemplo, sin las voces en ese
+  tramo), "Entra antes" N compases (el bajo de la que viene entra un compás antes, con el audio de su
+  canción que precede al tramo), "Sigue después" N compases (la batería de la que sale sigue sonando
+  sobre la siguiente y se apaga en su último tiempo) y "Correr" en tiempos. Las barras al pie de la
+  línea del mix muestran las pistas que entran antes o siguen. "Escuchar el mix" y la canción ligada
+  se arman con esas pistas. Ctrl+Z deshace. Al final, "Crear canción...": separarla con
   IA (con las opciones de pistas y calidad de arriba) o agregarla sin separar; la canción aparece en
   el setlist con sus tiempos, compases, acordes, secciones de tempo y un marcador en cada tramo, sin
   tener que analizarla de nuevo. El mix queda guardado para seguir otro día ("Armar mix" > su nombre).
   **La canción queda ligada a su mix** (dice "MIX" en el setlist): si después cambias un tramo (dónde
-  empieza o termina, el orden, el tempo, el fundido o el nivel), al volver a la canción se actualiza
+  empieza o termina, el orden, el tempo, el fundido, el solape, las pistas del tramo o el nivel), al volver a la canción se actualiza
   sola en unos segundos. Para eso, al separar, la app separa cada canción original entera una sola
   vez y guarda sus pistas en el mix: los cambios de tramos no vuelven a separar (solo una canción
   nueva que agregues al mix). Tus marcadores, notas y pistas MIDI se mueven con su tramo, y la mezcla

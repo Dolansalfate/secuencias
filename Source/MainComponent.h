@@ -64,7 +64,7 @@ public:
     // tiene, y opcionalmente arma tramos de prueba (8 compases de cada fuente desde su 3.er compás) y
     // crea la canción (createMode 1 = separar con IA, 2 = sin separar)
     void openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode,
-                            int selectFirstBar = -1, int selectLastBar = -1);
+                            int selectFirstBar = -1, int selectLastBar = -1, bool stemsPanel = false, bool separate = false);
     bool isMixBusy() const;   // la captura espera a que termine lo que pidió del mix
     void createMidiTrackForCapture();   // pista MIDI de la batería, con una fila de conga y los golpes de 5 a 10 s en ella
     void openImportPickerForCapture()                         { chooseStems(); }
@@ -259,6 +259,10 @@ private:
     // se vuelven a armar (sin separar de nuevo) y lo suyo se reubica por tramo (mix::applyRebuild).
     void continueMixSongJob();
     void mixSongJobFailed();
+    // "Separar canciones" del armado de mix: separa las canciones que usa (las que falten, con las opciones de la barra
+    // de arriba) para los ajustes por pista de sus tramos, con la misma cola (MixSongJob::separateOnly)
+    void separateMixSources();
+    void noteMixStems (const juce::File& mixFolder, const juce::String& key);   // el mix usa esas pistas si no tenía otras
     SeparationOptions effectiveOptions (SeparationOptions) const;
     struct MixSongBuild
     {
@@ -422,6 +426,7 @@ private:
         juce::String current;                      // el que se está separando
         int total = 0;
         juce::String signature;                    // actualizando: la versión del mix (si falla, no se reintenta sola)
+        bool separateOnly = false;                 // solo separar (para los ajustes por pista del mix): no se arma canción
     } mixSongJob;
     int mixSongBuilds = 0;                         // pistas de canciones ligadas armándose (mixSongPool)
     std::set<juce::String> mixSongBuildingFolders; // canciones que se están actualizando (no se encola otra igual)
@@ -431,6 +436,8 @@ private:
     {
         bool active = false, autoSegments = false, segmentsDone = false, createStarted = false, selectionDone = true;
         bool renderStarted = false;   // con --mixtramos también se prepara el mix (se ve el nivelado de cada tramo)
+        bool stemsPanel = false, stemsPanelShown = false;   // --mixpistas: "Pistas del tramo" del tramo elegido
+        bool separate = false, separateStarted = false;     // --mixseparar: "Separar canciones (IA)"
         int createMode = 0, selFirst = -1, selLast = -1;
     } mixCapture;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)

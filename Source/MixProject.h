@@ -25,6 +25,19 @@ struct MixSource
     Analysis analysis;          // tiempos en segundos de la fuente; vacío = sin analizar
 };
 
+// Ajustes de una pista separada dentro de un tramo (solo cuando las canciones del mix están separadas): se arma
+// con las pistas de la fuente en vez de con la mezcla original
+struct MixStemSettings
+{
+    juce::String stem;          // archivo de la pista en las pistas de la fuente ("drums.wav"); vale también para sus partes ("drums_kick.wav")
+    bool muted = false;         // no suena en este tramo
+    int leadBars = 0;           // entra N compases antes del inicio del tramo, con el audio de la fuente que lo precede
+    int tailBars = 0;           // sigue N compases después del final del tramo, con el audio de la fuente que sigue
+    int shiftBeats = 0;         // corrida en tiempos del tramo (positivo = más tarde)
+    static constexpr int maxBars = 16, maxShift = 8;
+    bool isDefault() const { return ! muted && leadBars == 0 && tailBars == 0 && shiftBeats == 0; }
+};
+
 struct MixSegment
 {
     int source = 0;             // índice en MixProject::sources
@@ -38,6 +51,19 @@ struct MixSegment
     int id = 0;                 // estable dentro del mix (ensureSegmentIds): una canción ligada reubica lo suyo por tramo
     int silenceBars = 0;        // compases de silencio antes del tramo (a su tempo y con su compás; 0 a 64): el click sigue
     static constexpr int maxSilenceBars = 64;
+    // Solape: el tramo empieza estos compases (a su tempo y con su compás) ANTES de que termine el anterior y los dos
+    // suenan juntos; el marcador, los compases, los acordes y el click pasan a este tramo desde donde empieza. No se
+    // combina con silenceBars (con silencio no hay solape).
+    int overlapBars = 0;
+    static constexpr int maxOverlapBars = 16;
+    enum OverlapBlend { blendFadeOut = 0, blendCrossfade = 1, blendBoth = 2 };
+    int overlapBlend = blendFadeOut;   // solo baja el anterior / fundido cruzado / los dos completos
+    std::vector<MixStemSettings> stems;   // ajustes por pista (los que no están, como siempre)
+
+    // Los ajustes de esa pista: los suyos o, si es una parte ("drums_kick.wav"), los de la pista de la que salió; nullptr = ninguno
+    const MixStemSettings* stemSettings (const juce::String& stemFile) const;
+    MixStemSettings& stemSettingsFor (const juce::String& stemFile);   // los suyos (los crea si no hay)
+    bool hasStemSettings() const;   // alguna pista con ajustes que cambian algo
 };
 
 struct MixProject
@@ -53,6 +79,9 @@ struct MixProject
     std::vector<MixSource> sources;
     std::vector<MixSegment> segments;   // en el orden en que suenan
     int nextSegmentId = 1;              // el próximo id de tramo: nunca baja (un id quitado no se vuelve a usar)
+    // Opciones de separación de las pistas que usa el mix (los ajustes por pista de los tramos, al escuchar el mix y en
+    // una canción ligada sin separar): la clave de pistas/<archivo>/<opciones>; vacía = sin separar
+    juce::String stemsKey;
 
     juce::File sourcesFolder() const { return folder.getChildFile ("fuentes"); }
     juce::File sourceFile (int index) const;           // fuentes/<fileName>, o File() si el índice no existe
@@ -97,6 +126,8 @@ struct MixProject
     // Mueve los wav de una separación (`resultFolder`) a las pistas de la fuente con esas opciones (reemplaza las que hubiera)
     static bool storeStems (const juce::File& mixFolder, const juce::String& sourceFileName, const juce::File& resultFolder,
                             const juce::String& optionsKey);
+    // La clave de pistas ya separadas que cubre más fuentes usadas (en empate, `preferred`); vacía si no hay ninguna
+    juce::String bestCachedStemsKey (const juce::String& preferred) const;
 };
 
 // Nivelado de un tramo en el último render (mix::render, uno por tramo, mismo orden)
@@ -106,6 +137,7 @@ struct MixLevel
     double lufs = -100.0;       // sonoridad del tramo ya nivelado (-100 = sin medir: tramo muy corto o en silencio)
     double limiterDb = 0.0;     // la mayor reducción del limitador en los picos (0 = no actuó)
     bool belowTarget = false;   // quedó más de 0,5 LU bajo el objetivo (el tope de 12 dB no alcanzó)
+    double joinLimiterDb = 0.0; // la mayor reducción del limitador de las zonas donde suena con otro (solape, fundido, pistas que siguen)
 };
 
 // Cómo queda cada tramo en el mix (resultado de mix::layout, uno por tramo, mismo orden)
@@ -119,6 +151,9 @@ struct MixPlacement
     double fadeIn = 0.0;                   // segundos del mix antes de outStart en que el tramo ya entra (fundido cruzado)
     double fadeOut = 0.0;                  // segundos antes de outEnd en que se desvanece (= fadeIn del siguiente; 10 ms al final)
     double silence = 0.0;                  // segundos de silencio antes de outStart (silenceBars del tramo)
+    double overlap = 0.0;                  // segundos en que empieza antes del final del anterior (overlapBars que caben)
+    double riseIn = 0.0;                   // con solape en fundido cruzado: segundos después de outStart en que sube (seno)
+    double barSeconds = 0.0;               // un compás del tramo en el mix (su compás a su tempo)
 };
 
 namespace mix
@@ -167,6 +202,10 @@ namespace mix
     // fadeIn (i > 0): fadeBeats > 0 ? fadeBeats · 60 / playBpm : cutFadeSeconds, acotado a lo que hay
     // de audio antes del inicio en la fuente (srcStart · ratio) y a la mitad de la duración de ambos
     // tramos. fadeIn del primero = 0. fadeOut = fadeIn del siguiente; el del último = cutFadeSeconds.
+    // Con overlapBars (y sin silencio) el tramo empieza `overlap` antes del final del anterior: los compases pedidos que
+    // caben en ambos (menos que la duración de cada uno; 0 si no cabe ninguno), sin fundido con audio previo (fadeIn 0).
+    // Según overlapBlend, el anterior se apaga a lo largo del solape (fadeOut = overlap) o al final (10 ms), y el que
+    // entra sube a lo largo del solape (riseIn = overlap, fundido cruzado) o entra entero (2 ms).
     std::vector<MixPlacement> layout (const MixProject&);
     double length (const MixProject&);   // outEnd del último tramo (0 si no hay)
 
@@ -182,6 +221,8 @@ namespace mix
     // tramo en outStart con origBpm = su playBpm (playBpm 0), unidas si el tempo es el mismo (a
     // menos de 0,05 BPM); la primera en 0. markers: uno por tramo en outStart con su label (o el
     // nombre de la fuente). bpm = el del primer tramo; clickOffset = el primer tiempo del mix (o 0).
+    // Los tiempos y acordes de un tramo llegan hasta donde empieza el siguiente (con solape, desde ahí mandan los del
+    // que entra).
     // clips, notes y el nivelado quedan vacíos; playBpm = 0; transpose = 0.
     void describeSong (const MixProject&, SongInfo& out);
 
@@ -212,6 +253,12 @@ namespace mix
     // ganancia propia encima; los picos que pasarían de limiterCeilingDb los baja un limitador con anticipación
     // (loudness::limiterGains), y como eso resta algo de sonoridad se vuelve a medir y a corregir (hasta tres
     // pasadas: queda a menos de 0,15 LU). `levels` (si no es nullptr) recibe lo aplicado.
+    // Un tramo con ajustes por pista (MixSegment::stems) cuya fuente está separada con project.stemsKey se arma con
+    // sus pistas (las silenciadas no, las que entran antes o siguen después con el audio de la fuente que rodea al
+    // tramo: entran con 10 ms y terminan con un tiempo de fundido; las corridas, leídas desde otro instante); la
+    // ganancia del tramo se sigue midiendo en la fuente original. Sin pistas separadas, los ajustes no cuentan.
+    // Donde suena más de un tramo a la vez (solapes, fundidos cruzados, pistas que entran antes o siguen) un
+    // limitador sobre la suma baja los picos que pasarían de limiterCeilingDb (MixLevel::joinLimiterDb).
     juce::AudioBuffer<float> render (const MixProject&, double sampleRate, juce::AudioFormatManager&,
                                      const std::function<bool()>& shouldAbort,
                                      const std::function<void (float)>& progress, juce::String& error,
@@ -221,7 +268,9 @@ namespace mix
     // cada fuente), el mix armado igual que render pero con esa pista de cada fuente (en silencio si una fuente no
     // la tiene); con nivelado, la ganancia y el limitador de cada tramo salen de su fuente original y se aplican
     // igual a todas sus pistas, así la suma de las pistas es el mix. `onStem` recibe cada pista terminada (false =
-    // no se pudo guardar). false si falló (con `error`) o se abortó.
+    // no se pudo guardar). false si falló (con `error`) o se abortó. Los ajustes por pista de los tramos se aplican a
+    // la pista que corresponde (por nombre de archivo), y el limitador de las zonas donde suenan varios tramos (medido
+    // sobre la suma) se aplica igual a todas las pistas.
     bool renderStems (const MixProject&, const juce::String& optionsKey, const juce::StringArray& stemFiles, double sampleRate,
                       juce::AudioFormatManager&,
                       const std::function<bool()>& shouldAbort, const std::function<void (float)>& progress, juce::String& error,
@@ -235,7 +284,7 @@ namespace mix
     juce::String renderSignature (const MixProject&);
     // Un instante de la canción armada con `from` en la armada con `to`: mismo tramo (por id y con la misma fuente) y
     // mismo instante de su fuente. false si ese tramo se quitó o ese pedazo ya no está dentro de él. Es simétrica:
-    // con from y to cambiados lleva de la versión nueva a la vieja.
+    // con from y to cambiados lleva de la versión nueva a la vieja. En un solape manda el tramo que entra.
     bool remapTime (const std::vector<MixPiece>& from, const std::vector<MixPiece>& to, double seconds, double& out);
     // Pone en una canción ligada lo que trae la versión nueva del mix (`generated`, de describeSong): tiempos,
     // acordes, secciones de tempo (con el tempo y el tono de reproducción que tenía cada una, buscada por su tramo),

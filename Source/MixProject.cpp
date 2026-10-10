@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 
 namespace
@@ -72,6 +73,29 @@ namespace
         o->setProperty ("id", s.id);
         if (s.silenceBars > 0)
             o->setProperty ("silenceBars", s.silenceBars);
+        // Lo nuevo solo si cambia algo: un mix.json de antes conserva su huella (renderSignature) y no se rearma
+        if (s.overlapBars > 0)
+            o->setProperty ("overlapBars", s.overlapBars);
+        if (s.overlapBlend != MixSegment::blendFadeOut)
+            o->setProperty ("overlapBlend", s.overlapBlend);
+        juce::Array<juce::var> stems;
+        for (auto& st : s.stems)
+            if (! st.isDefault() && st.stem.isNotEmpty())
+            {
+                auto* so = new juce::DynamicObject();
+                so->setProperty ("stem", st.stem);
+                if (st.muted)
+                    so->setProperty ("muted", true);
+                if (st.leadBars != 0)
+                    so->setProperty ("leadBars", st.leadBars);
+                if (st.tailBars != 0)
+                    so->setProperty ("tailBars", st.tailBars);
+                if (st.shiftBeats != 0)
+                    so->setProperty ("shiftBeats", st.shiftBeats);
+                stems.add (juce::var (so));
+            }
+        if (! stems.isEmpty())
+            o->setProperty ("stems", stems);
         return juce::var (o);
     }
 
@@ -120,6 +144,34 @@ namespace
 }
 
 //==============================================================================
+const MixStemSettings* MixSegment::stemSettings (const juce::String& stemFile) const
+{
+    for (auto& st : stems)
+        if (st.stem == stemFile)
+            return &st;
+    // Una parte de la batería ("drums_kick.wav") sigue los ajustes de la pista de la que salió ("drums.wav")
+    for (auto& st : stems)
+        if (const auto base = st.stem.upToLastOccurrenceOf (".", false, false); base.isNotEmpty() && stemFile.startsWith (base + "_"))
+            return &st;
+    return nullptr;
+}
+
+MixStemSettings& MixSegment::stemSettingsFor (const juce::String& stemFile)
+{
+    for (auto& st : stems)
+        if (st.stem == stemFile)
+            return st;
+    MixStemSettings st;
+    st.stem = stemFile;
+    stems.push_back (st);
+    return stems.back();
+}
+
+bool MixSegment::hasStemSettings() const
+{
+    return std::any_of (stems.begin(), stems.end(), [] (const MixStemSettings& st) { return ! st.isDefault(); });
+}
+
 juce::File MixProject::sourceFile (int index) const
 {
     if (index < 0 || index >= (int) sources.size() || sources[(size_t) index].fileName.isEmpty())
@@ -156,6 +208,8 @@ bool MixProject::save() const
     obj->setProperty ("keepTempos", keepTempos);
     obj->setProperty ("levelLufs", levelLufs);
     obj->setProperty ("nextSegmentId", nextSegmentId);
+    if (stemsKey.isNotEmpty())
+        obj->setProperty ("stemsKey", stemsKey);
     juce::Array<juce::var> srcs, segs;
     for (auto& s : sources)
         srcs.add (toVar (s));
@@ -186,6 +240,7 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
     p.nextSegmentId = (int) finiteIn ((double) v.getProperty ("nextSegmentId", 1), 1.0, 1.0e9, 1.0);
     if (p.levelLufs > -6.0)
         p.levelLufs = 0.0;   // fuera de lo razonable (o 0): sin nivelar
+    p.stemsKey = v.getProperty ("stemsKey", "").toString().trim();
 
     if (auto* arr = v.getProperty ("sources", juce::var()).getArray())
         for (auto& sv : *arr)
@@ -242,6 +297,24 @@ bool MixProject::load (const juce::File& mixFolder, MixProject& out)
             s.fadeBeats = finiteIn ((double) sv.getProperty ("fadeBeats", 0.0), 0.0, 16.0, 0.0);
             s.id = (int) finiteIn ((double) sv.getProperty ("id", 0), 0.0, 1.0e9, 0.0);
             s.silenceBars = (int) finiteIn ((double) sv.getProperty ("silenceBars", 0), 0.0, (double) MixSegment::maxSilenceBars, 0.0);
+            s.overlapBars = (int) finiteIn ((double) sv.getProperty ("overlapBars", 0), 0.0, (double) MixSegment::maxOverlapBars, 0.0);
+            s.overlapBlend = (int) finiteIn ((double) sv.getProperty ("overlapBlend", 0), 0.0, 2.0, 0.0);
+            if (auto* stems = sv.getProperty ("stems", juce::var()).getArray())
+                for (auto& stv : *stems)
+                {
+                    MixStemSettings st;
+                    st.stem = juce::File::createLegalFileName (stv.getProperty ("stem", "").toString());
+                    if (st.stem.isEmpty() || st.stem == "." || st.stem == ".."
+                        || std::any_of (s.stems.begin(), s.stems.end(), [&st] (const MixStemSettings& o) { return o.stem == st.stem; }))
+                        continue;
+                    constexpr double bars = MixStemSettings::maxBars, shift = MixStemSettings::maxShift;
+                    st.muted = (bool) stv.getProperty ("muted", false);
+                    st.leadBars = (int) finiteIn ((double) stv.getProperty ("leadBars", 0), 0.0, bars, 0.0);
+                    st.tailBars = (int) finiteIn ((double) stv.getProperty ("tailBars", 0), 0.0, bars, 0.0);
+                    st.shiftBeats = (int) std::lround (finiteIn ((double) stv.getProperty ("shiftBeats", 0), -shift, shift, 0.0));
+                    if (! st.isDefault())
+                        s.stems.push_back (st);
+                }
             p.segments.push_back (s);
         }
     p.ensureSegmentIds();   // mix.json de antes (sin ids): en orden, siempre los mismos
@@ -326,6 +399,34 @@ bool MixProject::storeStems (const juce::File& mixFolder, const juce::String& so
     o->setProperty ("source", sourceFileName);
     o->setProperty ("files", files);
     return dir.getChildFile ("pistas.json").replaceWithText (juce::JSON::toString (juce::var (o)));
+}
+
+juce::String MixProject::bestCachedStemsKey (const juce::String& preferred) const
+{
+    auto used = usedSources();
+    if (used.empty())
+        for (int i = 0; i < (int) sources.size(); ++i)
+            used.push_back (i);
+    std::map<juce::String, int> coverage;
+    for (int i : used)
+    {
+        const auto all = stemsFolderFor (folder, sources[(size_t) i].fileName, {}).getParentDirectory();
+        for (const auto& dir : all.findChildFiles (juce::File::findDirectories, false))
+        {
+            const auto key = juce::JSON::parse (dir.getChildFile ("pistas.json").loadFileAsString()).getProperty ("options", "").toString();
+            if (key.isNotEmpty() && ! cachedStems (i, key).isEmpty())
+                ++coverage[key];
+        }
+    }
+    juce::String best;
+    int bestCount = 0;
+    for (auto& [key, count] : coverage)
+        if (count > bestCount || (count == bestCount && key == preferred))
+        {
+            best = key;
+            bestCount = count;
+        }
+    return best;
 }
 
 juce::StringArray MixProject::list (const juce::File& mixesRoot)
@@ -561,20 +662,40 @@ namespace mix
                 continue;   // largo 0: no suena
 
             // Compases de silencio antes: el tramo empieza ese lapso después del anterior (a su tempo y su compás)
-            p.silence = seg.silenceBars > 0 ? juce::jlimit (0, MixSegment::maxSilenceBars, seg.silenceBars) * meterOf (*s) * 60.0 / p.playBpm : 0.0;
-            p.outStart = position + p.silence;
-            p.outEnd = p.outStart + (p.srcEnd - p.srcStart) * p.ratio;
-            const double duration = p.outEnd - p.outStart;
+            p.barSeconds = meterOf (*s) * 60.0 / p.playBpm;
+            p.silence = seg.silenceBars > 0 ? juce::jlimit (0, MixSegment::maxSilenceBars, seg.silenceBars) * p.barSeconds : 0.0;
+            const double duration = (p.srcEnd - p.srcStart) * p.ratio;
+            if (previous >= 0 && p.silence <= 0.0 && seg.overlapBars > 0)
+            {
+                // Solape: los compases pedidos que caben, menos que la duración de cada uno (los inicios siguen en orden)
+                const auto& prev = out[(size_t) previous];
+                const double room = juce::jmin (prev.outEnd - prev.outStart, duration) - 0.01;
+                const int bars = juce::jmin (seg.overlapBars, MixSegment::maxOverlapBars, (int) std::floor (room / p.barSeconds));
+                p.overlap = bars > 0 ? bars * p.barSeconds : 0.0;
+            }
+            p.outStart = position + p.silence - p.overlap;
+            p.outEnd = p.outStart + duration;
             if (previous >= 0 && p.silence <= 0.0)
             {
-                // Fundido cruzado en la unión: el tramo que entra empieza a sonar `fadeIn` antes (con
-                // el audio que precede a su inicio en la fuente) y el anterior se apaga en ese lapso
                 auto& prev = out[(size_t) previous];
-                double fade = seg.fadeBeats > 0.0 ? seg.fadeBeats * 60.0 / p.playBpm : cutFadeSeconds;
-                fade = juce::jmin (fade, p.srcStart * p.ratio);
-                fade = juce::jmin (fade, 0.5 * duration, 0.5 * (prev.outEnd - prev.outStart));
-                p.fadeIn = juce::jmax (0.0, fade);
-                prev.fadeOut = p.fadeIn;
+                if (p.overlap > 0.0)
+                {
+                    // Solape: el que entra empieza con su propio audio (sin audio previo); el anterior se apaga a lo
+                    // largo del solape (o al final, con "los dos completos")
+                    const int blend = juce::jlimit (0, 2, seg.overlapBlend);
+                    p.riseIn = blend == MixSegment::blendCrossfade ? p.overlap : 0.0;
+                    prev.fadeOut = blend == MixSegment::blendBoth ? juce::jmin (cutFadeSeconds, 0.5 * (prev.outEnd - prev.outStart)) : p.overlap;
+                }
+                else
+                {
+                    // Fundido cruzado en la unión: el tramo que entra empieza a sonar `fadeIn` antes (con
+                    // el audio que precede a su inicio en la fuente) y el anterior se apaga en ese lapso
+                    double fade = seg.fadeBeats > 0.0 ? seg.fadeBeats * 60.0 / p.playBpm : cutFadeSeconds;
+                    fade = juce::jmin (fade, p.srcStart * p.ratio);
+                    fade = juce::jmin (fade, 0.5 * duration, 0.5 * (prev.outEnd - prev.outStart));
+                    p.fadeIn = juce::jmax (0.0, fade);
+                    prev.fadeOut = p.fadeIn;
+                }
             }
             p.fadeOut = juce::jmin (cutFadeSeconds, 0.5 * duration);   // si viene otro tramo, lo corrige
             position = p.outEnd;
@@ -605,6 +726,18 @@ namespace mix
         std::vector<Chord> chords;
         std::vector<TempoRegion> regions;
         std::vector<SongMarker> markers;
+        // Dónde empieza el tramo siguiente que suena (con su silencio): los tiempos y acordes de cada tramo llegan hasta
+        // ahí (en un solape, desde donde entra el siguiente mandan los suyos)
+        std::vector<double> nextStart (places.size(), std::numeric_limits<double>::max());
+        {
+            double following = std::numeric_limits<double>::max();
+            for (size_t k = places.size(); k-- > 0;)
+            {
+                nextStart[k] = following;
+                if (places[k].outEnd > places[k].outStart)
+                    following = places[k].outStart - places[k].silence;
+            }
+        }
         int first = -1;
         for (size_t i = 0; i < places.size(); ++i)
         {
@@ -636,7 +769,7 @@ namespace mix
                     // Un tiempo apenas antes del corte (que se ajustó a la transiente) es el del inicio del
                     // tramo: va en la unión; si no, el primer "1" del mix quedaría en negativo y se perdería
                     const double t = b.seconds < p.srcStart ? p.outStart : toMix (p, b.seconds);
-                    if (t >= 0.0)
+                    if (t >= 0.0 && t < nextStart[i])
                         beats.push_back ({ Beat { t, b.beatInBar }, i, 30.0 / juce::jmax (1.0, p.playBpm) });
                 }
             for (auto& c : an.chords)
@@ -644,7 +777,7 @@ namespace mix
                 const double from = juce::jmax (c.start, p.srcStart), to = juce::jmin (c.end, p.srcEnd);
                 if (to <= from)
                     continue;
-                Chord mc { juce::jmax (0.0, toMix (p, from)), toMix (p, to), music::transposeChord (c.name, seg.transpose) };
+                Chord mc { juce::jmax (0.0, toMix (p, from)), juce::jmin (toMix (p, to), nextStart[i]), music::transposeChord (c.name, seg.transpose) };
                 if (mc.end > mc.start)
                     chords.push_back (mc);
             }
@@ -843,6 +976,24 @@ namespace mix
 
     namespace
     {
+        // Cómo suena una capa de un tramo (su fuente entera o una de sus pistas): qué ventana de la fuente lee y cómo
+        // entra y sale. Por omisión, la del tramo (con sus fundidos).
+        struct LayerWindow
+        {
+            double lead = 0.0;       // segundos del mix antes de outStart en que ya suena entera (pista que entra antes)
+            double tail = 0.0;       // segundos del mix después de outEnd en que sigue (pista que sigue)
+            double tailFade = 0.0;   // fundido al final de la cola
+            double shift = 0.0;      // segundos del mix que se corre el audio (positivo = más tarde)
+        };
+
+        // Una pista de un tramo que se arma con sus pistas (ajustes por pista)
+        struct StemLayer
+        {
+            juce::String file;
+            bool muted = false;
+            LayerWindow window;
+        };
+
         // Lo que comparten el render del mix y el de sus pistas: dónde cae cada tramo que suena y cómo entra y sale
         struct SegmentPlan
         {
@@ -850,27 +1001,91 @@ namespace mix
             MixPlacement place;
             bool crossfade = false, squareIn = false, squareOut = false;
             double pre = 0.0, fadeOut = 0.0;      // audio previo del fundido de entrada; fundido de salida
+            double rise = 0.0;                    // solape en fundido cruzado: sube (seno) en [outStart, outStart + rise]
             int m0 = 0, m1 = 0;                   // muestras del mix que ocupa
+            int reach0 = 0, reach1 = 0;           // las que ocupa con las pistas que entran antes o siguen
+            int limit = 0;                        // muestras del mix
+            juce::File stemsFolder;               // con ajustes por pista y la fuente separada: sus pistas, que lo arman
+            std::vector<StemLayer> stems;         // (vacío = se arma con la fuente)
+        };
+
+        // Muestras del mix donde suena más de una capa (fundido cruzado, solape, pista que entra antes o que sigue)
+        struct LayerRegion
+        {
+            int start = 0, end = 0;
+            std::vector<int> owners;              // tramos (índices del proyecto) a los que se atribuye lo que haga el limitador
         };
 
         struct RenderPlan
         {
             std::vector<SegmentPlan> segments;    // solo los que suenan, en orden
+            std::vector<LayerRegion> layers;      // ordenadas y separadas (con lo que tarda el limitador en volver)
             int totalSamples = 0;
             int count = 0;                        // tramos del proyecto (progreso y `levels`)
         };
 
-        bool makePlan (const MixProject& project, double sampleRate, RenderPlan& plan, juce::String& error)
+        int limiterLookaheadSamples (double sampleRate) { return juce::jmax (1, (int) std::lround (limiterLookahead * sampleRate)); }
+        int limiterReleaseSamples (double sampleRate)   { return juce::jmax (1, (int) std::lround (limiterRelease * sampleRate)); }
+
+        // Muestras del mix que ocupa una capa
+        void layerRange (const SegmentPlan& sp, const LayerWindow& w, double sampleRate, int& r0, int& r1)
+        {
+            r0 = w.lead > 0.0 ? juce::jlimit (0, sp.limit, (int) std::floor ((sp.place.outStart - w.lead) * sampleRate)) : sp.m0;
+            r1 = w.tail > 0.0 ? juce::jlimit (r0, sp.limit, (int) std::ceil ((sp.place.outEnd + w.tail) * sampleRate)) : sp.m1;
+        }
+
+        // Ventana de una pista según sus ajustes en el tramo (compases con su compás y su tempo)
+        LayerWindow windowFor (const MixStemSettings* st, const MixPlacement& p)
+        {
+            LayerWindow w;
+            if (st == nullptr)
+                return w;
+            const double beat = 60.0 / juce::jmax (1.0, p.playBpm);
+            w.lead = juce::jlimit (0, MixStemSettings::maxBars, st->leadBars) * p.barSeconds;
+            w.tail = juce::jlimit (0, MixStemSettings::maxBars, st->tailBars) * p.barSeconds;
+            w.tailFade = juce::jmin (beat, w.tail);
+            w.shift = juce::jlimit (-MixStemSettings::maxShift, MixStemSettings::maxShift, st->shiftBeats) * beat;
+            return w;
+        }
+
+        // `stemsKey`: las pistas separadas con que se arman los tramos con ajustes por pista (vacía = ninguno se arma así)
+        bool makePlan (const MixProject& project, double sampleRate, const juce::String& stemsKey, RenderPlan& plan, juce::String& error)
         {
             plan = RenderPlan();
             const auto places = layout (project);
             plan.count = (int) places.size();
-            const double totalSeconds = places.empty() ? 0.0 : places.back().outEnd;
+            double totalSeconds = places.empty() ? 0.0 : places.back().outEnd;
             if (! (totalSeconds > 0.0) || ! (sampleRate > 0.0))
             {
                 error = "El mix no tiene tramos.";
                 return false;
             }
+
+            // Tramos con ajustes por pista cuya fuente está separada con esas opciones: se arman con sus pistas (una pista
+            // que sigue después del último tramo alarga el mix)
+            std::vector<std::vector<StemLayer>> stemLayers (places.size());
+            std::vector<juce::File> stemFolders (places.size());
+            if (stemsKey.isNotEmpty())
+                for (size_t i = 0; i < places.size(); ++i)
+                {
+                    const auto& seg = project.segments[i];
+                    if (places[i].outEnd <= places[i].outStart || ! seg.hasStemSettings())
+                        continue;
+                    for (auto& file : project.cachedStems (seg.source, stemsKey))
+                    {
+                        const auto* st = seg.stemSettings (file);
+                        StemLayer layer;
+                        layer.file = file;
+                        layer.muted = st != nullptr && st->muted;
+                        layer.window = windowFor (st, places[i]);
+                        if (! layer.muted)
+                            totalSeconds = juce::jmax (totalSeconds, places[i].outEnd + layer.window.tail);
+                        stemLayers[i].push_back (layer);
+                    }
+                    if (! stemLayers[i].empty())
+                        stemFolders[i] = project.stemsFolder (seg.source, stemsKey);
+                }
+
             if (! (totalSeconds <= maxSeconds) || ! (std::ceil (totalSeconds * sampleRate) <= (double) std::numeric_limits<int>::max()))
             {
                 error = tr ("El mix dura más de 4 horas.");
@@ -893,9 +1108,19 @@ namespace mix
                 }
             }
 
+            std::vector<LayerRegion> regions;
+            auto addRegion = [&regions, &plan, sampleRate] (double from, double to, int owner)
+            {
+                const int a = juce::jlimit (0, plan.totalSamples, (int) std::floor (from * sampleRate));
+                const int b = juce::jlimit (a, plan.totalSamples, (int) std::ceil (to * sampleRate));
+                if (b > a)
+                    regions.push_back ({ a, b, { owner } });
+            };
+
             // Entrada: con fundido cruzado (seno sobre el audio que precede al inicio) o, en el primer tramo o sin
-            // audio previo suficiente, 2 ms lineales desde la unión. Salida: coseno. En una unión que continúa el
-            // mismo audio de la fuente, seno² y coseno² (suman 1: sin subida).
+            // audio previo suficiente, 2 ms lineales desde la unión (con solape en fundido cruzado, un seno a lo largo
+            // del solape). Salida: coseno. En una unión que continúa el mismo audio de la fuente, seno² y coseno²
+            // (suman 1: sin subida).
             bool first = true;
             for (int i = 0; i < plan.count; ++i)
             {
@@ -909,6 +1134,7 @@ namespace mix
                 sp.place = p;
                 sp.crossfade = ! isFirst && p.fadeIn >= edgeFadeSeconds;
                 sp.pre = sp.crossfade ? p.fadeIn : 0.0;
+                sp.rise = isFirst ? 0.0 : p.riseIn;
                 const double duration = p.outEnd - p.outStart;
                 sp.fadeOut = juce::jmin (juce::jmax (p.fadeOut, edgeFadeSeconds), duration);
                 sp.m0 = juce::jlimit (0, plan.totalSamples, (int) std::floor ((p.outStart - sp.pre) * sampleRate));
@@ -917,30 +1143,71 @@ namespace mix
                     continue;
                 sp.squareIn = coherentIn[(size_t) i];
                 sp.squareOut = coherentOut[(size_t) i];
-                plan.segments.push_back (sp);
+                sp.limit = plan.totalSamples;
+                sp.stems = std::move (stemLayers[(size_t) i]);
+                sp.stemsFolder = stemFolders[(size_t) i];
+                sp.reach0 = sp.m0;
+                sp.reach1 = sp.m1;
+                for (auto& layer : sp.stems)
+                {
+                    if (layer.muted)
+                        continue;
+                    int r0 = 0, r1 = 0;
+                    layerRange (sp, layer.window, sampleRate, r0, r1);
+                    sp.reach0 = juce::jmin (sp.reach0, r0);
+                    sp.reach1 = juce::jmax (sp.reach1, r1);
+                    if (layer.window.lead > 0.0)
+                        addRegion (p.outStart - layer.window.lead, p.outStart, i);
+                    if (layer.window.tail > 0.0)
+                        addRegion (p.outEnd, p.outEnd + layer.window.tail, i);
+                }
+                if (sp.crossfade && sp.pre > 1.5 * cutFadeSeconds)
+                    addRegion (p.outStart - sp.pre, p.outStart, i);
+                if (! isFirst && p.overlap > 0.0)
+                    addRegion (p.outStart, p.outStart + p.overlap, i);
+                plan.segments.push_back (std::move (sp));
+            }
+
+            // Zonas en orden; las que quedan más cerca de lo que tarda el limitador en volver van juntas (así sus
+            // ganancias no se pisan)
+            std::sort (regions.begin(), regions.end(), [] (const LayerRegion& x, const LayerRegion& y) { return x.start < y.start; });
+            const int margin = limiterLookaheadSamples (sampleRate) + 5 * limiterReleaseSamples (sampleRate) + 1;
+            for (auto& r : regions)
+            {
+                if (plan.layers.empty() || r.start > plan.layers.back().end + margin)
+                {
+                    plan.layers.push_back (r);
+                    continue;
+                }
+                auto& last = plan.layers.back();
+                last.end = juce::jmax (last.end, r.end);
+                for (int o : r.owners)
+                    if (std::find (last.owners.begin(), last.owners.end(), o) == last.owners.end())
+                        last.owners.push_back (o);
             }
             return true;
         }
 
-        // El tramo leído de `file` (su fuente o una de sus pistas), estirado y transpuesto si hace falta, alineado con
-        // el mix: aligned[j] es la muestra m0 + j (ceros donde el archivo no tiene audio). false si no se pudo leer
-        // (con `error`) o se abortó (sin error).
-        bool readLayer (const MixProject& project, const SegmentPlan& sp, const juce::File& file, const juce::String& what,
-                        double sampleRate, juce::AudioFormatManager& formats, const std::function<bool()>& shouldAbort,
-                        juce::AudioBuffer<float>& aligned, juce::String& error)
+        // Una capa del tramo leída de `file` (su fuente o una de sus pistas), estirada y transpuesta si hace falta,
+        // alineada con el mix: aligned[j] es la muestra r0 + j (ceros donde el archivo no tiene audio). Con la ventana
+        // por omisión, r0 = m0 y el largo es m1 - m0. false si no se pudo leer (con `error`) o se abortó (sin error).
+        bool readLayer (const MixProject& project, const SegmentPlan& sp, const LayerWindow& w, const juce::File& file,
+                        const juce::String& what, double sampleRate, juce::AudioFormatManager& formats,
+                        const std::function<bool()>& shouldAbort, juce::AudioBuffer<float>& aligned, int& r0, juce::String& error)
         {
             const auto& p = sp.place;
             const auto& seg = project.segments[(size_t) sp.index];
-            const int m0 = sp.m0, m1 = sp.m1;
-            // audio[offset + j] es la muestra m0 + j del mix, que corresponde al instante
-            // srcStart + ((m0 + j) / sampleRate - outStart) / ratio de la fuente
+            int r1 = 0;
+            layerRange (sp, w, sampleRate, r0, r1);
+            // audio[offset + j] es la muestra r0 + j del mix, que corresponde al instante
+            // srcStart + ((r0 + j) / sampleRate - outStart - shift) / ratio de la fuente
             juce::AudioBuffer<float> audio;
             juce::int64 offset = 0;
             const bool stretch = std::abs (p.ratio - 1.0) > 1.0e-6 || seg.transpose != 0;
             if (! stretch)
             {
-                const double from = p.srcStart + ((double) m0 / sampleRate - p.outStart);
-                if (! readRange (file, from, from + (double) (m1 - m0) / sampleRate, sampleRate, formats, audio))
+                const double from = p.srcStart + ((double) r0 / sampleRate - p.outStart - w.shift);
+                if (! readRange (file, from, from + (double) (r1 - r0) / sampleRate, sampleRate, formats, audio))
                 {
                     error = tr ("No se pudo leer «") + what + tr ("»");
                     return false;
@@ -948,11 +1215,12 @@ namespace mix
             }
             else
             {
-                // Lo que usa el tramo más contexto, empezando en una muestra exacta; el instante x del recorte cae en
+                // Lo que usa la capa más contexto, empezando en una muestra exacta; el instante x del recorte cae en
                 // x · ratio de lo estirado
-                const double from = std::floor ((p.srcStart - sp.pre / p.ratio - stretchContext) * sampleRate) / sampleRate;
+                const double lead = w.lead > 0.0 ? w.lead : sp.pre;
+                const double from = std::floor ((p.srcStart - (lead + w.shift) / p.ratio - stretchContext) * sampleRate) / sampleRate;
                 juce::AudioBuffer<float> clip;
-                if (! readRange (file, from, p.srcEnd + stretchContext, sampleRate, formats, clip))
+                if (! readRange (file, from, p.srcEnd + (w.tail - w.shift) / p.ratio + stretchContext, sampleRate, formats, clip))
                 {
                     error = tr ("No se pudo leer «") + what + tr ("»");
                     return false;
@@ -968,9 +1236,9 @@ namespace mix
                 audio = stretcher::renderBuffer (clip, map, sampleRate, shouldAbort);
                 if (audio.getNumSamples() == 0)
                     return false;   // abortado
-                offset = std::llround (((p.srcStart - from) * p.ratio + (double) m0 / sampleRate - p.outStart) * sampleRate);
+                offset = std::llround (((p.srcStart - from) * p.ratio + (double) r0 / sampleRate - p.outStart - w.shift) * sampleRate);
             }
-            aligned.setSize (2, m1 - m0);
+            aligned.setSize (2, r1 - r0);
             aligned.clear();
             const int channels = audio.getNumChannels();
             if (channels <= 0)
@@ -980,7 +1248,7 @@ namespace mix
             const juce::int64 available = audio.getNumSamples();
             float* outL = aligned.getWritePointer (0);
             float* outR = aligned.getWritePointer (1);
-            for (int j = 0; j < m1 - m0; ++j)
+            for (int j = 0; j < r1 - r0; ++j)
             {
                 const juce::int64 k = offset + j;
                 if (k >= 0 && k < available)
@@ -1052,23 +1320,31 @@ namespace mix
             return juce::Decibels::decibelsToGain ((float) levelDb + userDb);
         }
 
-        // Suma el tramo en `out` con sus fundidos, su ganancia y el limitador
-        void addSegment (juce::AudioBuffer<float>& out, const SegmentPlan& sp, const juce::AudioBuffer<float>& aligned, float gain,
-                         const std::vector<float>& limiter, double sampleRate)
+        // Suma una capa del tramo en `out` (desde la muestra r0) con sus fundidos, su ganancia y el limitador del tramo
+        // (que va de m0 a m1: fuera de ahí, 1). Una pista que entra antes sube en 10 ms al empezar y una que sigue se
+        // apaga en su último tiempo; en lugar de los fundidos del tramo.
+        void addSegment (juce::AudioBuffer<float>& out, const SegmentPlan& sp, const LayerWindow& w, const juce::AudioBuffer<float>& aligned,
+                         int r0, float gain, const std::vector<float>& limiter, double sampleRate)
         {
             const auto& p = sp.place;
             const double fadeOutStart = p.outEnd - sp.fadeOut;
+            const double leadStart = p.outStart - w.lead;
+            const double tailFadeStart = p.outEnd + w.tail - w.tailFade;
             const float* inL = aligned.getReadPointer (0);
             const float* inR = aligned.getReadPointer (1);
             float* outL = out.getWritePointer (0);
             float* outR = out.getWritePointer (1);
-            for (int m = sp.m0; m < sp.m1; ++m)
+            const int n = juce::jmin (aligned.getNumSamples(), out.getNumSamples() - r0);
+            for (int j = 0; j < n; ++j)
             {
-                const int j = m - sp.m0;
+                const int m = r0 + j;
                 const double t = (double) m / sampleRate;
                 double g;
-                if (! sp.crossfade)
-                    g = juce::jlimit (0.0, 1.0, (t - p.outStart) / edgeFadeSeconds);
+                if (w.lead > 0.0)
+                    g = std::sin (halfPi * juce::jlimit (0.0, 1.0, (t - leadStart) / cutFadeSeconds));
+                else if (! sp.crossfade)
+                    g = sp.rise > 0.0 ? std::sin (halfPi * juce::jlimit (0.0, 1.0, (t - p.outStart) / sp.rise))
+                                      : juce::jlimit (0.0, 1.0, (t - p.outStart) / edgeFadeSeconds);
                 else if (t >= p.outStart)
                     g = 1.0;
                 else
@@ -1077,15 +1353,120 @@ namespace mix
                     if (sp.squareIn)
                         g *= g;
                 }
-                if (t > fadeOutStart)
+                if (w.tail > 0.0)
+                {
+                    if (t > tailFadeStart && w.tailFade > 0.0)
+                        g *= std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - tailFadeStart) / w.tailFade));
+                }
+                else if (t > fadeOutStart)
                 {
                     const double c = std::cos (halfPi * juce::jlimit (0.0, 1.0, (t - fadeOutStart) / sp.fadeOut));
                     g *= sp.squareOut ? c * c : c;
                 }
-                const float v = gain * (float) g * (limiter.empty() ? 1.0f : limiter[(size_t) j]);
+                const int k = m - sp.m0;
+                const float lim = k >= 0 && k < (int) limiter.size() ? limiter[(size_t) k] : 1.0f;
+                const float v = gain * (float) g * lim;
                 outL[m] += inL[j] * v;
                 outR[m] += inR[j] * v;
             }
+        }
+
+        // La ganancia del tramo y su limitador (ver levelSegment; sin nivelado, solo su ganancia propia) y, si `sum` no es
+        // nullptr, el tramo entero sumado ahí: su fuente o, si se arma con sus pistas, las que suenan con sus ventanas.
+        // Lee la fuente solo si hace falta.
+        bool prepareSegment (const MixProject& project, const SegmentPlan& sp, double sampleRate, juce::AudioFormatManager& formats,
+                             const std::function<bool()>& shouldAbort, juce::AudioBuffer<float>* sum, float& gain,
+                             std::vector<float>& limiter, MixLevel* level, juce::String& error)
+        {
+            const auto& seg = project.segments[(size_t) sp.index];
+            const auto& src = project.sources[(size_t) seg.source];
+            gain = juce::Decibels::decibelsToGain (juce::jlimit (-24.0f, 12.0f, seg.gainDb));
+            limiter.clear();
+            const bool fromStems = ! sp.stems.empty();
+            const bool leveled = project.levelLufs < 0.0;
+            if (leveled || (sum != nullptr && ! fromStems))
+            {
+                const auto file = project.sourceFile (seg.source);
+                if (! file.existsAsFile())
+                {
+                    error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
+                    return false;
+                }
+                juce::AudioBuffer<float> aligned;
+                int r0 = 0;
+                if (! readLayer (project, sp, {}, file, src.name, sampleRate, formats, shouldAbort, aligned, r0, error))
+                    return false;
+                // Con nivelado, medido siempre en la fuente original (la suma de sus pistas): igual para todas
+                if (leveled)
+                    gain = levelSegment (project, sp, aligned, sampleRate, limiter, level);
+                if (sum != nullptr && ! fromStems)
+                    addSegment (*sum, sp, {}, aligned, r0, gain, limiter, sampleRate);
+            }
+            if (sum != nullptr && fromStems)
+                for (auto& layer : sp.stems)
+                {
+                    if (layer.muted)
+                        continue;
+                    if (shouldAbort && shouldAbort())
+                        return false;
+                    juce::AudioBuffer<float> aligned;
+                    int r0 = 0;
+                    if (! readLayer (project, sp, layer.window, sp.stemsFolder.getChildFile (layer.file), layer.file, sampleRate, formats,
+                                     shouldAbort, aligned, r0, error))
+                        return false;
+                    addSegment (*sum, sp, layer.window, aligned, r0, gain, limiter, sampleRate);
+                }
+            return true;
+        }
+
+        // Limitador de las zonas donde suenan varias capas, calculado sobre la suma (fuera de la zona no cuenta: ahí rige el
+        // limitador de cada tramo): la ganancia baja la anticipación antes de cada pico y vuelve en 5 · release después
+        struct LayerGains
+        {
+            int start = 0;
+            std::vector<float> gains;
+        };
+
+        std::vector<LayerGains> layerLimiter (const RenderPlan& plan, const juce::AudioBuffer<float>& sum, double sampleRate,
+                                              std::vector<MixLevel>* levels)
+        {
+            std::vector<LayerGains> out;
+            const int lookahead = limiterLookaheadSamples (sampleRate), release = limiterReleaseSamples (sampleRate);
+            const float ceiling = juce::Decibels::decibelsToGain ((float) limiterCeilingDb);
+            for (auto& r : plan.layers)
+            {
+                const int a = juce::jmax (0, r.start - lookahead - 1);
+                const int b = juce::jmin (juce::jmin (plan.totalSamples, sum.getNumSamples()), r.end + 5 * release);
+                if (b <= a || r.end <= r.start || r.end > sum.getNumSamples())
+                    continue;
+                juce::AudioBuffer<float> slice (2, b - a);
+                slice.clear();
+                for (int ch = 0; ch < 2; ++ch)
+                    slice.copyFrom (ch, r.start - a, sum, juce::jmin (ch, sum.getNumChannels() - 1), r.start, r.end - r.start);
+                LayerGains lg;
+                lg.start = a;
+                const double reduction = loudness::limiterGains (slice, 1.0f, ceiling, lookahead, release, lg.gains);
+                if (reduction > -0.01)
+                    continue;
+                if (levels != nullptr)
+                    for (int o : r.owners)
+                        if (juce::isPositiveAndBelow (o, (int) levels->size()))
+                            (*levels)[(size_t) o].joinLimiterDb = juce::jmin ((*levels)[(size_t) o].joinLimiterDb, reduction);
+                out.push_back (std::move (lg));
+            }
+            return out;
+        }
+
+        void applyLayerGains (juce::AudioBuffer<float>& buffer, const std::vector<LayerGains>& gains)
+        {
+            for (auto& lg : gains)
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                {
+                    float* d = buffer.getWritePointer (ch);
+                    const int n = juce::jmin ((int) lg.gains.size(), buffer.getNumSamples() - lg.start);
+                    for (int j = 0; j < n; ++j)
+                        d[lg.start + j] *= lg.gains[(size_t) j];
+                }
         }
     }
 
@@ -1096,7 +1477,7 @@ namespace mix
     {
         error.clear();
         RenderPlan plan;
-        const bool planned = makePlan (project, sampleRate, plan, error);
+        const bool planned = makePlan (project, sampleRate, project.stemsKey, plan, error);
         if (levels != nullptr)
             levels->assign ((size_t) plan.count, MixLevel());
         if (! planned)
@@ -1115,21 +1496,16 @@ namespace mix
                 continue;
             }
             const auto& sp = plan.segments[next++];
-            const auto& src = project.sources[(size_t) project.segments[(size_t) i].source];
-            const auto file = project.sourceFile (project.segments[(size_t) i].source);
-            if (! file.existsAsFile())
-            {
-                error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
-                return {};
-            }
-            juce::AudioBuffer<float> aligned;
-            if (! readLayer (project, sp, file, src.name, sampleRate, formats, shouldAbort, aligned, error))
-                return {};
+            float gain = 1.0f;
             std::vector<float> limiter;
-            const float gain = levelSegment (project, sp, aligned, sampleRate, limiter, levels != nullptr ? &(*levels)[(size_t) i] : nullptr);
-            addSegment (result, sp, aligned, gain, limiter, sampleRate);
+            if (! prepareSegment (project, sp, sampleRate, formats, shouldAbort, &result, gain, limiter,
+                                  levels != nullptr ? &(*levels)[(size_t) i] : nullptr, error))
+                return {};
             report();
         }
+        if (shouldAbort && shouldAbort())
+            return {};
+        applyLayerGains (result, layerLimiter (plan, result, sampleRate, levels));
         return result;
     }
 
@@ -1141,7 +1517,7 @@ namespace mix
     {
         error.clear();
         RenderPlan plan;
-        const bool planned = makePlan (project, sampleRate, plan, error);
+        const bool planned = makePlan (project, sampleRate, optionsKey, plan, error);
         if (levels != nullptr)
             levels->assign ((size_t) plan.count, MixLevel());
         if (! planned)
@@ -1151,35 +1527,33 @@ namespace mix
         auto report = [&] { ++done; if (progress) progress ((float) done / (float) steps); };
 
         // 1) La ganancia de cada tramo (con nivelado, medida en su fuente original, que es la suma de sus pistas): la
-        //    misma ganancia y el mismo limitador van después a cada pista, así las pistas siguen sumando el mix
+        //    misma ganancia y el mismo limitador van después a cada pista, así las pistas siguen sumando el mix. Si hay
+        //    zonas donde suenan varios tramos, la suma de los que las tocan: su limitador va igual a todas las pistas.
         std::vector<float> gains (plan.segments.size(), 1.0f);
         std::vector<std::vector<float>> limiters (plan.segments.size());
+        juce::AudioBuffer<float> sum;
+        if (! plan.layers.empty())
+        {
+            sum.setSize (2, plan.totalSamples);
+            sum.clear();
+        }
         for (size_t s = 0; s < plan.segments.size(); ++s)
         {
             if (shouldAbort && shouldAbort())
                 return false;
             const auto& sp = plan.segments[s];
-            const auto& seg = project.segments[(size_t) sp.index];
-            if (project.levelLufs < 0.0)
-            {
-                const auto& src = project.sources[(size_t) seg.source];
-                const auto file = project.sourceFile (seg.source);
-                if (! file.existsAsFile())
-                {
-                    error = tr ("No se encuentra la fuente «") + src.name + tr ("»");
-                    return false;
-                }
-                juce::AudioBuffer<float> aligned;
-                if (! readLayer (project, sp, file, src.name, sampleRate, formats, shouldAbort, aligned, error))
-                    return false;
-                gains[s] = levelSegment (project, sp, aligned, sampleRate, limiters[s], levels != nullptr ? &(*levels)[(size_t) sp.index] : nullptr);
-            }
-            else
-                gains[s] = juce::Decibels::decibelsToGain (juce::jlimit (-24.0f, 12.0f, seg.gainDb));
+            const bool touches = std::any_of (plan.layers.begin(), plan.layers.end(),
+                                              [&sp] (const LayerRegion& r) { return r.start < sp.reach1 && r.end > sp.reach0; });
+            if (! prepareSegment (project, sp, sampleRate, formats, shouldAbort, touches ? &sum : nullptr, gains[s], limiters[s],
+                                  levels != nullptr ? &(*levels)[(size_t) sp.index] : nullptr, error))
+                return false;
             report();
         }
+        const auto layerGains = plan.layers.empty() ? std::vector<LayerGains>() : layerLimiter (plan, sum, sampleRate, levels);
+        sum = juce::AudioBuffer<float>();
 
-        // 2) Cada pista: el mix armado con esa pista de cada fuente (una fuente que no la tenga, en silencio)
+        // 2) Cada pista: el mix armado con esa pista de cada fuente (una fuente que no la tenga, en silencio), con sus
+        //    ajustes en cada tramo
         for (auto& stem : stemFiles)
         {
             juce::AudioBuffer<float> out (2, plan.totalSamples);
@@ -1190,15 +1564,26 @@ namespace mix
                     return false;
                 const auto& sp = plan.segments[s];
                 const auto file = project.stemsFolder (project.segments[(size_t) sp.index].source, optionsKey).getChildFile (stem);
-                if (file.existsAsFile())
+                LayerWindow window;
+                bool muted = false;
+                for (auto& layer : sp.stems)
+                    if (layer.file == stem)
+                    {
+                        window = layer.window;
+                        muted = layer.muted;
+                        break;
+                    }
+                if (file.existsAsFile() && ! muted)
                 {
                     juce::AudioBuffer<float> aligned;
-                    if (! readLayer (project, sp, file, stem, sampleRate, formats, shouldAbort, aligned, error))
+                    int r0 = 0;
+                    if (! readLayer (project, sp, window, file, stem, sampleRate, formats, shouldAbort, aligned, r0, error))
                         return false;
-                    addSegment (out, sp, aligned, gains[s], limiters[s], sampleRate);
+                    addSegment (out, sp, window, aligned, r0, gains[s], limiters[s], sampleRate);
                 }
                 report();
             }
+            applyLayerGains (out, layerGains);
             if (! onStem (stem, out))
             {
                 if (error.isEmpty())
@@ -1258,6 +1643,15 @@ namespace mix
         for (int i : project.usedSources())
             analyses.add (Library::analysisToVar (project.sources[(size_t) i].analysis));
         o->setProperty ("analyses", analyses);
+        // Con ajustes por pista, la mezcla sin separar se arma con las pistas del mix (si están): cambia al separarlas
+        if (std::any_of (project.segments.begin(), project.segments.end(), [] (const MixSegment& s) { return s.hasStemSettings(); }))
+        {
+            o->setProperty ("stemsKey", project.stemsKey);
+            juce::Array<juce::var> ready;
+            for (int i : project.usedSources())
+                ready.add (! project.cachedStems (i, project.stemsKey).isEmpty());
+            o->setProperty ("stemsReady", ready);
+        }
         return juce::String::toHexString ((juce::int64) juce::JSON::toString (juce::var (o), true).hashCode64());
     }
 
@@ -1266,10 +1660,7 @@ namespace mix
         const MixPiece* old = nullptr;
         for (auto& p : from)
             if (p.outEnd > p.outStart && seconds >= p.outStart - 1.0e-6 && seconds < p.outEnd)
-            {
-                old = &p;
-                break;
-            }
+                old = &p;   // en un solape manda el que entra (el último)
         if (old == nullptr && ! from.empty() && std::abs (seconds - from.back().outEnd) < 1.0e-6)
             old = &from.back();   // justo en el final
         if (old == nullptr)

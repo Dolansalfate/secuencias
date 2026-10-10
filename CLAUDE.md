@@ -73,7 +73,17 @@ modelo que usa Moises).
   tramo: mover, quitar, duplicar, inicio y fin por compases, tempo propio, tono, ganancia,
   fundido cruzado (corte de 10 ms, 1 o 2 tiempos, 1 o 2 compases), compases de silencio antes (a su
   tempo y su compás: el click sigue contando, sirve de cuenta para entrar; panel "Silencio antes" o
-  clic derecho en el tramo; un bloque rayado en la línea del mix) y nombre. La línea del mix tiene una
+  clic derecho en el tramo; un bloque rayado en la línea del mix) y nombre. **Solape** (el mismo control
+  "Unión" por debajo de "seguido", o "Solape con el anterior" en el menú del tramo): el tramo entra N
+  compases antes de que termine el anterior y suenan juntos, con "Mezcla" baja el anterior, fundido
+  cruzado o los dos enteros; desde donde entra, el marcador, los compases, los acordes y el click son
+  los suyos; en la línea del mix el solape se dibuja partido (arriba el que sale, abajo el que entra).
+  **Pistas por tramo**: "Separar canciones (IA)" separa una vez las canciones del mix (las mismas
+  pistas que usa una canción ligada) y "Pistas..." en el panel del tramo (`StemsPanel`, en un
+  `CallOutBox`) silencia una pista en el tramo, la hace entrar N compases antes o seguir N compases
+  después (con el audio de su canción que rodea al tramo) o la corre en tiempos; "Escuchar el mix" y la
+  canción ligada se arman con esas pistas, y donde suenan dos tramos a la vez un limitador sobre la suma
+  baja los picos ("unión lim"). La línea del mix tiene una
   regla con los compases del mix (los de la canción que saldría, con los de silencio) sobre la del
   tiempo, y líneas tenues de compás sobre los tramos. "Escuchar el mix" y
   "Escuchar la unión" (4 s antes) renderizan a `mezcla.wav` y lo reproducen con el click opcional
@@ -889,9 +899,10 @@ Pasos de `run()`:
   nombre de cada fila (`isOnPlayButton`, solo con filas de 11 px o más) llama a `onMidiAudition`.
 
 ### 5.4i MixProject y MixEditor (armar mix antes de separar)
-- Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, levelLufs, sources: [{ name, file, length,
-  analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats, id, silenceBars }],
-  nextSegmentId }`),
+- Disco: `<raíz>/_mixes/<carpeta>/mix.json` (`{ name, bpm, keepTempos, levelLufs, stemsKey, sources: [{ name, file,
+  length, analysis }], segments: [{ source, start, end, label, playBpm, transpose, gainDb, fadeBeats, id, silenceBars,
+  overlapBars, overlapBlend, stems: [{ stem, muted, leadBars, tailBars, shiftBeats }] }], nextSegmentId }`; los campos
+  nuevos solo se escriben si cambian algo, así un mix de antes conserva su huella),
   `fuentes/` (copias de las canciones originales), `mezcla.wav` (último render, 44,1 kHz, 24 bits) y
   `pistas/<archivo>/<opciones>/` (las pistas separadas de cada canción original: una carpeta por
   archivo, con su extensión, y por opciones de separación, "4-0-0-1"; `pistas.json`: `{ options,
@@ -954,6 +965,37 @@ Pasos de `run()`:
   el espacio, marcas de tiempo si caben, líneas tenues sobre los tramos), el silencio dibujado rayado
   y `segmentAt` que lo cuenta como parte de su tramo.
   En la captura, `--mixtramos` también renderiza el mix (se ve el nivelado).
+  Solape: `MixSegment::overlapBars` (0 a 16; no con silencio ni en el primero) y `overlapBlend` (`blendFadeOut`,
+  `blendCrossfade`, `blendBoth`); `layout` pone `MixPlacement::overlap` (los compases pedidos que caben: menos que la
+  duración de cada tramo) y `outStart = fin del anterior - overlap`, sin audio previo (`fadeIn` 0); el anterior se
+  apaga a lo largo del solape (`fadeOut = overlap`, o 10 ms con los dos enteros) y con fundido cruzado el que entra
+  sube con un seno (`riseIn`, `SegmentPlan::rise`). `MixPlacement::barSeconds` es el compás del tramo en el mix.
+  `describeSong` corta los tiempos y acordes de cada tramo donde empieza el siguiente (`nextStart`), así en un solape
+  mandan los del que entra; `remapTime` elige el último tramo que contiene el instante.
+  Pistas por tramo: `MixSegment::stems` (`MixStemSettings`: `muted`, `leadBars`, `tailBars`, `shiftBeats`; los que no
+  cambian nada no se guardan; `stemSettings` acepta las partes de la batería con los ajustes de "drums.wav") y
+  `MixProject::stemsKey` (las pistas del mix, `pistas/<archivo>/<opciones>`). `makePlan (proyecto, sr, clave)`: un
+  tramo con ajustes cuya fuente está separada con esa clave se arma con sus pistas (`SegmentPlan::stems`, una
+  `StemLayer` con su `LayerWindow`: `lead`, `tail` con `tailFade` = un tiempo, `shift`); `readLayer` lee la ventana de
+  la capa (`layerRange`) y `addSegment` usa la entrada de 10 ms y la salida de la cola en vez de los fundidos del tramo
+  (el limitador del tramo vale solo en m0..m1). La ganancia del tramo se mide siempre en la fuente original
+  (`prepareSegment`). Las colas alargan el mix. `RenderPlan::layers` (`LayerRegion`: fundidos musicales, solapes,
+  pistas que entran antes o siguen; unidas si las separa menos que la anticipación más 5 · release) y
+  `layerLimiter` / `applyLayerGains`: limitador sobre la suma, enmascarado fuera de cada zona, con techo
+  `limiterCeilingDb`; `MixLevel::joinLimiterDb`. `render` usa `project.stemsKey` y aplica las ganancias a la suma;
+  `renderStems` usa la clave de la canción, suma antes los tramos que tocan una zona (`reach0`/`reach1`) para calcular
+  el limitador y lo aplica igual a cada pista (siguen sumando el mix). `renderSignature` incluye `stemsKey` y qué
+  fuentes están separadas solo si hay ajustes por pista. `bestCachedStemsKey` elige las pistas ya separadas que
+  cubren más fuentes (`openMix` las adopta si el mix no tiene `stemsKey`).
+  En el editor: el control "Unión" (`silenceValue`, `gapOf` / `gapBy` / `setGap`: > 0 silencio, < 0 solape, acotado a
+  `maxOverlapBars`; en naranja si el solape pedido no cabe entero), `fadeBox` en dos modos (`fadeBoxMode`: fundidos o
+  mezcla del solape, ids 11 a 13), submenú "Solape con el anterior" (ids 200 + compases y 300 + mezcla) y "Pistas del
+  tramo..." (id 7); `blockParts` parte el bloque (arriba el que sale, abajo el que entra) para la onda, el borde, el
+  título y la selección, `segmentAt (t, y)` elige por la mitad, y las barras al pie muestran las pistas que entran
+  antes o siguen. `StemsPanel` (en un `CallOutBox` sobre el componente principal, no una ventana aparte) sigue al tramo
+  por id, se refresca con cada edición (`changed`, `refreshFromProject`) y no toca el editor si ya murió (`guard`);
+  `stemFiles` (`refreshStems`) guarda las pistas de cada fuente con `stemsKey`. `--captura --mix=... --mixpistas`
+  abre el panel del tramo elegido y `--mixseparar` pulsa "Separar canciones".
 - En `MainComponent`: `openMix` descarga la canción (`unloadSong`; se recuerda por carpeta en
   `mixReturnFolder`, que se conserva al pasar de un mix a otro) y pone el editor encima del área
   de la canción; no se abre mientras la canción se analiza o se nivela (el resultado se aplica a
@@ -998,7 +1040,10 @@ Pasos de `run()`:
   falló (`failedMixRebuilds`, también si su separación falló o se canceló: `mixSongJobFailed`) cargan
   como están. `effectiveOptions` quita Roformer y DrumSep si audio-separator ya no está (la clave
   guardada es la de lo que se separó). Si el mix se borra mientras se separa, el resultado se
-  descarta. `mixSongBuilds` cuenta los armados en curso (`isMixBusy` los espera). Un marcador del mix
+  descarta, y también si la canción se quitó del mix mientras se separaba (no quedan pistas huérfanas). "Separar
+  canciones" (`separateMixSources`) usa la misma cola con `MixSongJob::separateOnly` (sin armar canción): pone
+  `stemsKey` con las opciones de arriba y separa las fuentes usadas que falten; `noteMixStems` le da al mix las pistas de
+  una separación si no tenía otras. `mixSongBuilds` cuenta los armados en curso (`isMixBusy` los espera). Un marcador del mix
   renombrado o movido a mano pasa a ser propio (`fromMix = false`). El menú de
   tramos de una canción ligada (`linkedSongMenu`) y Shift + arrastre remiten al mix; "Separar canción
   (IA)" también; `openLinkedMix`, `unlinkSong`; borrar un mix desliga sus canciones.
@@ -1172,7 +1217,10 @@ Pasos de `run()`:
   las de la canción en WAV de coma flotante: unos 30 MB por minuto y pista); lo que se edite en la
   canción sobre la grilla (tiempos, acordes, secciones de tempo) se rehace al actualizarla desde el
   mix (se editan en el mix), y las tomas grabadas en ella no se reubican; con estirado, las pistas no
-  suman el mix muestra a muestra (cada una se estira por separado).
+  suman el mix muestra a muestra (cada una se estira por separado). Pistas por tramo: solo con las
+  canciones separadas (sin pistas, los ajustes no suenan; el panel lo avisa); lo que caiga en la cola de
+  una pista que sigue después del último tramo no se reubica al actualizar la canción; con varios solapes
+  seguidos en tramos cortos (tres a la vez) la línea del mix los dibuja aproximados.
 - Grabación: la alineación confía en las latencias que informa el dispositivo (con PipeWire
   o ALSA suelen ser correctas; si no, está la compensación extra en ms). Saltar con el cabezal
   durante una toma desalinea lo grabado después del salto (la toma se alinea por su inicio).
@@ -1232,6 +1280,14 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.9.0 (solapes y pistas por tramo)**: solape entre tramos (`overlapBars`, `overlapBlend`, `MixPlacement::overlap`,
+  `riseIn`, `barSeconds`; tiempos, acordes y marcador del que entra; `remapTime` por el último tramo), ajustes por pista
+  en cada tramo (`MixStemSettings`, `MixProject::stemsKey`, `bestCachedStemsKey`; render por capas con `LayerWindow`,
+  `prepareSegment` y limitador de las zonas con varias capas, `MixLevel::joinLimiterDb`), "Separar canciones (IA)" en el
+  armado de mix (`separateMixSources`, `MixSongJob::separateOnly`, `noteMixStems`), `StemsPanel`, control "Unión" y
+  selector de mezcla en el panel del tramo, solape dibujado en dos mitades y colas de pistas en la línea del mix,
+  `--mixpistas` y `--mixseparar`. De paso: una separación de una canción que se quitó del mix no guarda sus pistas, y el
+  pie del mix muestra el largo renderizado.
 - **v0.8.1**: armar mix con compases de silencio antes de un tramo (`silenceBars`, el click sigue en el
   silencio, sin fundido a través de él) y regla de compases en la línea del mix (`mixBeats`, `drawBars`);
   `mix::meterOf`; con `--mixtramos` la captura elige el último tramo aunque el mix ya tenga tramos.

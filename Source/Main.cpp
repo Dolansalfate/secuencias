@@ -36,13 +36,15 @@ public:
                 captureTriggerBank = commandLine.fromFirstOccurrenceOf ("--trigger=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
             if (commandLine.contains ("--instrumento="))
                 captureInstrument = commandLine.fromFirstOccurrenceOf ("--instrumento=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
-            // Armar mix: --mix=<nombre> [--mixfuentes=/a.wav,/b.wav] [--mixtramos] [--mixcancion=1|2] [--mixsel=8-12]
+            // Armar mix: --mix=<nombre> [--mixfuentes=/a.wav,/b.wav] [--mixtramos] [--mixcancion=1|2] [--mixsel=8-12] [--mixpistas] [--mixseparar]
             if (commandLine.contains ("--mix="))
                 captureMix = commandLine.fromFirstOccurrenceOf ("--mix=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted();
             if (commandLine.contains ("--mixfuentes="))
                 captureMixSources.addTokens (commandLine.fromFirstOccurrenceOf ("--mixfuentes=", false, false)
                                                         .upToFirstOccurrenceOf (" ", false, false).unquoted(), ",", "");
             captureMixSegments = hasFlag ("--mixtramos");
+            captureMixStems = hasFlag ("--mixpistas");
+            captureMixSeparate = hasFlag ("--mixseparar");
             if (commandLine.contains ("--mixsel="))
             {
                 const auto range = commandLine.fromFirstOccurrenceOf ("--mixsel=", false, false).upToFirstOccurrenceOf (" ", false, false);
@@ -100,7 +102,8 @@ public:
             if (captureTriggerBank.isNotEmpty()) mc->setTriggerForCapture (captureTriggerBank);
             if (captureInstrument.isNotEmpty()) mc->setInstrumentForCapture (captureInstrument);
             if (captureMix.isNotEmpty()) mc->openMixForCapture (captureMix, captureMixSources, captureMixSegments, captureMixCreate,
-                                                                captureMixSelection.getStart(), captureMixSelection.getEnd());
+                                                                captureMixSelection.getStart(), captureMixSelection.getEnd(), captureMixStems,
+                                                                captureMixSeparate);
             if (captureMidiTrack) mc->createMidiTrackForCapture();
             if (captureSeparate) mc->separateCurrentSong();
             if (captureSeparateDrums) mc->separateDrumsOfCurrentSong();
@@ -192,7 +195,7 @@ private:
     juce::File captureFile, captureStageFile;
     juce::String captureTriggerBank, captureInstrument, captureMix;
     juce::StringArray captureMixSources;
-    bool captureMixSegments = false, captureMidiTrack = false;
+    bool captureMixSegments = false, captureMidiTrack = false, captureMixStems = false, captureMixSeparate = false;
     int captureMixCreate = 0;
     juce::Range<int> captureMixSelection { -1, -1 };   // compases de la selección en la primera fuente (--mixsel)
     bool captureLive = false, captureAnalyze = false, captureLevel = false, captureSeparate = false, captureSelector = false, captureAnalysisStarted = false;

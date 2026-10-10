@@ -4234,6 +4234,14 @@ void MainComponent::openMix (const juce::File& folder)
                                                 tr ("No se pudo abrir el mix de ") + folder.getFullPathName());
         return;
     }
+    // Las pistas ya separadas de sus canciones (por ejemplo, al crear una canción ligada) sirven para los ajustes por
+    // pista de los tramos
+    if (project->stemsKey.isEmpty())
+        if (const auto key = project->bestCachedStemsKey (separationKey (effectiveOptions (selectedOptions()))); key.isNotEmpty())
+        {
+            project->stemsKey = key;
+            project->save();
+        }
     // Canción a la que se vuelve al cerrar: al pasar de un mix a otro se conserva la de antes
     juce::File returnFolder = mixReturnFolder;
     if (mixEditor == nullptr)
@@ -4295,6 +4303,7 @@ void MainComponent::openMix (const juce::File& folder)
             applyMixPreviewGrid (mixRenderedInfo.analysis);
     };
     ed->onCreateSong = [this] { createSongFromMix(); };
+    ed->onSeparateSources = [this] { separateMixSources(); };
     ed->onClose = [this]
     {
         // No se destruye el editor dentro de su propio botón: después
@@ -4862,6 +4871,7 @@ void MainComponent::renderMix (std::function<void (bool)> then)
         SongInfo meta;
         std::vector<MixLevel> levels;
         double mixLufs = loudness::unknown;
+        double renderedSeconds = 0.0;   // con pistas que siguen después del último tramo, más que mix::length
         try
         {
             auto abort = [this, gen] { return gen != mixGeneration.load() || abortJobs.load(); };
@@ -4874,6 +4884,7 @@ void MainComponent::renderMix (std::function<void (bool)> then)
                 });
             };
             auto buffer = mix::render (copy, mix::renderSampleRate, formatManager, abort, progress, error, &levels);
+            renderedSeconds = (double) buffer.getNumSamples() / mix::renderSampleRate;
             if (buffer.getNumSamples() > 0)
             {
                 // Sin margen se recortaría al escribir en 24 bits (y la distorsión pasaría a los stems):
@@ -4899,7 +4910,7 @@ void MainComponent::renderMix (std::function<void (bool)> then)
         }
         catch (const std::bad_alloc&) { error = tr ("No hay memoria suficiente para preparar el mix"); }
         catch (const std::exception& e) { error = tr ("Error al preparar el mix: ") + juce::String (e.what()); }
-        juce::MessageManager::callAsync ([safe, ok, error, version, gen, then, meta, reducedDb, levels, mixLufs]
+        juce::MessageManager::callAsync ([safe, ok, error, version, gen, then, meta, reducedDb, levels, mixLufs, renderedSeconds]
         {
             auto* self = safe.getComponent();
             if (self == nullptr || gen != self->mixGeneration.load())
@@ -4919,9 +4930,9 @@ void MainComponent::renderMix (std::function<void (bool)> then)
                     double deepest = 0.0;
                     for (auto& lv : levels)
                     {
-                        limited += lv.limiterDb < -0.1 ? 1 : 0;
+                        limited += lv.limiterDb < -0.1 || lv.joinLimiterDb < -0.1 ? 1 : 0;
                         below += lv.belowTarget ? 1 : 0;
-                        deepest = juce::jmin (deepest, lv.limiterDb);
+                        deepest = juce::jmin (deepest, lv.limiterDb, lv.joinLimiterDb);
                     }
                     auto count = [] (int n) { return juce::String (n) + (n == 1 ? tr (" tramo") : tr (" tramos")); };
                     level = tr (" · ") + juce::String (mixLufs, 1).replaceCharacter ('.', ',') + " LUFS"
@@ -4934,7 +4945,7 @@ void MainComponent::renderMix (std::function<void (bool)> then)
                 {
                     if (version == self->mixVersion)
                         self->mixEditor->setSegmentLevels (levels);
-                    self->mixEditor->setStatus (tr ("Mix listo: ") + ui::formatTime (self->mixProject != nullptr ? mix::length (*self->mixProject) : 0.0)
+                    self->mixEditor->setStatus (tr ("Mix listo: ") + ui::formatTime (renderedSeconds)
                                                 + level
                                                 + (reducedDb > 0.05f ? tr (" · se bajó ") + juce::String (reducedDb, 1) + tr (" dB para no saturar") : juce::String())
                                                 + tr (" · clic en «Click» para comprobar las uniones con el metrónomo"));
@@ -5072,7 +5083,7 @@ void MainComponent::startMixSong (bool separate, const juce::String& name)
     if (mixSongJob.active || mixSongBuilds > 0)
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Crear canción"),
-                                                tr ("Ya se está armando una canción con un mix. Espera a que termine."));
+                                                tr ("Ya se están separando o armando canciones de un mix. Espera a que termine."));
         return;
     }
     if (separate && separator.getState() == Separator::State::running)
@@ -5148,8 +5159,101 @@ void MainComponent::continueMixSongJob()
         return;
     }
     const auto build = mixSongJob.build;
+    const bool separateOnly = mixSongJob.separateOnly;
     mixSongJob = MixSongJob();
+    if (separateOnly)
+    {
+        sepLabel.setText (tr ("Canciones del mix «") + build.name + tr ("» separadas"), juce::dontSendNotification);
+        if (mixProject != nullptr && mixProject->folder == build.mixFolder && mixEditor != nullptr)
+        {
+            ++mixVersion;   // los tramos con ajustes por pista suenan ahora con sus pistas
+            mixEditor->refresh();
+            mixEditor->setStatus (tr ("Canciones separadas: «Pistas...» en el panel del tramo (o clic derecho en el tramo)"));
+        }
+        return;
+    }
     buildMixSong (build);
+}
+
+void MainComponent::separateMixSources()
+{
+    if (mixProject == nullptr)
+        return;
+    if (mixSongJob.active || mixSongBuilds > 0)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Separar canciones"),
+                                                tr ("Ya se están separando o armando canciones de un mix. Espera a que termine."));
+        return;
+    }
+    if (separator.getState() == Separator::State::running)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Separar canciones"),
+                                                tr ("Ya hay una separación en curso. Espera a que termine."));
+        return;
+    }
+    if (mixProject->segments.empty())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Separar canciones"),
+                                                tr ("Se separan las canciones que usa el mix: agrega tramos primero."));
+        return;
+    }
+    // Cada canción se separa una vez (sus pistas quedan en el mix, las mismas que usa una canción ligada con estas
+    // opciones). Desde ya, el mix usa las pistas de estas opciones (las que ya estén suenan enseguida).
+    const auto options = effectiveOptions (selectedOptions());
+    const auto key = separationKey (options);
+    MixSongJob job;
+    job.active = true;
+    job.separateOnly = true;
+    job.build.mixFolder = mixProject->folder;
+    job.build.name = mixProject->name;
+    job.build.separated = true;
+    job.build.options = key;
+    job.options = options;
+    for (int i : mixProject->usedSources())
+        if (mixProject->cachedStems (i, key).isEmpty())
+            job.pending.add (mixProject->sources[(size_t) i].fileName);
+    job.total = job.pending.size();
+    if (mixProject->stemsKey != key)
+    {
+        mixProject->stemsKey = key;
+        mixProject->save();
+        ++mixVersion;
+    }
+    if (mixEditor != nullptr)
+        mixEditor->refresh();
+    if (job.pending.isEmpty())
+    {
+        if (mixEditor != nullptr)
+            mixEditor->setStatus (tr ("Las canciones del mix ya están separadas con estas opciones: «Pistas...» en el panel del tramo"));
+        return;
+    }
+    mixSongJob = job;
+    if (mixEditor != nullptr)
+        mixEditor->setStatus (tr ("Separando ") + juce::String (job.total) + (job.total == 1 ? tr (" canción del mix") : tr (" canciones del mix"))
+                              + tr (" (una vez: sus pistas quedan en el mix)..."));
+    continueMixSongJob();
+}
+
+void MainComponent::noteMixStems (const juce::File& mixFolder, const juce::String& key)
+{
+    if (mixProject != nullptr && mixProject->folder == mixFolder)
+    {
+        if (mixProject->stemsKey.isEmpty())
+        {
+            mixProject->stemsKey = key;
+            mixProject->save();
+            ++mixVersion;
+        }
+        if (mixEditor != nullptr)
+            mixEditor->refresh();   // la canción ya aparece como separada
+        return;
+    }
+    MixProject onDisk;
+    if (MixProject::load (mixFolder, onDisk) && onDisk.stemsKey.isEmpty())
+    {
+        onDisk.stemsKey = key;
+        onDisk.save();
+    }
 }
 
 // La cola de separaciones de una canción ligada no pudo seguir (falló, se canceló o no hay Demucs). Si era para
@@ -5580,11 +5684,12 @@ bool MainComponent::isMixBusy() const
         return false;
     return mixCopyJobs > 0 || mixAnalyzingFile.isNotEmpty() || ! mixAnalysisQueue.empty() || mixRendering
            || (mixCapture.autoSegments && ! (mixCapture.segmentsDone && mixCapture.renderStarted)) || ! mixCapture.selectionDone
-           || (mixCapture.createMode > 0 && ! mixCapture.createStarted);
+           || (mixCapture.createMode > 0 && ! mixCapture.createStarted) || (mixCapture.stemsPanel && ! mixCapture.stemsPanelShown)
+           || (mixCapture.separate && ! mixCapture.separateStarted);
 }
 
 void MainComponent::openMixForCapture (const juce::String& name, const juce::StringArray& sourceFiles, bool autoSegments, int createMode,
-                                       int selectFirstBar, int selectLastBar)
+                                       int selectFirstBar, int selectLastBar, bool stemsPanel, bool separate)
 {
     library.mixesFolder().createDirectory();
     auto folder = library.mixesFolder().getChildFile (juce::File::createLegalFileName (name));
@@ -5602,6 +5707,8 @@ void MainComponent::openMixForCapture (const juce::String& name, const juce::Str
     mixCapture.selFirst = selectFirstBar;
     mixCapture.selLast = selectLastBar;
     mixCapture.selectionDone = selectFirstBar < 0;
+    mixCapture.stemsPanel = stemsPanel;
+    mixCapture.separate = separate;
     // Las fuentes que falten entran por el mismo camino que "+ Canción" (copia en segundo plano)
     juce::Array<juce::File> missing;
     for (auto& path : sourceFiles)
@@ -5670,6 +5777,21 @@ void MainComponent::mixCaptureStep()
             mixEditor->selectSource (0);
             mixEditor->selectBars (mixCapture.selFirst, mixCapture.selLast);
         }
+    }
+    if (mixCapture.separate && ! mixCapture.separateStarted)
+    {
+        mixCapture.separateStarted = true;
+        separateMixSources();
+        return;
+    }
+    if (mixCapture.stemsPanel && ! mixCapture.stemsPanelShown)
+    {
+        // El tramo elegido (con --mixtramos, el último) y sus pistas
+        mixCapture.stemsPanelShown = true;
+        if (mixEditor->getSelectedSegment() < 0 && ! mixProject->segments.empty())
+            mixEditor->selectSegment ((int) mixProject->segments.size() - 1);
+        mixEditor->showStemsPanel();
+        return;
     }
     if (mixCapture.createMode > 0 && ! mixCapture.createStarted)
     {
@@ -6241,14 +6363,35 @@ void MainComponent::timerCallback()
         // Una canción original de un mix: sus pistas quedan en el mix (una vez) y sigue la cola (si el mix se borró
         // mientras tanto, no se guardan: no quedaría una carpeta huérfana de cientos de MB)
         const bool mixExists = mixSongJob.build.mixFolder.getChildFile ("mix.json").existsAsFile();
-        const bool stored = mixExists && MixProject::storeStems (mixSongJob.build.mixFolder, mixSongJob.current, separator.getResultFolder(),
+        // La canción pudo quitarse del mix mientras se separaba: sus pistas no se guardan (quedarían huérfanas)
+        bool stillUsed = mixExists;
+        if (mixExists)
+        {
+            if (mixProject != nullptr && mixProject->folder == mixSongJob.build.mixFolder)
+                stillUsed = mixSourceIndex (mixSongJob.current) >= 0;
+            else
+            {
+                MixProject onDisk;
+                const auto file = mixSongJob.current;
+                stillUsed = MixProject::load (mixSongJob.build.mixFolder, onDisk)
+                            && std::any_of (onDisk.sources.begin(), onDisk.sources.end(), [&file] (const MixSource& s) { return s.fileName == file; });
+            }
+        }
+        const bool stored = stillUsed && MixProject::storeStems (mixSongJob.build.mixFolder, mixSongJob.current, separator.getResultFolder(),
                                                                  mixSongJob.build.options);
+        const auto separatedFile = mixSongJob.current;
         separator.reset();
         mixSongJob.current.clear();
         if (! mixExists)
         {
             mixSongJob = MixSongJob();
             sepLabel.setText (tr ("El mix se borró: la separación se descarta"), juce::dontSendNotification);
+        }
+        else if (! stillUsed)
+        {
+            sepLabel.setText (tr ("«") + separatedFile.upToLastOccurrenceOf (".", false, false) + tr ("» ya no está en el mix: sus pistas se descartan"),
+                              juce::dontSendNotification);
+            continueMixSongJob();
         }
         else if (! stored)
         {
@@ -6258,7 +6401,10 @@ void MainComponent::timerCallback()
                                                     tr ("No se pudieron guardar las pistas separadas en el mix."));
         }
         else
+        {
+            noteMixStems (mixSongJob.build.mixFolder, mixSongJob.build.options);
             continueMixSongJob();
+        }
     }
     else if (st == Separator::State::done && separationTarget != juce::File())
     {

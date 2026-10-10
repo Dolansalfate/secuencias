@@ -13,8 +13,9 @@
 // Partes: cabecera (nombre, tempo del mix, "Cada tramo a su tempo", Crear canción, Cerrar);
 // columna de canciones (fuentes con su estado); vista de la fuente elegida (forma de onda con
 // compases, selección ajustada a compases o tiempos y a la transiente, escuchar, agregar al mix);
-// línea del mix (tramos en orden con su forma de onda, uniones, cabezal) y panel del tramo
-// elegido (mover, quitar, inicio y fin por compases, tempo, tono, ganancia, fundido, nombre).
+// línea del mix (tramos en orden con su forma de onda, uniones, solapes, cabezal) y panel del tramo
+// elegido (mover, quitar, inicio y fin por compases, tempo, tono, ganancia, fundido o mezcla del solape,
+// silencio o solape con el anterior, nombre, y "Pistas..." con los ajustes por pista del tramo).
 class MixEditor : public juce::Component
 {
 public:
@@ -45,6 +46,7 @@ public:
     void selectSegment (int);
     // Selección de los compases first a last de la fuente elegida, como si se escribieran en la cabecera
     void selectBars (int firstBar, int lastBar);
+    void showStemsPanel();   // "Pistas del tramo" del tramo elegido (como el botón "Pistas...")
 
     // --- Avisos al dueño ---
     std::function<void()> onChanged;                              // tramos, tempo o análisis editados: guardar, render viejo
@@ -56,6 +58,9 @@ public:
     std::function<void()> onStop;
     std::function<void (bool on)> onClickToggled;                 // click al escuchar (para comprobar los tiempos)
     std::function<void()> onCreateSong;
+    // "Separar canciones": separar con IA las canciones del mix (las opciones de la barra de arriba) para los ajustes por
+    // pista de los tramos; al terminar, el dueño pone project->stemsKey y llama a refresh()
+    std::function<void()> onSeparateSources;
     std::function<void()> onClose;
     std::function<void (const juce::String& newName)> onRename;   // el dueño renombra la carpeta si puede
     // Ajusta un corte a la transiente (lo hace el dueño con mix::refineToOnset); si no está, no se ajusta

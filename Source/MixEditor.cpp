@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <utility>
 
 namespace
 {
@@ -292,6 +293,10 @@ namespace
         juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override
         {
             return ui::font (juce::jmin (13.0f, (float) buttonHeight * 0.55f));
+        }
+        juce::Font getComboBoxFont (juce::ComboBox& box) override
+        {
+            return ui::font (juce::jmin (13.0f, (float) box.getHeight() * 0.55f));
         }
     };
 }
@@ -844,16 +849,31 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             repaint (x - 8, 0, 17, getHeight());
         }
 
-        int segmentAt (double t) const
+        // El tramo en ese instante (con su silencio antes). En un solape suenan dos: arriba el que sale, abajo el que
+        // entra (sin `y`, el que entra)
+        int segmentAt (double t, int y = -1) const
         {
             const auto& places = impl.placements;
+            int found = -1;
             for (int i = 0; i < (int) places.size(); ++i)
             {
                 const auto& p = places[(size_t) i];
-                if (p.outEnd > p.outStart && t >= p.outStart - p.silence && t < p.outEnd)   // su silencio antes, también
-                    return i;
+                if (p.outEnd <= p.outStart || t < p.outStart - p.silence || t >= p.outEnd)
+                    continue;
+                if (found < 0 || y < 0)
+                    found = i;
+                else if ((float) (y - rulerHeight) - blockPad >= 0.5f * ((float) (getHeight() - rulerHeight) - 2.0f * blockPad))
+                    found = i;
             }
-            return -1;
+            return found;
+        }
+
+        template <typename Part>   // Impl::BlockPart (se declara después)
+        juce::Rectangle<float> partArea (const Part& part, float top, float bottom) const
+        {
+            const float a = timeToX (part.from), b = timeToX (part.to);
+            const float y0 = top + part.top * (bottom - top), y1 = top + part.bottom * (bottom - top);
+            return { a, y0, b - a, y1 - y0 };
         }
 
         void resized() override
@@ -935,8 +955,26 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
                 if (p.outEnd <= p.outStart || b < 0.0f || a > (float) w)
                     continue;
                 const auto colour = ui::trackColour (seg.source);
+                const auto parts = impl.blockParts (i);
                 g.setColour (colour.withAlpha (0.7f));
-                g.drawRect (juce::Rectangle<float> (a, top, b - a, bottom - top), 1.0f);
+                for (auto& part : parts)
+                    g.drawRect (partArea (part, top, bottom), 1.0f);
+                // Solape: cómo se mezclan (el anterior baja en la mitad de arriba; con fundido cruzado, este sube en la de abajo)
+                if (p.overlap > 0.0)
+                {
+                    const float mid = 0.5f * (top + bottom), x1 = timeToX (p.outStart + p.overlap);
+                    if (seg.overlapBlend == MixSegment::blendCrossfade)
+                    {
+                        g.setColour (colour);
+                        g.drawLine (a, bottom - 2.0f, x1, mid + 2.0f, 1.5f);
+                    }
+                    if (seg.overlapBlend != MixSegment::blendBoth)
+                        if (const int prev = impl.previousSounding (i); prev >= 0)
+                        {
+                            g.setColour (ui::trackColour (proj->segments[(size_t) prev].source));
+                            g.drawLine (a, top + 2.0f, x1, mid - 2.0f, 1.5f);
+                        }
+                }
                 // Fundido cruzado: rampa desde donde el tramo empieza a entrar hasta la unión
                 if (i > 0 && seg.fadeBeats > 0.0 && p.fadeIn > 0.0)
                 {
@@ -948,9 +986,11 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
                     g.setColour (colour);
                     g.strokePath (ramp, juce::PathStrokeType (1.0f));
                 }
-                if (b - a >= 24.0f)
+                if (b - a >= 24.0f && ! parts.empty())
                 {
-                    const auto line = juce::Rectangle<float> (juce::jmax (a, 0.0f) + 5.0f, top + 2.0f, b - juce::jmax (a, 0.0f) - 9.0f, 15.0f);
+                    // En la primera parte (con solape, en la mitad de abajo, donde entra)
+                    const float titleTop = partArea (parts.front(), top, bottom).getY();
+                    const auto line = juce::Rectangle<float> (juce::jmax (a, 0.0f) + 5.0f, titleTop + 2.0f, b - juce::jmax (a, 0.0f) - 9.0f, 15.0f);
                     g.setColour (juce::Colours::white);
                     g.setFont (ui::font (12.0f, true));
                     g.drawText (impl.segmentTitle (i), line, juce::Justification::centredLeft, true);
@@ -969,13 +1009,53 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
             // Tramo elegido
             const int chosen = impl.selectedSegment();
             if (chosen >= 0 && chosen < count)
+                for (auto& part : impl.blockParts (chosen))
+                {
+                    const auto block = partArea (part, top, bottom);
+                    g.setColour (ui::accent.withAlpha (0.1f));
+                    g.fillRect (block);
+                    g.setColour (ui::accent);
+                    g.drawRect (block.expanded (1.0f), 2.0f);
+                }
+
+            // Pistas que entran antes o siguen después (ajustes por pista, con las canciones separadas): barras al pie,
+            // una fila por pista
+            g.setFont (ui::font (10.0f, true));
+            for (int i = 0; i < count; ++i)
             {
-                const auto& p = places[(size_t) chosen];
-                const auto block = juce::Rectangle<float> (timeToX (p.outStart), top, timeToX (p.outEnd) - timeToX (p.outStart), bottom - top);
-                g.setColour (ui::accent.withAlpha (0.1f));
-                g.fillRect (block);
-                g.setColour (ui::accent);
-                g.drawRect (block.expanded (1.0f), 2.0f);
+                const auto& p = places[(size_t) i];
+                const auto& seg = proj->segments[(size_t) i];
+                if (p.outEnd <= p.outStart || ! seg.hasStemSettings() || ! impl.stemsReady (seg.source))
+                    continue;
+                const auto colour = ui::trackColour (seg.source);
+                int row = 0;
+                for (auto& st : seg.stems)
+                {
+                    if (st.muted || (st.leadBars <= 0 && st.tailBars <= 0))
+                        continue;
+                    const float y = bottom - 14.0f * (float) ++row;
+                    const auto name = Library::stemDisplayName (st.stem.upToLastOccurrenceOf (".", false, false));
+                    auto bar = [&] (double from, double to)
+                    {
+                        const float x0 = timeToX (from), x1 = timeToX (to);
+                        if (x1 < 0.0f || x0 > (float) w || x1 - x0 < 1.0f)
+                            return;
+                        const juce::Rectangle<float> r (x0, y, x1 - x0, 12.0f);
+                        g.setColour (colour.withAlpha (0.55f));
+                        g.fillRoundedRectangle (r, 3.0f);
+                        g.setColour (colour);
+                        g.drawRoundedRectangle (r, 3.0f, 1.0f);
+                        if (juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), name) + 6 <= (int) r.getWidth())
+                        {
+                            g.setColour (juce::Colours::white);
+                            g.drawText (name, r.reduced (3.0f, 0.0f), juce::Justification::centredLeft, true);
+                        }
+                    };
+                    if (st.leadBars > 0)
+                        bar (p.outStart - st.leadBars * p.barSeconds, p.outStart);
+                    if (st.tailBars > 0)
+                        bar (p.outEnd, p.outEnd + st.tailBars * p.barSeconds);
+                }
             }
 
             // La unión que no cae en un tiempo (un borde en el inicio o el final de la canción, o elegido
@@ -1059,7 +1139,7 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
                 return;
             impl.sourceWasLast = false;
             const double t = timeAt (e.x);
-            const int segment = e.y >= rulerHeight ? segmentAt (xToTime (e.x)) : -1;
+            const int segment = e.y >= rulerHeight ? segmentAt (xToTime (e.x), e.y) : -1;
             if (e.mods.isPopupMenu())
             {
                 if (segment >= 0)
@@ -1136,24 +1216,29 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
                 const auto& seg = proj->segments[(size_t) i];
                 if (p.outEnd <= p.outStart)
                     continue;
-                const float a = timeToX (p.outStart), b = timeToX (p.outEnd);
-                if (b < 0.0f || a > (float) w)
-                    continue;
                 const auto colour = ui::trackColour (seg.source);
-                ig.setColour (colour.withAlpha (0.15f));
-                ig.fillRect (a, top, b - a, bottom - top);
                 const auto* pk = impl.peaksFor (seg.source);
-                const int xa = juce::jmax (0, (int) std::ceil (a)), xb = juce::jmin (w, (int) std::floor (b));
-                if (pk == nullptr || xb <= xa)
-                    continue;
-                // Cada píxel del bloque corresponde a un instante de la fuente (razón constante)
                 const double ratio = p.ratio > 1.0e-6 ? p.ratio : 1.0;
-                const double from = p.srcStart + (xToTime (xa) - p.outStart) / ratio;
-                const double to = p.srcStart + (xToTime (xb) - p.outStart) / ratio;
-                const float waveTop = bottom - top > 90.0f ? top + (float) textHeight : top;
-                ig.setColour (colour.withAlpha (0.7f));
-                drawPeaks (ig, *pk, from, to, xa, xb - xa, waveTop + 2.0f, bottom - waveTop - 4.0f,
-                           juce::Decibels::decibelsToGain (seg.gainDb));
+                bool first = true;
+                for (auto& part : impl.blockParts (i))   // en un solape, cada uno en su mitad
+                {
+                    const auto area = partArea (part, top, bottom);
+                    const bool titled = std::exchange (first, false);   // el título va en la primera parte
+                    if (area.getRight() < 0.0f || area.getX() > (float) w)
+                        continue;
+                    ig.setColour (colour.withAlpha (0.15f));
+                    ig.fillRect (area);
+                    const int xa = juce::jmax (0, (int) std::ceil (area.getX())), xb = juce::jmin (w, (int) std::floor (area.getRight()));
+                    if (pk == nullptr || xb <= xa)
+                        continue;
+                    // Cada píxel del bloque corresponde a un instante de la fuente (razón constante)
+                    const double from = p.srcStart + (xToTime (xa) - p.outStart) / ratio;
+                    const double to = p.srcStart + (xToTime (xb) - p.outStart) / ratio;
+                    const float waveTop = titled && area.getHeight() > 90.0f ? area.getY() + (float) textHeight : area.getY();
+                    ig.setColour (colour.withAlpha (0.7f));
+                    drawPeaks (ig, *pk, from, to, xa, xb - xa, waveTop + 2.0f, area.getBottom() - waveTop - 4.0f,
+                               juce::Decibels::decibelsToGain (seg.gainDb));
+                }
             }
         }
 
@@ -1162,6 +1247,257 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
         bool imageValid = false;
         bool whole = true;
         bool rulerDrag = false;
+    };
+
+    //==========================================================================
+    // "Pistas del tramo" (en un globo junto al botón "Pistas..."): una fila por pista separada de la canción del
+    // tramo, con silenciar, entrar antes, seguir después y correr. Sigue al tramo por su id (deshacer o mover tramos
+    // no la confunden); si el tramo ya no está, se cierra. Vive en un CallOutBox que puede durar un instante más que
+    // el editor: no usa nada del editor si ya no está (`guard`).
+    class StemsPanel : public juce::Component
+    {
+    public:
+        StemsPanel (Impl& i, int segmentId) : impl (i), guard (i.alive), id (segmentId)
+        {
+            title.setFont (ui::font (14.0f, true));
+            title.setColour (juce::Label::textColourId, juce::Colours::white);
+            title.setInterceptsMouseClicks (false, false);
+            styleCaption (hint, {});
+            hint.setJustificationType (juce::Justification::topLeft);
+            hint.setMinimumHorizontalScale (1.0f);
+            styleCaption (leadCaption, "Entra antes", juce::Justification::centred);
+            styleCaption (tailCaption, tr ("Sigue después"), juce::Justification::centred);
+            styleCaption (shiftCaption, "Correr", juce::Justification::centred);
+            resetBtn.setButtonText ("Restablecer");
+            resetBtn.onClick = [this] { resetAll(); };
+            separateBtn.setButtonText (tr ("Separar las canciones del mix (IA)"));
+            separateBtn.setColour (juce::TextButton::buttonColourId, ui::accent.darker (0.6f));
+            separateBtn.onClick = [this]
+            {
+                if (guard.expired())
+                    return;
+                auto separate = impl.owner.onSeparateSources;
+                close();
+                if (separate)
+                    separate();
+            };
+            for (auto* c : std::initializer_list<juce::Component*> { &title, &hint, &leadCaption, &tailCaption, &shiftCaption,
+                                                                      &resetBtn, &separateBtn })
+                addAndMakeVisible (c);
+            rebuild();
+        }
+
+        // El proyecto cambió (una edición aquí, deshacer, pistas recién separadas)
+        void refresh()
+        {
+            if (guard.expired())
+                return;
+            auto* seg = impl.segmentById (id);
+            if (seg == nullptr)
+            {
+                close();
+                return;
+            }
+            if (impl.stemsOf (seg->source) != shownFiles)
+                rebuild();
+            else
+                updateValues();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (ui::panel);   // opaco: el globo de JUCE deja ver lo de atrás
+        }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (12, 10);
+            title.setBounds (r.removeFromTop (22));
+            hint.setBounds (r.removeFromTop (34));
+            const auto footer = r.removeFromBottom (28);
+            if (rows.empty())
+            {
+                separateBtn.setBounds (footer.withSizeKeepingCentre (juce::jmin (footer.getWidth(), 300), 28));
+                return;
+            }
+            resetBtn.setBounds (footer.withTrimmedLeft (footer.getWidth() - 110));
+            auto headers = r.removeFromTop (18);
+            headers.removeFromLeft (nameWidth + muteWidth + 2 * gap);
+            leadCaption.setBounds (headers.removeFromLeft (stepperWidth));
+            headers.removeFromLeft (gap);
+            tailCaption.setBounds (headers.removeFromLeft (stepperWidth));
+            headers.removeFromLeft (gap);
+            shiftCaption.setBounds (headers.removeFromLeft (stepperWidth));
+            for (auto& row : rows)
+            {
+                auto line = r.removeFromTop (rowHeight).reduced (0, 2);
+                row->name.setBounds (line.removeFromLeft (nameWidth));
+                line.removeFromLeft (gap);
+                row->mute.setBounds (line.removeFromLeft (muteWidth));
+                line.removeFromLeft (gap);
+                for (auto* stepper : { &row->lead, &row->tail, &row->shift })
+                {
+                    auto area = line.removeFromLeft (stepperWidth);
+                    stepper->down.setBounds (area.removeFromLeft (24));
+                    stepper->up.setBounds (area.removeFromRight (24));
+                    stepper->value.setBounds (area.reduced (2, 0));
+                    line.removeFromLeft (gap);
+                }
+            }
+        }
+
+    private:
+        static constexpr int nameWidth = 120, muteWidth = 86, stepperWidth = 150, gap = 10, rowHeight = 28;
+
+        struct Stepper
+        {
+            juce::Label value;
+            juce::TextButton down, up;
+        };
+
+        struct Row
+        {
+            juce::String file;
+            juce::Label name;
+            juce::TextButton mute;
+            Stepper lead, tail, shift;
+        };
+
+        void rebuild()
+        {
+            rows.clear();
+            if (guard.expired())
+                return;
+            auto* seg = impl.segmentById (id);
+            if (seg == nullptr)
+                return;
+            shownFiles = impl.stemsOf (seg->source);
+            for (auto& file : shownFiles)
+            {
+                auto row = std::make_unique<Row>();
+                row->file = file;
+                row->name.setText (Library::stemDisplayName (file.upToLastOccurrenceOf (".", false, false)), juce::dontSendNotification);
+                row->name.setFont (ui::font (13.0f, true));
+                row->name.setInterceptsMouseClicks (false, false);
+                styleToggle (row->mute, "Silenciar");
+                row->mute.onClick = [this, file]
+                {
+                    edit (file, [] (MixStemSettings& st) { st.muted = ! st.muted; });
+                };
+                auto setupStepper = [this, &file] (Stepper& stepper, std::function<void (MixStemSettings&, int)> change)
+                {
+                    styleValue (stepper.value, false);
+                    stepper.down.setButtonText ("-");
+                    stepper.up.setButtonText ("+");
+                    stepper.down.onClick = [this, file, change] { edit (file, [change] (MixStemSettings& st) { change (st, -1); }); };
+                    stepper.up.onClick = [this, file, change] { edit (file, [change] (MixStemSettings& st) { change (st, 1); }); };
+                };
+                setupStepper (row->lead, [] (MixStemSettings& st, int d)
+                              { st.leadBars = juce::jlimit (0, MixStemSettings::maxBars, st.leadBars + d); });
+                setupStepper (row->tail, [] (MixStemSettings& st, int d)
+                              { st.tailBars = juce::jlimit (0, MixStemSettings::maxBars, st.tailBars + d); });
+                setupStepper (row->shift, [] (MixStemSettings& st, int d)
+                              { st.shiftBeats = juce::jlimit (-MixStemSettings::maxShift, MixStemSettings::maxShift, st.shiftBeats + d); });
+                for (auto* c : std::initializer_list<juce::Component*> { &row->name, &row->mute, &row->lead.value, &row->lead.down,
+                                                                          &row->lead.up, &row->tail.value, &row->tail.down, &row->tail.up,
+                                                                          &row->shift.value, &row->shift.down, &row->shift.up })
+                    addAndMakeVisible (c);
+                rows.push_back (std::move (row));
+            }
+            const bool any = ! rows.empty();
+            for (auto* c : std::initializer_list<juce::Component*> { &leadCaption, &tailCaption, &shiftCaption, &resetBtn })
+                c->setVisible (any);
+            separateBtn.setVisible (! any);
+            const int width = 24 + nameWidth + muteWidth + 3 * stepperWidth + 5 * gap;
+            setSize (width, 20 + 22 + 34 + (any ? 18 + (int) rows.size() * rowHeight : 8) + 8 + 28);
+            ui::disableFocus (*this);
+            updateValues();
+            resized();
+        }
+
+        void updateValues()
+        {
+            if (guard.expired())
+                return;
+            auto* proj = impl.project();
+            auto* seg = impl.segmentById (id);
+            if (proj == nullptr || seg == nullptr)
+                return;
+            const auto source = impl.validSource (seg->source) ? proj->sources[(size_t) seg->source].name : juce::String ("?");
+            title.setText (tr ("Pistas del tramo ") + juce::String (impl.segmentIndexOf (id) + 1) + dot() + source, juce::dontSendNotification);
+            if (rows.empty())
+                hint.setText (tr ("Las pistas de «") + source + tr ("» no están separadas. Separa las canciones del mix (con las pistas y la "
+                                                                  "calidad de la barra de arriba) para silenciar, adelantar o alargar pistas en este tramo."),
+                              juce::dontSendNotification);
+            else
+                hint.setText (tr ("«Entra antes» y «Sigue después» usan el audio de la canción que rodea al tramo (compases a su tempo; "
+                                  "la que sigue se apaga en su último tiempo). «Correr» mueve la pista en tiempos."),
+                              juce::dontSendNotification);
+            auto bars = [] (int n) { return n == 0 ? juce::String ("no") : juce::String (n) + (n == 1 ? tr (" compás") : juce::String (" compases")); };
+            for (auto& row : rows)
+            {
+                const auto* st = seg->stemSettings (row->file);
+                const MixStemSettings plain;
+                const auto& v = st != nullptr ? *st : plain;
+                row->mute.setToggleState (v.muted, juce::dontSendNotification);
+                row->name.setColour (juce::Label::textColourId, v.muted ? juce::Colours::grey : juce::Colours::white);
+                row->lead.value.setText (bars (v.leadBars), juce::dontSendNotification);
+                row->tail.value.setText (bars (v.tailBars), juce::dontSendNotification);
+                row->shift.value.setText (v.shiftBeats == 0 ? juce::String ("0")
+                                                            : juce::String::formatted ("%+d", v.shiftBeats)
+                                                                  + (std::abs (v.shiftBeats) == 1 ? " tiempo" : " tiempos"),
+                                          juce::dontSendNotification);
+                for (auto* stepper : { &row->lead, &row->tail, &row->shift })
+                    stepper->value.setColour (juce::Label::textColourId, stepper->value.getText() == "no" || stepper->value.getText() == "0"
+                                                                             ? juce::Colours::lightgrey : ui::accent);
+                row->lead.down.setEnabled (v.leadBars > 0);
+                row->lead.up.setEnabled (v.leadBars < MixStemSettings::maxBars);
+                row->tail.down.setEnabled (v.tailBars > 0);
+                row->tail.up.setEnabled (v.tailBars < MixStemSettings::maxBars);
+                row->shift.down.setEnabled (v.shiftBeats > -MixStemSettings::maxShift);
+                row->shift.up.setEnabled (v.shiftBeats < MixStemSettings::maxShift);
+            }
+            resetBtn.setEnabled (seg->hasStemSettings());
+        }
+
+        void edit (const juce::String& file, const std::function<void (MixStemSettings&)>& change)
+        {
+            if (guard.expired())
+                return;
+            auto* seg = impl.segmentById (id);
+            if (seg == nullptr)
+                return;
+            change (seg->stemSettingsFor (file));
+            // Las pistas que quedan como siempre no se guardan
+            seg->stems.erase (std::remove_if (seg->stems.begin(), seg->stems.end(), [] (const MixStemSettings& st) { return st.isDefault(); }),
+                              seg->stems.end());
+            impl.changed();   // también refresca este panel
+        }
+
+        void resetAll()
+        {
+            if (guard.expired())
+                return;
+            auto* seg = impl.segmentById (id);
+            if (seg == nullptr || seg->stems.empty())
+                return;
+            seg->stems.clear();
+            impl.changed();
+        }
+
+        void close()
+        {
+            if (auto* box = findParentComponentOfClass<juce::CallOutBox>())
+                box->dismiss();
+        }
+
+        Impl& impl;
+        std::weak_ptr<bool> guard;
+        const int id;
+        juce::StringArray shownFiles;
+        juce::Label title, hint, leadCaption, tailCaption, shiftCaption;
+        juce::TextButton resetBtn, separateBtn;
+        std::vector<std::unique_ptr<Row>> rows;
     };
 
     //==========================================================================
@@ -1198,6 +1534,29 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     bool sourceHasBars() const;                 // la fuente elegida tiene compases (análisis con primeros tiempos)
     int selectionFirstBar() const;              // compases de la selección, como los muestra la cabecera
     int selectionLastBar() const;
+    // Ajustes por pista y solapes
+    MixSegment* segmentById (int id) const;
+    int segmentIndexOf (int id) const;
+    juce::StringArray stemsOf (int source) const;   // pistas separadas de la fuente con project()->stemsKey (vacío = sin separar)
+    bool stemsReady (int source) const              { return ! stemsOf (source).isEmpty(); }
+    void refreshStems();
+    juce::String stemSummary (const MixSegment&) const;
+    void openStemsPanel (int index);
+    int previousSounding (int index) const;     // el tramo que suena antes de `index` (-1 si no hay)
+    int maxOverlapBars (int index) const;       // los compases de solape que caben con el anterior
+    int effectiveOverlapBars (int index) const; // los que se aplican (layout)
+    int gapOf (int index) const;                // > 0 silencio, < 0 solape, en compases
+    void gapBy (int delta);
+    void setGap (int index, int gap);
+    void setOverlapBlend (int index, int blend);
+    // Partes del bloque de un tramo en la línea del mix (fracciones de la altura): en un solape, el que sale va en la
+    // mitad de arriba y el que entra en la de abajo
+    struct BlockPart
+    {
+        double from = 0.0, to = 0.0;
+        float top = 0.0f, bottom = 1.0f;
+    };
+    std::vector<BlockPart> blockParts (int index) const;
     juce::String selectionSuffix() const;       // "· 16 compases · 0:38" (y si un borde no cae en un tiempo, cuál)
     juce::String mixSummary (bool withTempo) const;
 
@@ -1322,8 +1681,14 @@ struct MixEditor::Impl : private juce::ScrollBar::Listener
     juce::TextButton startEarlierBtn, startLaterBtn, endEarlierBtn, endLaterBtn;
     juce::Label tempoCaption, segTempoEdit, toneCaption, toneValue, gainCaption, gainEdit, fadeCaption, nameCaption, labelEdit;
     juce::Label levelInfo;                  // "Niv +3,2 dB": lo que el nivelado le dio al tramo elegido
-    juce::Label silenceCaption, silenceValue;   // compases de silencio antes del tramo elegido
+    juce::Label silenceCaption, silenceValue;   // unión con el anterior: compases de silencio o de solape (el primero: silencio antes)
     juce::TextButton silenceDownBtn, silenceUpBtn;
+    juce::TextButton stemsBtn;              // "Pistas...": ajustes por pista del tramo (StemsPanel)
+    int fadeBoxMode = -1;                   // 0 = fundidos de la unión, 1 = mezcla del solape
+    // Pistas separadas de cada fuente (por archivo) con project()->stemsKey, y el globo de las pistas del tramo
+    std::map<juce::String, juce::StringArray> stemFiles;
+    juce::Component::SafePointer<StemsPanel> stemsPanel;
+    juce::TextButton separateBtn;           // "Separar canciones (IA)" (columna de canciones)
     juce::TextButton toneDownBtn, toneUpBtn;
     juce::ComboBox fadeBox;
     // Pie
@@ -1497,15 +1862,20 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
     styleCaption (levelInfo, {});
     styleCaption (silenceCaption, "Silencio antes", juce::Justification::centredRight);
     silenceDownBtn.setButtonText ("-");
-    silenceDownBtn.onClick = [this] { silenceBy (-1); };
+    silenceDownBtn.onClick = [this] { gapBy (-1); };
     styleValue (silenceValue, false);
     silenceUpBtn.setButtonText ("+");
-    silenceUpBtn.onClick = [this] { silenceBy (1); };
+    silenceUpBtn.onClick = [this] { gapBy (1); };
+    stemsBtn.setButtonText ("Pistas...");
+    stemsBtn.onClick = [this] { openStemsPanel (selectedSegment()); };
+    separateBtn.setButtonText ("Separar canciones (IA)");
+    separateBtn.onClick = [this] { if (owner.onSeparateSources) owner.onSeparateSources(); };
 
     for (auto* b : std::initializer_list<juce::TextButton*> { &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startEarlierBtn,
                                                                &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn,
-                                                               &silenceDownBtn, &silenceUpBtn })
+                                                               &silenceDownBtn, &silenceUpBtn, &stemsBtn })
         b->setLookAndFeel (&compactLook);
+    fadeBox.setLookAndFeel (&compactLook);
 
     statusLabel.setFont (ui::font (12.0f));
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
@@ -1521,18 +1891,27 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
              &segCaption, &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startCaption, &startEarlierBtn, &startLaterBtn,
              &endCaption, &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit, &toneCaption, &toneDownBtn,
              &toneValue, &toneUpBtn, &gainCaption, &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit,
-             &levelInfo, &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn, &statusLabel })
+             &levelInfo, &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn, &stemsBtn, &separateBtn, &statusLabel })
         owner.addAndMakeVisible (c);
 }
 
 MixEditor::Impl::~Impl()
 {
+    // El globo de las pistas puede durar un instante más que el editor: se oculta ya (se borra solo después)
+    if (stemsPanel != nullptr)
+        if (auto* box = stemsPanel->findParentComponentOfClass<juce::CallOutBox>())
+        {
+            box->exitModalState (0);
+            box->setVisible (false);
+        }
+    alive.reset();   // el globo (y los menús abiertos) ya no tocan el editor
     sourceScroll.removeListener (this);
     mixScroll.removeListener (this);
     for (auto* b : std::initializer_list<juce::TextButton*> { &moveLeftBtn, &moveRightBtn, &removeSegBtn, &startEarlierBtn,
                                                                &startLaterBtn, &endEarlierBtn, &endLaterBtn, &toneDownBtn, &toneUpBtn,
-                                                               &silenceDownBtn, &silenceUpBtn })
+                                                               &silenceDownBtn, &silenceUpBtn, &stemsBtn })
         b->setLookAndFeel (nullptr);
+    fadeBox.setLookAndFeel (nullptr);
 }
 
 //==============================================================================
@@ -1559,7 +1938,9 @@ juce::String MixEditor::Impl::sourceStateText (int source) const
     if (! validSource (source))
         return {};
     const auto status = statusFor (source);
-    return status.isNotEmpty() ? status : analysisText (project()->sources[(size_t) source].analysis);
+    if (status.isNotEmpty())
+        return status;
+    return analysisText (project()->sources[(size_t) source].analysis) + (stemsReady (source) ? dot() + "separada" : juce::String());
 }
 
 double MixEditor::Impl::sourceLength (int source) const
@@ -1627,9 +2008,229 @@ juce::String MixEditor::Impl::segmentDetail (int index) const
         text += juce::String::formatted ("  %+d st", seg.transpose);
     if (std::abs (seg.gainDb) >= 0.05f)
         text += "  " + gainText (seg.gainDb);
+    if (p.overlap > 0.0 && p.barSeconds > 0.0)
+        text += "  solapa " + juce::String (juce::roundToInt (p.overlap / p.barSeconds)) + " c.";
+    if (const auto stems = stemSummary (seg); stems.isNotEmpty())
+        text += "  " + stems + (stemsReady (seg.source) ? juce::String() : tr (" (falta separar)"));
     if (joinOffBeat (index))
         text += tr ("  unión fuera de tiempo");
     return text;
+}
+
+MixSegment* MixEditor::Impl::segmentById (int id) const
+{
+    const int index = segmentIndexOf (id);
+    return index >= 0 ? &project()->segments[(size_t) index] : nullptr;
+}
+
+int MixEditor::Impl::segmentIndexOf (int id) const
+{
+    auto* proj = project();
+    if (proj == nullptr || id <= 0)
+        return -1;
+    for (int i = 0; i < (int) proj->segments.size(); ++i)
+        if (proj->segments[(size_t) i].id == id)
+            return i;
+    return -1;
+}
+
+juce::StringArray MixEditor::Impl::stemsOf (int source) const
+{
+    if (! validSource (source))
+        return {};
+    const auto it = stemFiles.find (project()->sources[(size_t) source].fileName);
+    return it != stemFiles.end() ? it->second : juce::StringArray();
+}
+
+// Las pistas separadas de cada fuente con las opciones del mix, en el orden de siempre (voces, partes de la batería de
+// bombo a crash, batería, bajo, guitarra, piano, otros)
+void MixEditor::Impl::refreshStems()
+{
+    stemFiles.clear();
+    auto* proj = project();
+    if (proj == nullptr || proj->stemsKey.isEmpty())
+        return;
+    auto rank = [] (const juce::String& file)
+    {
+        const auto f = file.toLowerCase();
+        int k = 0;
+        for (auto* prefix : { "vocals", "drums_kick", "drums_snare", "drums_toms", "drums_hh", "drums_ride", "drums_crash", "drums",
+                              "bass", "guitar", "piano", "other" })
+        {
+            if (f.startsWith (prefix))
+                return k;
+            ++k;
+        }
+        return k;
+    };
+    for (int i = 0; i < (int) proj->sources.size(); ++i)
+    {
+        auto files = proj->cachedStems (i, proj->stemsKey);
+        std::vector<juce::String> sorted (files.begin(), files.end());
+        std::stable_sort (sorted.begin(), sorted.end(), [&rank] (const juce::String& a, const juce::String& b)
+        {
+            const int ra = rank (a), rb = rank (b);
+            return ra != rb ? ra < rb : a.compareNatural (b) < 0;
+        });
+        juce::StringArray ordered;
+        for (auto& f : sorted)
+            ordered.add (f);
+        if (! ordered.isEmpty())
+            stemFiles[proj->sources[(size_t) i].fileName] = ordered;
+    }
+}
+
+// "sin Voces · Bajo entra 1 c. antes · Batería sigue 2 c., +1 t."
+juce::String MixEditor::Impl::stemSummary (const MixSegment& seg) const
+{
+    juce::StringArray parts;
+    for (auto& st : seg.stems)
+    {
+        if (st.isDefault())
+            continue;
+        const auto name = Library::stemDisplayName (st.stem.upToLastOccurrenceOf (".", false, false));
+        if (st.muted)
+        {
+            parts.add ("sin " + name);
+            continue;
+        }
+        juce::StringArray what;
+        if (st.leadBars > 0)
+            what.add ("entra " + juce::String (st.leadBars) + " c. antes");
+        if (st.tailBars > 0)
+            what.add ("sigue " + juce::String (st.tailBars) + " c.");
+        if (st.shiftBeats != 0)
+            what.add (juce::String::formatted ("%+d t.", st.shiftBeats));
+        parts.add (name + " " + what.joinIntoString (", "));
+    }
+    return parts.joinIntoString (dot());
+}
+
+void MixEditor::Impl::openStemsPanel (int index)
+{
+    auto* proj = project();
+    if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
+        return;
+    proj->ensureSegmentIds();   // el panel sigue al tramo por su id
+    if (stemsPanel != nullptr)
+        if (auto* box = stemsPanel->findParentComponentOfClass<juce::CallOutBox>())
+            box->dismiss();
+    auto panel = std::make_unique<StemsPanel> (*this, proj->segments[(size_t) index].id);
+    stemsPanel = panel.get();
+    // Dentro de la ventana (no una ventana aparte, que GNOME podría abrir detrás): sobre el componente principal,
+    // apuntando al botón o al mouse
+    juce::Component* top = &owner;
+    while (top->getParentComponent() != nullptr && top->getParentComponent()->getParentComponent() != nullptr)
+        top = top->getParentComponent();
+    juce::Rectangle<int> area;
+    if (stemsBtn.isShowing())
+        area = top->getLocalArea (&stemsBtn, stemsBtn.getLocalBounds());
+    else
+        area = juce::Rectangle<int> (top->getLocalPoint (nullptr, juce::Desktop::getMousePosition()), juce::Point<int> (1, 1)).expanded (1);
+    juce::CallOutBox::launchAsynchronously (std::move (panel), area, top);
+}
+
+int MixEditor::Impl::previousSounding (int index) const
+{
+    for (int k = juce::jmin (index, (int) placements.size()) - 1; k >= 0; --k)
+        if (placements[(size_t) k].outEnd > placements[(size_t) k].outStart)
+            return k;
+    return -1;
+}
+
+int MixEditor::Impl::maxOverlapBars (int index) const
+{
+    const int prev = previousSounding (index);
+    if (prev < 0 || index >= (int) placements.size())
+        return 0;
+    const auto& p = placements[(size_t) index];
+    const auto& q = placements[(size_t) prev];
+    if (p.outEnd <= p.outStart || p.barSeconds <= 0.0)
+        return 0;
+    const double room = juce::jmin (q.outEnd - q.outStart, p.outEnd - p.outStart) - 0.01;
+    return juce::jlimit (0, MixSegment::maxOverlapBars, (int) std::floor (room / p.barSeconds));
+}
+
+int MixEditor::Impl::effectiveOverlapBars (int index) const
+{
+    if (index < 0 || index >= (int) placements.size())
+        return 0;
+    const auto& p = placements[(size_t) index];
+    return p.overlap > 0.0 && p.barSeconds > 0.0 ? juce::roundToInt (p.overlap / p.barSeconds) : 0;
+}
+
+int MixEditor::Impl::gapOf (int index) const
+{
+    auto* proj = project();
+    if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
+        return 0;
+    const auto& seg = proj->segments[(size_t) index];
+    return seg.silenceBars > 0 ? seg.silenceBars : -effectiveOverlapBars (index);
+}
+
+// La unión con el anterior: "-" acerca (de silencio a seguido y después a solaparse), "+" separa
+void MixEditor::Impl::gapBy (int delta)
+{
+    const int index = selectedSegment();
+    if (currentSegment() != nullptr)
+        setGap (index, gapOf (index) + delta);
+}
+
+void MixEditor::Impl::setGap (int index, int gap)
+{
+    auto* proj = project();
+    if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
+        return;
+    const int lowest = index == 0 ? 0 : -maxOverlapBars (index);
+    if (gap < 0 && lowest == 0 && index > 0)
+        owner.setStatus (tr ("No cabe un compás de solape: este tramo o el anterior duran menos"));
+    gap = juce::jlimit (lowest, MixSegment::maxSilenceBars, gap);
+    auto& seg = proj->segments[(size_t) index];
+    const int silence = juce::jmax (0, gap), overlap = juce::jmax (0, -gap);
+    if (seg.silenceBars == silence && seg.overlapBars == overlap)
+        return;
+    seg.silenceBars = silence;
+    seg.overlapBars = overlap;
+    changed();
+}
+
+void MixEditor::Impl::setOverlapBlend (int index, int blend)
+{
+    auto* proj = project();
+    if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
+        return;
+    auto& seg = proj->segments[(size_t) index];
+    blend = juce::jlimit (0, 2, blend);
+    if (seg.overlapBlend == blend)
+        return;
+    seg.overlapBlend = blend;
+    changed();
+}
+
+std::vector<MixEditor::Impl::BlockPart> MixEditor::Impl::blockParts (int index) const
+{
+    std::vector<BlockPart> parts;
+    if (index < 0 || index >= (int) placements.size())
+        return parts;
+    const auto& p = placements[(size_t) index];
+    if (p.outEnd <= p.outStart)
+        return parts;
+    const double sharedIn = juce::jmin (p.outEnd, p.outStart + p.overlap);   // suena con el anterior
+    double sharedOut = p.outEnd;                                             // desde aquí suena con el siguiente
+    for (size_t k = (size_t) index + 1; k < placements.size(); ++k)
+        if (placements[k].outEnd > placements[k].outStart)
+        {
+            if (placements[k].overlap > 0.0)
+                sharedOut = juce::jmax (p.outStart, placements[k].outStart);
+            break;
+        }
+    if (sharedIn > p.outStart)
+        parts.push_back ({ p.outStart, sharedIn, 0.5f, 1.0f });
+    if (sharedOut > sharedIn)
+        parts.push_back ({ sharedIn, sharedOut, 0.0f, 1.0f });
+    if (sharedOut < p.outEnd)
+        parts.push_back ({ juce::jmax (sharedOut, sharedIn), p.outEnd, 0.0f, 0.5f });
+    return parts;
 }
 
 // Un borde de tramo o de la selección cae en un tiempo detectado (sin análisis no hay rejilla que
@@ -1738,6 +2339,7 @@ void MixEditor::Impl::projectChanged()
     playingSource = -1;
     isPlaying = false;
     knownSourceCount = proj != nullptr ? (int) proj->sources.size() : 0;
+    refreshStems();
     recomputeLayout();
     mixLine.fit();
     mixLine.invalidate();
@@ -1781,6 +2383,7 @@ void MixEditor::Impl::refreshFromProject()
     if (owner.selectedSegment >= (int) proj->segments.size())
         owner.selectedSegment = (int) proj->segments.size() - 1;
     knownSourceCount = n;
+    refreshStems();
 
     if (sameSource)
     {
@@ -1805,6 +2408,8 @@ void MixEditor::Impl::refreshFromProject()
     sourceWave.invalidate();
     updateControls();
     owner.repaint();
+    if (stemsPanel != nullptr)
+        stemsPanel->refresh();
 }
 
 // Ubicación de los tramos, largo del mix y uniones fuera de tiempo; el cabezal del mix no queda más
@@ -1823,6 +2428,16 @@ void MixEditor::Impl::recomputeLayout()
     {
         placements = mix::layout (*proj);
         mixLength = placements.empty() ? 0.0 : placements.back().outEnd;
+        // Una pista que sigue después del último tramo alarga el mix (si las pistas están separadas)
+        for (size_t i = 0; i < placements.size() && i < proj->segments.size(); ++i)
+        {
+            const auto& seg = proj->segments[i];
+            const auto& p = placements[i];
+            if (p.outEnd > p.outStart && seg.hasStemSettings() && stemsReady (seg.source))
+                for (auto& st : seg.stems)
+                    if (! st.muted && st.tailBars > 0)
+                        mixLength = juce::jmax (mixLength, p.outEnd + st.tailBars * p.barSeconds);
+        }
         SongInfo described;
         mix::describeSong (*proj, described);   // los tiempos que tendrá la canción: compases del mix (con los de silencio)
         mixBeats = described.analysis.beats;
@@ -1848,6 +2463,8 @@ void MixEditor::Impl::changed()
     updateControls();
     if (owner.onChanged)
         owner.onChanged();
+    if (stemsPanel != nullptr)
+        stemsPanel->refresh();
 }
 
 void MixEditor::Impl::updateControls()
@@ -1878,6 +2495,7 @@ void MixEditor::Impl::updateControls()
             levelBox.setText ("Nivelar a " + decimal (proj->levelLufs, 1) + " LUFS", juce::dontSendNotification);   // escrito a mano
     }
     createBtn.setEnabled (! proj->segments.empty() && ! busy);
+    separateBtn.setEnabled (! proj->segments.empty());
 
     updateListSize();
     sourceList.repaint();
@@ -2011,9 +2629,10 @@ void MixEditor::Impl::updatePanel()
                                                               &endEarlierBtn, &endLaterBtn, &tempoCaption, &segTempoEdit,
                                                               &toneCaption, &toneDownBtn, &toneValue, &toneUpBtn, &gainCaption,
                                                               &gainEdit, &fadeCaption, &fadeBox, &nameCaption, &labelEdit,
-                                                              &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn })
+                                                              &silenceCaption, &silenceDownBtn, &silenceValue, &silenceUpBtn, &stemsBtn })
         c->setEnabled (on);
     levelInfo.setText ({}, juce::dontSendNotification);
+    stemsBtn.setButtonText ("Pistas...");
     if (! on)
     {
         segCaption.setText ("Sin tramo", juce::dontSendNotification);
@@ -2041,45 +2660,97 @@ void MixEditor::Impl::updatePanel()
     toneValue.setColour (juce::Label::textColourId, seg->transpose != 0 ? ui::accent : juce::Colours::white);
     toneDownBtn.setEnabled (seg->transpose > -12);
     toneUpBtn.setEnabled (seg->transpose < 12);
-    silenceValue.setText (seg->silenceBars == 0 ? juce::String ("ninguno")
-                                                : juce::String (seg->silenceBars) + (seg->silenceBars == 1 ? tr (" compás") : juce::String (" compases")),
-                          juce::dontSendNotification);
-    silenceValue.setColour (juce::Label::textColourId, seg->silenceBars > 0 ? ui::accent : juce::Colours::white);
-    silenceDownBtn.setEnabled (seg->silenceBars > 0);
-    silenceUpBtn.setEnabled (seg->silenceBars < MixSegment::maxSilenceBars);
+    // Unión con el anterior: compases de silencio, seguido o compases de solape (el primero: silencio antes del mix).
+    // En naranja si el solape pedido no cabe entero.
+    {
+        const int gap = gapOf (index), effective = effectiveOverlapBars (index);
+        silenceCaption.setText (index == 0 ? juce::String ("Silencio antes") : tr ("Unión"), juce::dontSendNotification);
+        juce::String text;
+        if (index == 0)
+            text = gap == 0 ? juce::String ("ninguno") : juce::String (gap) + (gap == 1 ? tr (" compás") : juce::String (" compases"));
+        else if (gap > 0)
+            text = "silencio " + juce::String (gap) + " c.";
+        else if (gap < 0)
+            text = "solapa " + juce::String (-gap) + " c.";
+        else
+            text = "seguido";
+        silenceValue.setText (text, juce::dontSendNotification);
+        const bool clipped = seg->overlapBars > effective && seg->silenceBars == 0 && index > 0;
+        silenceValue.setColour (juce::Label::textColourId, clipped ? offBeatColour : gap != 0 ? ui::accent : juce::Colours::white);
+        silenceDownBtn.setEnabled (index == 0 ? gap > 0 : gap > -maxOverlapBars (index));
+        silenceUpBtn.setEnabled (gap < MixSegment::maxSilenceBars);
+    }
+    {
+        int adjusted = 0;
+        for (auto& st : seg->stems)
+            adjusted += st.isDefault() ? 0 : 1;
+        if (adjusted > 0)
+            stemsBtn.setButtonText ("Pistas (" + juce::String (adjusted) + ")...");
+    }
     if (! gainEdit.isBeingEdited())
         gainEdit.setText (gainText (seg->gainDb), juce::dontSendNotification);
     // Nivelado del último render: "Niv +5,4 dB · lim -6,2" (cuánto bajó el limitador los picos; "tope" en naranja
     // si ni con 12 dB llegó al objetivo)
-    if (proj->levelLufs < 0.0 && juce::isPositiveAndBelow (index, (int) segmentLevels.size()))
+    // y "unión lim -2,1": cuánto bajó el limitador de las zonas donde suena con otro tramo (solape, fundido, pistas que siguen)
+    if (juce::isPositiveAndBelow (index, (int) segmentLevels.size()))
     {
         const auto& lv = segmentLevels[(size_t) index];
-        if (lv.lufs > -99.0)
-        {
-            levelInfo.setText ("Niv " + gainText (lv.gainDb)
-                                   + (lv.limiterDb < -0.1 ? dot() + "lim " + decimal (lv.limiterDb, 1) : juce::String())
-                                   + (lv.belowTarget ? juce::String (" (tope)") : juce::String()),
-                               juce::dontSendNotification);
-            levelInfo.setColour (juce::Label::textColourId, lv.belowTarget ? offBeatColour : juce::Colours::lightgrey);
-        }
+        juce::String text;
+        if (proj->levelLufs < 0.0 && lv.lufs > -99.0)
+            text = "Niv " + gainText (lv.gainDb) + (lv.limiterDb < -0.1 ? dot() + "lim " + decimal (lv.limiterDb, 1) : juce::String())
+                 + (lv.belowTarget ? juce::String (" (tope)") : juce::String());
+        if (lv.joinLimiterDb < -0.1)
+            text += (text.isNotEmpty() ? dot() : juce::String()) + tr ("unión lim ") + decimal (lv.joinLimiterDb, 1);
+        levelInfo.setText (text, juce::dontSendNotification);
+        levelInfo.setColour (juce::Label::textColourId, lv.belowTarget ? offBeatColour : juce::Colours::lightgrey);
     }
 
-    // Fundido: el valor que coincida con una opción; si no (escrito a mano en mix.json), su texto
-    const int meter = segmentMeter (*seg);
-    const double values[] = { 0.0, 1.0, 2.0, (double) meter, 2.0 * meter };
-    int fadeId = 0;
-    for (int k = 0; k < 5; ++k)
-        if (std::abs (seg->fadeBeats - values[k]) < 1.0e-6)
+    // Con solape, cómo se mezclan los dos (ids 11 a 13); si no, el fundido de la unión: el valor que coincida con una
+    // opción; si no (escrito a mano en mix.json), su texto. Con silencio antes no hay unión que fundir.
+    const bool overlapping = index > 0 && effectiveOverlapBars (index) > 0;
+    if (fadeBoxMode != (overlapping ? 1 : 0))
+    {
+        fadeBoxMode = overlapping ? 1 : 0;
+        fadeBox.clear (juce::dontSendNotification);
+        if (overlapping)
         {
-            fadeId = k + 1;
-            break;
+            fadeBox.addItem ("Baja el anterior", 11);
+            fadeBox.addItem ("Fundido cruzado", 12);
+            fadeBox.addItem ("Los dos enteros", 13);
         }
-    if (fadeId > 0)
-        fadeBox.setSelectedId (fadeId, juce::dontSendNotification);
+        else
+        {
+            fadeBox.addItem ("Corte", 1);
+            fadeBox.addItem ("1 tiempo", 2);
+            fadeBox.addItem ("2 tiempos", 3);
+            fadeBox.addItem (tr ("1 compás"), 4);
+            fadeBox.addItem ("2 compases", 5);
+        }
+    }
+    fadeCaption.setText (overlapping ? "Mezcla" : "Fundido", juce::dontSendNotification);
+    if (overlapping)
+        fadeBox.setSelectedId (11 + juce::jlimit (0, 2, seg->overlapBlend), juce::dontSendNotification);
+    else if (seg->silenceBars > 0 && index > 0)
+        fadeBox.setText ("-", juce::dontSendNotification);
     else
-        fadeBox.setText (decimal (seg->fadeBeats, 1) + " tiempos", juce::dontSendNotification);
-    fadeBox.setEnabled (index > 0);   // el primer tramo no tiene unión con uno anterior
-    fadeCaption.setEnabled (index > 0);
+    {
+        const int meter = segmentMeter (*seg);
+        const double values[] = { 0.0, 1.0, 2.0, (double) meter, 2.0 * meter };
+        int fadeId = 0;
+        for (int k = 0; k < 5; ++k)
+            if (std::abs (seg->fadeBeats - values[k]) < 1.0e-6)
+            {
+                fadeId = k + 1;
+                break;
+            }
+        if (fadeId > 0)
+            fadeBox.setSelectedId (fadeId, juce::dontSendNotification);
+        else
+            fadeBox.setText (decimal (seg->fadeBeats, 1) + " tiempos", juce::dontSendNotification);
+    }
+    const bool joinable = index > 0 && seg->silenceBars == 0;   // el primer tramo (o uno tras un silencio) no se une con el anterior
+    fadeBox.setEnabled (joinable);
+    fadeCaption.setEnabled (joinable);
 
     // Nombre: vacío = el de la canción (se muestra en gris)
     if (! labelEdit.isBeingEdited())
@@ -2153,6 +2824,8 @@ void MixEditor::Impl::layout()
         auto left = leftArea.reduced (6);
         layoutRow (left.removeFromTop (26), { { &sourcesCaption, 90, true, 70 }, { &addSourceBtn, 96, false, 76 } });
         left.removeFromTop (6);
+        separateBtn.setBounds (left.removeFromBottom (26));
+        left.removeFromBottom (6);
         sourceViewport.setBounds (left);
         updateListSize();
     }
@@ -2195,12 +2868,12 @@ void MixEditor::Impl::layout()
         layoutRow (row1, { { &segCaption, 80 }, { &moveLeftBtn, 26 }, { &moveRightBtn, 26 }, { &removeSegBtn, 56 }, { nullptr, 6 },
                            { &startCaption, 38 }, { &startEarlierBtn, 66 }, { &startLaterBtn, 66 }, { nullptr, 6 },
                            { &endCaption, 26 }, { &endEarlierBtn, 66 }, { &endLaterBtn, 66 }, { nullptr, 6 },
-                           { &nameCaption, 48 }, { &labelEdit, 70, true, 60 } }, 3);
+                           { &stemsBtn, 84 }, { nullptr, 6 }, { &nameCaption, 48 }, { &labelEdit, 70, true, 60 } }, 3);
         layoutRow (p, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                         { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
                         { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 150, false, 90 }, { nullptr, 6 },
-                        { &fadeCaption, 54 }, { &fadeBox, 110 }, { nullptr, 6 },
-                        { &silenceCaption, 92 }, { &silenceDownBtn, 26 }, { &silenceValue, 82 }, { &silenceUpBtn, 26 },
+                        { &fadeCaption, 54 }, { &fadeBox, 118 }, { nullptr, 6 },
+                        { &silenceCaption, 88, false, 40 }, { &silenceDownBtn, 26 }, { &silenceValue, 88 }, { &silenceUpBtn, 26 },
                         { nullptr, 0, true } }, 3);
         return;
     }
@@ -2212,11 +2885,12 @@ void MixEditor::Impl::layout()
     p.removeFromTop (rowGap);
     auto row3 = p.removeFromTop (rowHeight);
     layoutRow (row1, { { &segCaption, 84, false, 70 }, { &moveLeftBtn, 26 }, { &moveRightBtn, 26 }, { &removeSegBtn, 56 },
-                       { nullptr, 10, false, 4 }, { &silenceCaption, 92, false, 80 }, { &silenceDownBtn, 26 }, { &silenceValue, 82, false, 70 },
+                       { nullptr, 10, false, 4 }, { &silenceCaption, 88, false, 40 }, { &silenceDownBtn, 26 }, { &silenceValue, 88, false, 70 },
                        { &silenceUpBtn, 26 }, { nullptr, 10, false, 4 }, { &nameCaption, 48 }, { &labelEdit, 120, true, 90 } }, 3);
     layoutRow (row2, { { &startCaption, 38, false, 34 }, { &startEarlierBtn, 66 }, { &startLaterBtn, 66 }, { nullptr, 6, false, 2 },
                        { &endCaption, 26, false, 22 }, { &endEarlierBtn, 66 }, { &endLaterBtn, 66 }, { nullptr, 6, false, 2 },
-                       { &fadeCaption, 54, false, 48 }, { &fadeBox, 110, false, 96 }, { nullptr, 0, true } }, 3);
+                       { &fadeCaption, 54, false, 48 }, { &fadeBox, 118, false, 100 }, { nullptr, 6, false, 2 },
+                       { &stemsBtn, 84, false, 70 }, { nullptr, 0, true } }, 3);
     layoutRow (row3, { { &tempoCaption, 46 }, { &segTempoEdit, 80 }, { nullptr, 6 },
                        { &toneCaption, 36 }, { &toneDownBtn, 26 }, { &toneValue, 46 }, { &toneUpBtn, 26 }, { nullptr, 6 },
                        { &gainCaption, 60 }, { &gainEdit, 70 }, { &levelInfo, 150, false, 90 }, { nullptr, 0, true } }, 3);
@@ -2775,6 +3449,22 @@ void MixEditor::Impl::segmentMenu (int index, double mixSeconds)
                              true, bars == current);
         m.addSubMenu (index == 0 ? tr ("Silencio antes (al empezar el mix)") : tr ("Silencio antes de este tramo"), silence);
     }
+    if (index > 0)
+    {
+        // Solape: entra N compases antes de que termine el anterior (solo los que caben) y cómo se mezclan
+        juce::PopupMenu overlap;
+        const int current = effectiveOverlapBars (index), fits = maxOverlapBars (index);
+        for (int bars : { 0, 1, 2, 4, 8 })
+            overlap.addItem (200 + bars, bars == 0 ? juce::String ("Ninguno") : juce::String (bars) + (bars == 1 ? tr (" compás") : juce::String (" compases")),
+                             bars <= fits, bars == current);
+        overlap.addSeparator();
+        const int blend = proj->segments[(size_t) index].overlapBlend;
+        overlap.addItem (300 + MixSegment::blendFadeOut, "Baja el anterior", current > 0, blend == MixSegment::blendFadeOut);
+        overlap.addItem (300 + MixSegment::blendCrossfade, "Fundido cruzado", current > 0, blend == MixSegment::blendCrossfade);
+        overlap.addItem (300 + MixSegment::blendBoth, "Los dos enteros", current > 0, blend == MixSegment::blendBoth);
+        m.addSubMenu (tr ("Solape con el anterior"), overlap);
+    }
+    m.addItem (7, tr ("Pistas del tramo..."));
     m.addSeparator();
     m.addItem (4, "Quitar");
     std::weak_ptr<bool> guard = alive;
@@ -2795,9 +3485,14 @@ void MixEditor::Impl::segmentMenu (int index, double mixSeconds)
             case 4: impl.removeSegment (index); break;
             case 5: impl.setMixCursor (mixSeconds); impl.playMix (mixSeconds); break;
             case 6: impl.chooseSegment (index); impl.playJoin(); break;
+            case 7: impl.chooseSegment (index); impl.openStemsPanel (index); break;
             default:
                 if (result >= 100 && result <= 100 + MixSegment::maxSilenceBars)
                     impl.setSilenceBars (index, result - 100);
+                else if (result >= 200 && result <= 200 + MixSegment::maxOverlapBars)
+                    impl.setGap (index, result == 200 ? juce::jmax (0, impl.gapOf (index)) : -(result - 200));   // "Ninguno" no quita un silencio
+                else if (result >= 300 && result <= 302)
+                    impl.setOverlapBlend (index, result - 300);
                 break;
         }
     });
@@ -3061,9 +3756,12 @@ void MixEditor::Impl::setSilenceBars (int index, int bars)
     if (proj == nullptr || index < 0 || index >= (int) proj->segments.size())
         return;
     const int value = juce::jlimit (0, MixSegment::maxSilenceBars, bars);
-    if (value == proj->segments[(size_t) index].silenceBars)
+    auto& seg = proj->segments[(size_t) index];
+    if (value == seg.silenceBars && (value == 0 || seg.overlapBars == 0))
         return;
-    proj->segments[(size_t) index].silenceBars = value;
+    seg.silenceBars = value;
+    if (value > 0)
+        seg.overlapBars = 0;   // con silencio no hay solape
     changed();
 }
 
@@ -3072,6 +3770,11 @@ void MixEditor::Impl::fadeChosen()
 {
     auto* seg = currentSegment();
     const int id = fadeBox.getSelectedId();
+    if (seg != nullptr && id >= 11 && id <= 13)
+    {
+        setOverlapBlend (selectedSegment(), id - 11);
+        return;
+    }
     if (seg == nullptr || id < 1 || id > 5)
         return;
     const int meter = segmentMeter (*seg);
@@ -3150,6 +3853,11 @@ void MixEditor::setSegmentLevels (std::vector<MixLevel> levels)
 {
     impl->segmentLevels = std::move (levels);
     impl->updatePanel();
+}
+
+void MixEditor::showStemsPanel()
+{
+    impl->openStemsPanel (selectedSegment);
 }
 
 void MixEditor::selectBars (int firstBar, int lastBar)
