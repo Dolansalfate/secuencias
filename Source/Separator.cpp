@@ -26,19 +26,29 @@ namespace
     // audio-separator exige ffmpeg en el PATH aunque reciba WAV
     bool ffmpegInPath()
     {
-       #if JUCE_WINDOWS
-        const juce::String separator = ";", exe = "ffmpeg.exe";
-       #else
-        const juce::String separator = ":", exe = "ffmpeg";
-       #endif
-        juce::StringArray dirs;
-        dirs.addTokens (juce::String (std::getenv ("PATH") != nullptr ? std::getenv ("PATH") : ""), separator, "\"");
-        dirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".local/bin").getFullPathName());
-        for (auto& d : dirs)
-            if (d.isNotEmpty() && juce::File::isAbsolutePath (d) && juce::File (d).getChildFile (exe).existsAsFile())
-                return true;
-        return false;
+        return Separator::findFfmpeg() != juce::File();
     }
+}
+
+juce::File Separator::findFfmpeg()
+{
+   #if JUCE_WINDOWS
+    const juce::String separator = ";", exe = "ffmpeg.exe";
+   #else
+    const juce::String separator = ":", exe = "ffmpeg";
+   #endif
+    juce::StringArray dirs;
+    dirs.addTokens (juce::String (std::getenv ("PATH") != nullptr ? std::getenv ("PATH") : ""), separator, "\"");
+    dirs.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".local/bin").getFullPathName());
+   #if JUCE_MAC
+    // Una app abierta desde el Finder no hereda el PATH de la terminal: las carpetas de Homebrew
+    dirs.add ("/opt/homebrew/bin");
+    dirs.add ("/usr/local/bin");
+   #endif
+    for (auto& d : dirs)
+        if (d.isNotEmpty() && juce::File::isAbsolutePath (d) && juce::File (d).getChildFile (exe).existsAsFile())
+            return juce::File (d).getChildFile (exe);
+    return {};
 }
 
 Separator::Separator() : juce::Thread ("Demucs") {}

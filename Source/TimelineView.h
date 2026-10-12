@@ -90,6 +90,10 @@ public:
     bool deleteSelectedMidiHits();   // Supr: avisa onMidiDelete de la pista con selección; false si no había ninguna
 
     void zoomToFit();
+    // Modo reproducción: sin edición (sin menús, sin mover marcadores ni tramos, sin tocar las pistas MIDI); clic en
+    // la regla o en un carril sigue saltando, y un clic en un marcador va a él
+    void setReadOnly (bool);
+    bool isReadOnly() const { return readOnly; }
 
     std::function<void (double seconds)> onSeek;
     std::function<void (int index, bool popup)> onMarkerClicked;
@@ -155,6 +159,7 @@ private:
     std::vector<NoteView> notes;
     std::vector<ClipView> clips;
     std::vector<LaneClips> laneClips;              // por carril (setLaneClips)
+    bool readOnly = false;
     bool anyOwnLane() const;
     bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo
     bool clipDragTrackOnly = false;                // con Ctrl: solo el tramo de esa pista

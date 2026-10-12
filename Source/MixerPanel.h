@@ -26,6 +26,8 @@ public:
     // sonido del trigger, 2 = ambas, 3 = trigger sin sonido asignado (aviso).
     void setTriggerLabel (const juce::String& text, int mode);
     void setTriggerBoxVisible (bool);   // los canales del sampler no la tienen
+    // Modo reproducción: solo fader, mute, solo y salida (sin editar el nivelado, el trigger ni abrir el plugin)
+    void setReadOnly (bool);
 
     juce::ComboBox& outputBox() { return outBox; }
     LoadedTrack& getTrack()     { return track; }
@@ -136,6 +138,7 @@ public:
     void setLevelGains (const std::vector<double>& dbPerStem, bool enabled);
     void setTriggerLabel (int track, const juce::String& text, int mode);   // casilla del trigger de esa pista
     void setMasterGainDb (float db) { master.setGainDb (db); }
+    void setReadOnly (bool);   // ver ChannelStrip::setReadOnly (también para los canales que se creen después)
     void tick (AudioEngine&);
 
     void resized() override;
@@ -144,6 +147,8 @@ private:
     juce::Viewport view;
     juce::Component holder;
     juce::OwnedArray<ChannelStrip> strips, samplerStrips, midiStrips, instrumentStrips;
+    bool readOnly = false;
+    void applyReadOnly();
     ClickStrip click;
     MasterStrip master;
 };

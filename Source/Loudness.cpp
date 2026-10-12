@@ -251,6 +251,25 @@ namespace loudness
         return juce::Decibels::gainToDecibels (lowest, -100.0f);
     }
 
+    bool parseTarget (const juce::String& text, double& lufs)
+    {
+        const auto clean = text.replaceCharacter (',', '.').retainCharacters ("0123456789.-+");
+        if (! clean.containsAnyOf ("0123456789"))
+            return false;
+        const double value = clean.getDoubleValue();
+        if (! std::isfinite (value))
+            return false;
+        lufs = juce::jlimit (minTargetLufs, maxTargetLufs, -std::abs (value));
+        return true;
+    }
+
+    juce::String targetText (double lufs)
+    {
+        const double rounded = std::round (lufs * 10.0) / 10.0;
+        const bool whole = std::abs (rounded - std::round (rounded)) < 1.0e-6;
+        return (whole ? juce::String ((int) std::lround (rounded)) : juce::String (rounded, 1).replaceCharacter ('.', ',')) + " LUFS";
+    }
+
     double gainToTarget (const Measurement& m, double targetLufs, double maxPeakDb)
     {
         if (m.lufs <= unknown + 1.0)

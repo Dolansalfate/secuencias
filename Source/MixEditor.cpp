@@ -1,5 +1,6 @@
 #include "MixEditor.h"
 #include "UiUtils.h"
+#include "Loudness.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -1725,12 +1726,37 @@ MixEditor::Impl::Impl (MixEditor& o) : owner (o)
     levelBox.addItem ("Nivelar a -14 LUFS", 3);
     levelBox.addItem ("Nivelar a -16 LUFS", 4);
     levelBox.addItem ("Nivelar a -18 LUFS", 5);
+    levelBox.addItem ("Otro valor...", 9);
     levelBox.onChange = [this]
     {
         auto* proj = project();
         const int id = levelBox.getSelectedId();
         if (proj == nullptr || id <= 0)
             return;
+        if (id == 9)
+        {
+            // Cualquier sonoridad entre -30 y -6 LUFS (el limitador mantiene el techo de pico)
+            updateControls();   // mientras se escribe, el valor de antes
+            auto* w = new juce::AlertWindow (tr ("Nivelar el mix"), tr ("Sonoridad de cada tramo en LUFS (entre -30 y -6; el pico nunca pasa de -1 dBTP)"),
+                                             juce::MessageBoxIconType::NoIcon, &owner);
+            w->addTextEditor ("lufs", decimal (proj->levelLufs < 0.0 ? proj->levelLufs : MixProject::defaultLevelLufs, 1));
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            std::weak_ptr<bool> guard = alive;
+            auto* self = this;
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([guard, self, w] (int result)
+            {
+                double lufs = 0.0;
+                if (guard.expired() || result != 1 || ! loudness::parseTarget (w->getTextEditorContents ("lufs"), lufs))
+                    return;
+                if (auto* current = self->project(); current != nullptr && std::abs (lufs - current->levelLufs) > 1.0e-6)
+                {
+                    current->levelLufs = lufs;
+                    self->changed();
+                }
+            }), true);
+            return;
+        }
         const double lufs = id == 1 ? 0.0 : -12.0 - 2.0 * (id - 2);
         if (std::abs (lufs - proj->levelLufs) < 1.0e-6)
             return;
@@ -2492,7 +2518,7 @@ void MixEditor::Impl::updateControls()
         if (levelId > 0)
             levelBox.setSelectedId (levelId, juce::dontSendNotification);
         else
-            levelBox.setText ("Nivelar a " + decimal (proj->levelLufs, 1) + " LUFS", juce::dontSendNotification);   // escrito a mano
+            levelBox.setText ("Nivelar a " + loudness::targetText (proj->levelLufs), juce::dontSendNotification);   // otro valor
     }
     createBtn.setEnabled (! proj->segments.empty() && ! busy);
     separateBtn.setEnabled (! proj->segments.empty());

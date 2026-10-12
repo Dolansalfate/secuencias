@@ -178,6 +178,8 @@ public:
     static std::shared_ptr<LoadedSong> loadSong (const SongInfo&, double sampleRate,
                                                  juce::AudioFormatManager&,
                                                  const std::function<bool()>& shouldAbort);
+    // La mezcla guardada de una pista (fader, mute y salida; sin solo) en sus atómicos
+    static void applyStemMix (LoadedTrack&, const StemInfo&);
     void setSong (std::shared_ptr<LoadedSong>);
 
     void play();
@@ -198,6 +200,9 @@ public:
     void clearLoop();
 
     void setClick (bool enabled, double bpm, double offsetSeconds, float gainDb, int outputPair);
+    bool isClickOn() const                         { return clickOn.load(); }
+    int getClickOutputPair() const                 { return clickPair.load(); }
+    void setClickRouting (bool enabled, int outputPair)   { clickPair = juce::jmax (0, outputPair); clickOn = enabled; }   // exportar
     // Con rejilla, el click suena en los tiempos detectados (acento en el primero del compás);
     // sin ella (nullptr o vacía), en una rejilla fija de 4/4 según BPM e inicio.
     void setBeatGrid (std::shared_ptr<const BeatGrid>);

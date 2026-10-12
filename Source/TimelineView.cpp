@@ -62,6 +62,20 @@ public:
         dragging = -1;
         if (owner.song == nullptr || e.x < headerWidth)
             return;
+        if (owner.readOnly)
+        {
+            // Solo saltar: a un marcador o a donde se hizo clic
+            if (e.mods.isPopupMenu())
+                return;
+            if (const int m = markerAt (e.x); m >= 0 && ! inTempoRow (e.y))
+            {
+                if (owner.onMarkerClicked)
+                    owner.onMarkerClicked (m, false);
+                return;
+            }
+            owner.seekAt (e.x - headerWidth, false);
+            return;
+        }
         if (inTempoRow (e.y))
         {
             const int band = tempoBandAt (e.x);
@@ -355,10 +369,16 @@ public:
         trig.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
         trig.onClick = [this] { if (owner.onTrigger) owner.onTrigger (index, trig.getToggleState()); };
         addAndMakeVisible (trig);
+        trig.setEnabled (! owner.readOnly);
         refreshState();
         ui::disableFocus (*this);
         setWantsKeyboardFocus (false);
         setMouseClickGrabsKeyboardFocus (false);
+    }
+
+    void setReadOnlyLook (bool ro)
+    {
+        trig.setEnabled (! ro);   // el trigger se edita fuera del modo reproducción
     }
 
     void refreshState()
@@ -403,12 +423,18 @@ public:
     {
         if (e.x < headerWidth)
         {
-            if (e.mods.isPopupMenu() && owner.onLaneHeaderMenu)
+            if (e.mods.isPopupMenu() && owner.onLaneHeaderMenu && ! owner.readOnly)
                 owner.onLaneHeaderMenu (index);   // menú del trigger de la pista
             return;
         }
         if (owner.song == nullptr)
             return;
+        if (owner.readOnly)
+        {
+            if (! e.mods.isPopupMenu())
+                owner.seekAt (e.x - headerWidth, false);
+            return;
+        }
         const double t = juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (e.x - headerWidth));
         if (e.mods.isPopupMenu())
         {
@@ -1532,6 +1558,16 @@ void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr)
     zoomToFit();
 }
 
+void TimelineView::setReadOnly (bool ro)
+{
+    readOnly = ro;
+    for (auto* lane : lanes)
+        lane->setReadOnlyLook (ro);
+    for (auto* lane : midiLanes)
+        lane->setInterceptsMouseClicks (! ro, ! ro);   // las pistas MIDI no se tocan
+    repaint();
+}
+
 void TimelineView::setLoadingText (const juce::String& text)
 {
     emptyLabel.setText (text, juce::dontSendNotification);
@@ -1570,6 +1606,7 @@ void TimelineView::setMidiLanes (const std::vector<MidiLaneView>& views)
         {
             auto* lane = midiLanes.add (new MidiLane (*this, (int) i));
             lane->setData (views[i], false);
+            lane->setInterceptsMouseClicks (! readOnly, ! readOnly);
             laneHolder.addAndMakeVisible (lane);
         }
         relayout = true;

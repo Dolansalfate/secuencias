@@ -62,6 +62,8 @@ public:
     static double relativeCost (const SeparationOptions&);
     // true si en el mismo venv que "python" está instalado audio-separator (BS-Roformer y DrumSep) y hay ffmpeg.
     static bool isRoformerAvailable (const juce::String& pythonPath);
+    // ffmpeg (en el PATH, ~/.local/bin y, en macOS, las carpetas de Homebrew); File() si no está
+    static juce::File findFfmpeg();
     // Nombre de archivo de una parte de la batería a partir de la salida de audio-separator
     // ("drums_(Kick)_MDX23C-DrumSep-...wav" -> "drums_kick.wav"); vacío si no es una parte conocida.
     static juce::String drumPartFileName (const juce::String& separatorOutputName);

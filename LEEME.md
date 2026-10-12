@@ -14,6 +14,24 @@ El mismo código sigue compilando en macOS.
 - **Mezclador** por canción: fader en dB, mute, solo, medidor estéreo con pico, RMS y clip,
   fader maestro y **salida por pista** (por ejemplo, click y guía a la salida 3-4 para in-ears,
   el resto a 1-2 para el PA).
+- **Modo reproducción** (botón "Reproducción"; "Volver a editar" para salir): para tocar. Se ve igual
+  que la vista de pistas, pero no se puede editar nada: solo el volumen (fader, mute, solo, maestro y
+  click) y la salida de cada pista. A la izquierda está el **show**: las canciones que vas a tocar, en
+  orden, con su duración y el **total de música del show**; abajo, "Todas las canciones" (doble clic o
+  clic derecho para agregarlas al show). Puedes tener varios shows (el selector de arriba: nuevo,
+  renombrar, duplicar, borrar) y uno activo. Todo el show se deja **precargado en memoria** ya listo
+  (con tempo, tono, cortes y triggers aplicados), así al elegir una canción y dar Play suena al
+  instante; el punto verde junto a cada canción dice que ya está lista. Si el show no cabe en la mitad
+  de la memoria del equipo, quedan siempre listas la actual, la anterior y las dos siguientes, y las
+  canciones con tempo o tono cambiados se guardan ya procesadas en disco para cargarlas rápido. Al
+  terminar una canción queda cargada la siguiente, detenida, esperando tu Play. Las flechas y
+  RePág/AvPág (el pedal) recorren el show. La app recuerda el modo al volver a abrirla.
+- **Exportar la mezcla** (Ctrl+E, o clic derecho en la canción > "Exportar la mezcla..."): un archivo
+  con la canción tal como suena (cortes, tempo, tono, faders, mute, nivelado, triggers e instrumentos)
+  para mandar a los demás músicos. Eliges nombre, formato (WAV, o MP3 de 320 kbps si tienes ffmpeg:
+  `sudo apt install ffmpeg`), el click (sin click, mezclado o en un archivo aparte), si quieres además
+  cada pista por separado (en una carpeta, sumando exactamente la mezcla) y el nivel (como suena, o
+  llevado al objetivo de LUFS con limitador). Tarda unos segundos; mientras tanto la app no suena.
 - **Modo en vivo** (botón "En vivo" o F11): esconde la vista de arreglo y agranda el título,
   la sección y el tiempo para leerlos desde lejos.
 - **Guía de escenario** (botón "Pantalla" o F12): una ventana aparte para poner en una segunda
@@ -69,7 +87,8 @@ El mismo código sigue compilando en macOS.
   Shift + clic para llevar ahí el borde más cercano, o escribe los compases arriba a la derecha
   ("Compases [8] a [16]": un clic en el número, escribes y Enter). Un clic suelto solo mueve la
   marca blanca desde donde suena "Escuchar"; el clic derecho ofrece "Inicio del tramo aquí" y
-  "Fin del tramo aquí". Arriba, "Nivelar a -14 LUFS" (o -12, -16, -18, o "Sin nivelar") deja cada
+  "Fin del tramo aquí". Arriba, "Nivelar a -14 LUFS" (o -12, -16, -18, "Otro valor..." para escribir
+  cualquiera entre -30 y -6, o "Sin nivelar") deja cada
   tramo a la misma sonoridad, así un tema no suena más fuerte que el otro en el mix; los mixes nuevos
   empiezan en -14. Si una grabación antigua es baja pero tiene picos altos, un limitador baja solo
   esos picos para que llegue sin saturar (el panel del tramo dice cuánto: "Niv +6,2 dB · lim -3,9",
@@ -158,7 +177,8 @@ El mismo código sigue compilando en macOS.
   un marcador donde empieza cada tema (o usa "Crear marcadores en los cambios de tempo" en la
   banda de tempo); sin marcadores toda la canción es un solo tramo. Al mover o añadir
   marcadores se vuelve a medir solo (y se reemplazan los valores escritos a mano). "Nivelar setlist" hace lo mismo entre canciones. El objetivo se elige al lado del
-  botón; con clic derecho en un marcador se retoca su ganancia. Un tramo muy bajo pero con
+  botón (-12, -14, -16, -18 u "Otro valor...": escribes el que quieras, por ejemplo -15,5, entre -30 y -6;
+  el limitador sigue cuidando que ningún pico pase de -1 dBTP); con clic derecho en un marcador se retoca su ganancia. Un tramo muy bajo pero con
   picos altos no se puede subir del todo (tope -1 dBTP): baja el objetivo para que sean los
   fuertes los que bajen.
 - **Análisis musical (IA)**: tempo, compases, acordes y tonalidad de cada canción. Los acordes
@@ -223,8 +243,9 @@ levanta con todo. También sirve copiar la carpeta `Secuencias` entera a `~/Mús
 |---|---|
 | Espacio | Play / pausa |
 | Esc | Stop (vuelve al inicio) |
-| Flecha derecha o AvPág | Siguiente canción |
+| Flecha derecha o AvPág | Siguiente canción (en el modo reproducción, del show) |
 | Flecha izquierda o RePág | Canción anterior |
+| Ctrl+E | Exportar la mezcla |
 | 1 – 9 (también en el teclado numérico) | Ir al marcador |
 | M | Añadir marcador |
 | L | Loop de sección on/off |

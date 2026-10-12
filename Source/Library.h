@@ -239,6 +239,13 @@ struct SongInfo
     std::vector<Clip>* ownClips (const juce::String& stemFile);
 };
 
+// Un show: canciones de la biblioteca elegidas para tocar en vivo, en orden (por carpeta). Se guardan en shows.json.
+struct SongShow
+{
+    juce::String name;
+    juce::StringArray folders;   // nombres de carpeta dentro de la biblioteca (sin repetir)
+};
+
 // Biblioteca en ~/Music/Secuencias: una carpeta por canción + setlist.json
 class Library
 {
@@ -250,6 +257,14 @@ public:
     void load();
     bool saveSong (const SongInfo&) const;
     void saveSetlist() const;
+    // Shows (modo reproducción): shows.json { "active", "shows": [{ "name", "songs": [carpetas] }] }. Siempre hay al
+    // menos uno; load() los lee (sin archivo, un show "Show" vacío).
+    void loadShows();
+    void saveShows() const;
+    std::vector<int> showSongs (int show) const;   // índices en `songs` de las canciones de ese show que existen, en orden
+    SongShow* currentShow()                        { return juce::isPositiveAndBelow (activeShow, (int) shows.size()) ? &shows[(size_t) activeShow] : nullptr; }
+    std::vector<SongShow> shows;
+    int activeShow = 0;
 
     // moveFiles: mover en vez de copiar (solo para archivos temporales propios, como el resultado de Demucs)
     int importStemFiles (const juce::Array<juce::File>& files, const juce::String& songName, bool moveFiles = false);

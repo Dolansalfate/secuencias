@@ -90,10 +90,8 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
         track->name = stem.name;
         track->stemIndex = (int) i;
         track->songTime = stem.songTime;
-        track->gain = stem.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (stem.gainDb);
+        applyStemMix (*track, stem);
         track->smoothedGain = track->gain.load();
-        track->muted = stem.muted;
-        track->outputPair = juce::jmax (0, stem.outputPair);
 
         if (std::abs (reader->sampleRate - sr) < 1.0)
         {
@@ -124,6 +122,14 @@ std::shared_ptr<LoadedSong> AudioEngine::loadSong (const SongInfo& info, double 
     }
 
     return song;
+}
+
+void AudioEngine::applyStemMix (LoadedTrack& track, const StemInfo& stem)
+{
+    track.gain = stem.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (stem.gainDb);
+    track.muted = stem.muted;
+    track.solo = false;
+    track.outputPair = juce::jmax (0, stem.outputPair);
 }
 
 void AudioEngine::setInstruments (std::shared_ptr<InstrumentSet> set)

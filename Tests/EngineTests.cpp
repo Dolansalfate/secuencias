@@ -14,6 +14,8 @@
 #include "Recorder.h"
 #include "Stretcher.h"
 #include "MixProject.h"
+#include "Bounce.h"
+#include "RenderCache.h"
 #include <cmath>
 #include <iostream>
 #include <set>
@@ -1279,6 +1281,170 @@ int main()
                        && split.ownClips ("bass.wav") != nullptr);
             }
         }
+    }
+
+    std::cout << "[Bounce] exportar la mezcla: cada fuente aparte, solo ignorado, mute respetado, click aparte, a tiempo\n";
+    {
+        auto bounceSong = std::make_shared<LoadedSong>();
+        bounceSong->sampleRate = sr;
+        bounceSong->length = (juce::int64) (2.0 * sr);
+        for (int k = 0; k < 2; ++k)
+        {
+            auto t = std::make_unique<LoadedTrack>();
+            t->name = k == 0 ? "Pareja" : "Golpe";
+            t->stemIndex = k;
+            t->buffer.setSize (2, (int) (2.0 * sr));
+            t->buffer.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                if (k == 0)
+                    juce::FloatVectorOperations::fill (t->buffer.getWritePointer (ch), 0.2f, t->buffer.getNumSamples());
+                else
+                    t->buffer.setSample (ch, (int) sr, 0.8f);   // un golpe justo en 1 s
+            bounceSong->tracks.push_back (std::move (t));
+        }
+        auto& steady = *bounceSong->tracks[0];
+        auto& hit = *bounceSong->tracks[1];
+        steady.gain = 0.5f;
+        steady.outputPair = 1;
+        steady.solo = true;   // el solo no cuenta al exportar
+        hit.muted = true;     // el mute sí
+        AudioEngine bounceEngine;
+        bounceEngine.setSong (bounceSong);
+        bounceEngine.setClick (true, 120.0, 0.0, 0.0f, 0);
+        bounce::Options opts;
+        opts.stems = true;
+        opts.clickFile = true;
+        auto res = bounce::render (bounceEngine, *bounceSong, opts);
+        CHECK (! res.aborted && res.mix.getNumSamples() == (int) (2.0 * sr) && res.stems.size() == 2 && res.click.getNumSamples() == res.mix.getNumSamples());
+        if (res.stems.size() == 2)
+        {
+            CHECK (std::abs (res.mix.getSample (0, (int) (0.75 * sr)) - 0.1f) < 1.0e-4f);   // 0,2 a la mitad, sin el click
+            CHECK (std::abs (res.mix.getSample (0, (int) sr) - 0.1f) < 1.0e-4f);            // el golpe muteado no está
+            CHECK (std::abs (res.stems[0].audio.getSample (1, (int) (1.5 * sr)) - 0.1f) < 1.0e-4f && res.stems[0].name == "Pareja");
+            CHECK (res.stems[1].audio.getMagnitude (0, res.stems[1].audio.getNumSamples()) < 1.0e-6f);
+            CHECK (res.click.getMagnitude (0, (int) (0.45 * sr), (int) (0.1 * sr)) > 0.1f);   // el tiempo de 0,5 s
+        }
+        // Todo vuelve a como estaba
+        CHECK (steady.outputPair.load() == 1 && steady.solo.load() && hit.muted.load());
+        CHECK (bounceEngine.isClickOn() && bounceEngine.getClickOutputPair() == 0 && ! bounceEngine.isPlaying());
+        // A tiempo: sin mute, el golpe sale en la muestra exacta
+        hit.muted = false;
+        steady.gain = 0.0f;
+        opts = bounce::Options();
+        res = bounce::render (bounceEngine, *bounceSong, opts);
+        int at = -1;
+        float best = 0.0f;
+        for (int i = 0; i < res.mix.getNumSamples(); ++i)
+            if (std::abs (res.mix.getSample (0, i)) > best)
+            {
+                best = std::abs (res.mix.getSample (0, i));
+                at = i;
+            }
+        CHECK (at == (int) sr && std::abs (best - 0.8f) < 1.0e-4f);
+        if (at != (int) sr)
+            std::cout << "  golpe exportado en " << at << " (" << best << ")\n";
+        // Sonoridad pedida: la mezcla llega al objetivo y las pistas reciben lo mismo; nada pasa de 0,999
+        {
+            bounce::Result loud;
+            loud.mix.setSize (2, (int) (4.0 * sr));
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < loud.mix.getNumSamples(); ++i)
+                    loud.mix.setSample (ch, i, 0.05f * std::sin (2.0f * juce::MathConstants<float>::pi * 997.0f * (float) i / (float) sr));
+            bounce::Source s;
+            s.name = "x";
+            s.audio = loud.mix;
+            loud.stems.push_back (std::move (s));
+            const double g = bounce::normalize (loud, sr, -14.0);
+            const double after = loudness::measure (loud.mix, sr, {}, false).whole.lufs;
+            CHECK (g > 10.0 && std::abs (after + 14.0) < 0.3);
+            float diff = 0.0f;
+            for (int i = 0; i < loud.mix.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (loud.mix.getSample (0, i) - loud.stems[0].audio.getSample (0, i)));
+            CHECK (diff < 1.0e-6f);
+            loud.stems[0].audio.applyGain (10.0f);   // una pista que satura
+            CHECK (bounce::preventClipping (loud) > 0.0 && loud.stems[0].audio.getMagnitude (0, loud.mix.getNumSamples()) <= 0.9991f);
+        }
+        // Objetivos escritos a mano
+        double lufs = 0.0;
+        CHECK (loudness::parseTarget ("-15,5", lufs) && std::abs (lufs + 15.5) < 1.0e-9);
+        CHECK (loudness::parseTarget ("12 LUFS", lufs) && std::abs (lufs + 12.0) < 1.0e-9);
+        CHECK (loudness::parseTarget ("-2", lufs) && std::abs (lufs - loudness::maxTargetLufs) < 1.0e-9);
+        CHECK (loudness::parseTarget ("-80", lufs) && std::abs (lufs - loudness::minTargetLufs) < 1.0e-9);
+        CHECK (! loudness::parseTarget ("abc", lufs));
+        CHECK (loudness::targetText (-14.0) == "-14 LUFS" && loudness::targetText (-15.5) == "-15,5 LUFS");
+    }
+
+    std::cout << "[Reproduccion] shows guardados en shows.json y caché de canciones renderizadas\n";
+    {
+        Library showLib (tmp.getChildFile ("shows"));
+        writeSine (src.getChildFile ("bass.wav"), 44100.0, 1.0, 2);
+        for (auto* songName : { "Uno", "Dos", "Tres" })
+        {
+            auto one = tmp.getChildFile ("una").getChildFile (songName);
+            one.createDirectory();
+            writeSine (one.getChildFile ("bass.wav"), 44100.0, 1.0, 2);
+            CHECK (showLib.importStemFolder (one, songName) >= 0);
+        }
+        showLib.load();
+        CHECK (showLib.songs.size() == 3 && showLib.shows.size() == 1 && showLib.shows[0].folders.isEmpty());
+        showLib.shows[0].folders = { showLib.songs[2].folder.getFileName(), "No existe", showLib.songs[0].folder.getFileName() };
+        showLib.shows.push_back ({ "Otro", { showLib.songs[1].folder.getFileName() } });
+        showLib.activeShow = 1;
+        showLib.saveShows();
+        Library again (tmp.getChildFile ("shows"));
+        again.load();
+        CHECK (again.shows.size() == 2 && again.activeShow == 1 && again.shows[1].name == "Otro");
+        const auto rows = again.showSongs (0);   // en su orden, sin la carpeta que ya no está
+        CHECK (rows.size() == 2 && again.songs[(size_t) rows[0]].name == "Tres" && again.songs[(size_t) rows[1]].name == "Uno");
+        CHECK (again.currentShow() != nullptr && again.currentShow()->name == "Otro");
+
+        // Caché: lo guardado vuelve igual, con la mezcla de la canción; otra clave u otra frecuencia no sirven
+        const auto cacheRoot = tmp.getChildFile ("cache");
+        auto rendered = std::make_shared<LoadedSong>();
+        rendered->sampleRate = 48000.0;
+        rendered->length = 4800;
+        for (int k = 0; k < 2; ++k)
+        {
+            auto t = std::make_unique<LoadedTrack>();
+            t->name = "t" + juce::String (k);
+            t->stemIndex = k;
+            t->buffer.setSize (2, 4800);
+            for (int i = 0; i < 4800; ++i)
+                for (int c = 0; c < 2; ++c)
+                    t->buffer.setSample (c, i, 0.25f * (float) std::sin (0.01 * i * (k + 1)) * (c == 0 ? 1.0f : -1.0f));
+            rendered->tracks.push_back (std::move (t));
+        }
+        CHECK (rendercache::store (cacheRoot, "clave-1", *rendered));
+        SongInfo mixInfo;
+        mixInfo.stems.resize (2);
+        mixInfo.stems[0].name = "Bajo";
+        mixInfo.stems[1].name = "Voces";
+        mixInfo.stems[1].gainDb = -6.0f;
+        mixInfo.stems[1].muted = true;
+        mixInfo.stems[1].outputPair = 1;
+        auto back = rendercache::load (cacheRoot, "clave-1", mixInfo, 48000.0, formats);
+        CHECK (back != nullptr && back->length == 4800 && back->tracks.size() == 2);
+        if (back != nullptr && back->tracks.size() == 2)
+        {
+            float err = 0.0f;
+            for (int k = 0; k < 2; ++k)
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 4800; ++i)
+                        err = juce::jmax (err, std::abs (back->tracks[(size_t) k]->buffer.getSample (c, i) - rendered->tracks[(size_t) k]->buffer.getSample (c, i)));
+            CHECK (err < 1.0e-6f);   // 24 bits
+            const auto& v = *back->tracks[1];
+            CHECK (v.name == "Voces" && v.muted.load() && v.outputPair.load() == 1
+                   && std::abs (v.gain.load() - juce::Decibels::decibelsToGain (-6.0f)) < 1.0e-4f);
+        }
+        CHECK (rendercache::load (cacheRoot, "clave-2", mixInfo, 48000.0, formats) == nullptr);
+        CHECK (rendercache::load (cacheRoot, "clave-1", mixInfo, 44100.0, formats) == nullptr);
+        // Al pasar del tope se borra la entrada menos usada
+        CHECK (rendercache::store (cacheRoot, "clave-3", *rendered));
+        cacheRoot.getChildFile (juce::String::toHexString (juce::String ("clave-1").hashCode64()))
+            .setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::hours (1));
+        rendercache::prune (cacheRoot, 80000);   // cabe una entrada (unos 58 KB), no dos
+        CHECK (rendercache::load (cacheRoot, "clave-1", mixInfo, 48000.0, formats) == nullptr);
+        CHECK (rendercache::load (cacheRoot, "clave-3", mixInfo, 48000.0, formats) != nullptr);
     }
 
     std::cout << "[AudioEngine] sampler de triggers: dispara muestras en las posiciones exactas\n";

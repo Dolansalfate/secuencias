@@ -38,6 +38,51 @@ public:
 };
 
 //==============================================================================
+// "Todas las canciones" en el modo reproducción (para agregarlas al show)
+class MainComponent::AllSongsModel : public juce::ListBoxModel
+{
+public:
+    explicit AllSongsModel (MainComponent& o) : owner (o) {}
+
+    int getNumRows() override { return (int) owner.library.songs.size(); }
+
+    void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
+    {
+        if (! juce::isPositiveAndBelow (row, (int) owner.library.songs.size()))
+            return;
+        if (selected)
+            g.fillAll (accent.withAlpha (0.18f));
+        const auto& s = owner.library.songs[(size_t) row];
+        const bool inShow = owner.showRowOf (row) >= 0;
+        int right = w - 6;
+        if (const double secs = owner.knownSeconds (s); secs > 0.0)
+        {
+            g.setColour (juce::Colours::grey);
+            g.setFont (font (12.0f));
+            g.drawText (formatTime (secs), w - 48, 0, 44, h, juce::Justification::centredRight);
+            right = w - 52;
+        }
+        g.setColour (inShow ? juce::Colours::grey : juce::Colours::white);
+        g.setFont (font (14.0f));
+        g.drawText ((inShow ? juce::String ("+ ") : juce::String()) + s.name, 10, 0, juce::jmax (0, right - 10), h,
+                    juce::Justification::centredLeft, true);
+    }
+
+    void listBoxItemClicked (int row, const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu())
+            owner.allSongsMenu (row);
+    }
+
+    void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override
+    {
+        owner.addToShow (row, owner.library.activeShow);
+    }
+
+private:
+    MainComponent& owner;
+};
+
 MainComponent::MainComponent()
 {
     formatManager.registerBasicFormats();
@@ -111,8 +156,13 @@ MainComponent::MainComponent()
     cancelSepBtn.onClick = [this] { separator.cancel(); analyzer.cancel(); };
     sepLabel.setFont (font (13.0f));
 
+    playbackBtn.setButtonText (tr ("Reproducción"));
+    playbackBtn.setClickingTogglesState (false);
+    playbackBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
+    playbackBtn.onClick = [this] { setPlaybackMode (! playbackMode); };
+
     for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &stemsBox, &qualityBox, &audioBtn, &aiBtn, &instrumentsBtn,
-                     &sepBar, &sepLabel, &cancelSepBtn })
+                     &sepBar, &sepLabel, &cancelSepBtn, &playbackBtn })
         addAndMakeVisible (c);
     sepBar.setVisible (false);
     cancelSepBtn.setVisible (false);
@@ -129,6 +179,20 @@ MainComponent::MainComponent()
     setlist.setColour (juce::ListBox::backgroundColourId, panel);
     addAndMakeVisible (setlistTitle);
     addAndMakeVisible (setlist);
+    // Modo reproducción: el show elegido, su resumen y la lista de todas las canciones para agregar
+    showBox.onChange = [this] { showBoxChanged(); };
+    showInfoLabel.setFont (font (12.0f));
+    showInfoLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    showInfoLabel.setJustificationType (juce::Justification::topLeft);
+    allSongsTitle.setText ("TODAS LAS CANCIONES", juce::dontSendNotification);
+    allSongsTitle.setFont (font (12.0f, true));
+    allSongsTitle.setColour (juce::Label::textColourId, juce::Colours::grey);
+    allSongsModel = std::make_unique<AllSongsModel> (*this);
+    allSongsList.setModel (allSongsModel.get());
+    allSongsList.setRowHeight (26);
+    allSongsList.setColour (juce::ListBox::backgroundColourId, panel.darker (0.15f));
+    for (auto* c : std::initializer_list<juce::Component*> { &showBox, &showInfoLabel, &allSongsTitle, &allSongsList })
+        addChildComponent (c);
 
     // --- Canción y transporte ---
     songTitle.setFont (font (28.0f, true));
@@ -253,21 +317,38 @@ MainComponent::MainComponent()
         updateGainCurve();
         rebuildMarkers();
     };
+    // Objetivo de nivelado: los habituales o cualquier valor entre -30 y -6 LUFS ("Otro valor..."). Se guarda en
+    // `levelTargetLufs`; las versiones de antes guardaban el índice del selector en `levelTarget`
     targetBox.addItem ("-12 LUFS", 1);
     targetBox.addItem ("-14 LUFS", 2);
     targetBox.addItem ("-16 LUFS", 3);
     targetBox.addItem ("-18 LUFS", 4);
-    targetBox.setSelectedId (props.getUserSettings()->getIntValue ("levelTarget", 2), juce::dontSendNotification);
+    targetBox.addItem ("Otro valor...", 9);
+    {
+        const int oldId = props.getUserSettings()->getIntValue ("levelTarget", 2);
+        const double fromOld = oldId == 1 ? -12.0 : oldId == 3 ? -16.0 : oldId == 4 ? -18.0 : -14.0;
+        double lufs = fromOld;
+        loudness::parseTarget (props.getUserSettings()->getValue ("levelTargetLufs", juce::String (fromOld)), lufs);
+        levelTarget = lufs;
+    }
+    showLevelTarget();
     targetBox.onChange = [this]
     {
-        props.getUserSettings()->setValue ("levelTarget", targetBox.getSelectedId());
-        if (auto* info = currentInfo())
+        const int id = targetBox.getSelectedId();
+        if (id == 9)
         {
-            recomputeSectionGains (*info);   // las mediciones valen; solo cambia el objetivo
-            library.saveSong (*info);
-            updateGainCurve();
-            rebuildMarkers();
+            showLevelTarget();   // mientras se escribe, el valor de antes
+            askText (tr ("Sonoridad objetivo en LUFS (entre -30 y -6; el pico nunca pasa de -1 dBTP)"),
+                     juce::String (levelTarget, 1).replaceCharacter ('.', ','), [this] (const juce::String& text)
+            {
+                double lufs = levelTarget;
+                if (loudness::parseTarget (text, lufs))
+                    setLevelTarget (lufs);
+            });
+            return;
         }
+        if (id >= 1 && id <= 4)
+            setLevelTarget (-10.0 - 2.0 * id);
     };
 
     for (auto* c : std::initializer_list<juce::Component*> { &clickBtn, &bpmLabel, &offsetLabel, &clickVolLabel, &bpmSlider,
@@ -464,9 +545,6 @@ MainComponent::MainComponent()
 
     helpLabel.setFont (font (12.0f));
     helpLabel.setColour (juce::Label::textColourId, juce::Colours::grey);
-    helpLabel.setText (tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción · 1-9: marcador · M: añadir marcador · "
-                           "L: loop · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
-                       juce::dontSendNotification);
     addAndMakeVisible (helpLabel);
 
     disableFocus (*this);
@@ -478,8 +556,16 @@ MainComponent::MainComponent()
     clickControlsFromSong();
     startTimerHz (30);
 
-    if (! library.songs.empty())
-        setlist.selectRow (0);
+    showHelpText();
+    if (props.getUserSettings()->getBoolValue ("playbackMode", false))
+        setPlaybackMode (true);   // vuelve como se cerró (carga la primera del show)
+    if (! library.songs.empty() && currentIndex < 0)
+    {
+        if (playbackMode && ! showRows.empty())
+            loadSongAt (showRows.front());
+        else if (! playbackMode)
+            setlist.selectRow (0);
+    }
 
     if (audioError.isNotEmpty())
     {
@@ -514,6 +600,11 @@ MainComponent::~MainComponent()
     levelPool.removeAllJobs (true, 10000);
     loaderPool.removeAllJobs (true, 10000);
     mixSongPool.removeAllJobs (true, 20000);
+    exportCancel = true;
+    exportPool.removeAllJobs (true, 20000);
+    ++preloadGeneration;
+    preloadPool.removeAllJobs (true, 20000);
+    allSongsList.setModel (nullptr);
     if (pendingMixUpdate != nullptr && pendingMixUpdate->tempFolder != juce::File())
         pendingMixUpdate->tempFolder.deleteRecursively();   // la actualización se vuelve a armar la próxima vez
     stopTimer();
@@ -559,22 +650,32 @@ void MainComponent::resized()
     auto r = getLocalBounds().reduced (10);
 
     auto top = r.removeFromTop (34);
-    importBtn.setBounds (top.removeFromLeft (140));
-    top.removeFromLeft (8);
-    separateBtn.setBounds (top.removeFromLeft (170));
-    top.removeFromLeft (8);
-    mixBtn.setBounds (top.removeFromLeft (100));
-    top.removeFromLeft (8);
-    stemsBox.setBounds (top.removeFromLeft (185));
-    top.removeFromLeft (8);
-    qualityBox.setBounds (top.removeFromLeft (175));
-    top.removeFromLeft (8);
-    drumPartsBtn.setBounds (top.removeFromLeft (150));
-    aiBtn.setBounds (top.removeFromRight (100));
-    top.removeFromRight (8);
-    audioBtn.setBounds (top.removeFromRight (90));
-    top.removeFromRight (8);
-    instrumentsBtn.setBounds (top.removeFromRight (110));
+    // En reproducción no hay nada que importar, separar ni armar: solo el modo y el audio
+    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &stemsBox, &qualityBox, &drumPartsBtn, &aiBtn, &instrumentsBtn })
+        c->setVisible (! playbackMode);
+    importBtn.setBounds (top.removeFromLeft (130));
+    top.removeFromLeft (6);
+    separateBtn.setBounds (top.removeFromLeft (160));
+    top.removeFromLeft (6);
+    mixBtn.setBounds (top.removeFromLeft (95));
+    top.removeFromLeft (6);
+    stemsBox.setBounds (top.removeFromLeft (180));
+    top.removeFromLeft (6);
+    qualityBox.setBounds (top.removeFromLeft (170));
+    top.removeFromLeft (6);
+    drumPartsBtn.setBounds (top.removeFromLeft (145));
+    aiBtn.setBounds (top.removeFromRight (95));
+    top.removeFromRight (6);
+    audioBtn.setBounds (top.removeFromRight (80));
+    top.removeFromRight (6);
+    if (playbackMode)
+        playbackBtn.setBounds (top.removeFromRight (140));
+    else
+    {
+        instrumentsBtn.setBounds (top.removeFromRight (105));
+        top.removeFromRight (6);
+        playbackBtn.setBounds (top.removeFromRight (juce::jmin (125, top.getWidth())));
+    }
 
     r.removeFromTop (6);
     auto sepRow = r.removeFromTop (22);
@@ -587,10 +688,19 @@ void MainComponent::resized()
     r.removeFromTop (6);
 
     auto left = r.removeFromLeft (270);
-    auto setlistHeader = left.removeFromTop (24);
-    levelSetlistBtn.setBounds (setlistHeader.removeFromRight (120).reduced (0, 1));
-    setlistTitle.setBounds (setlistHeader);
-    setlist.setBounds (left);
+    for (auto* c : std::initializer_list<juce::Component*> { &setlistTitle, &levelSetlistBtn })
+        c->setVisible (! playbackMode);
+    for (auto* c : std::initializer_list<juce::Component*> { &showBox, &showInfoLabel, &allSongsTitle, &allSongsList })
+        c->setVisible (playbackMode);
+    if (playbackMode)
+        layoutPlaybackPanel (left);
+    else
+    {
+        auto setlistHeader = left.removeFromTop (24);
+        levelSetlistBtn.setBounds (setlistHeader.removeFromRight (120).reduced (0, 1));
+        setlistTitle.setBounds (setlistHeader);
+        setlist.setBounds (left);
+    }
     r.removeFromLeft (12);
 
     // Armar mix: la sección ocupa el área de la canción (todo lo de la derecha) y queda encima
@@ -621,8 +731,14 @@ void MainComponent::resized()
     transport.removeFromLeft (6);
     nextBtn.setBounds (transport.removeFromLeft (70));
     transport.removeFromLeft (6);
-    recordBtn.setBounds (transport.removeFromLeft (96));
-    transport.removeFromLeft (16);
+    recordBtn.setVisible (! playbackMode);
+    if (! playbackMode)
+    {
+        recordBtn.setBounds (transport.removeFromLeft (96));
+        transport.removeFromLeft (16);
+    }
+    else
+        transport.removeFromLeft (10);
     loopBtn.setBounds (transport.removeFromLeft (170));
     liveBtn.setBounds (transport.removeFromRight (100));
     transport.removeFromRight (6);
@@ -641,12 +757,17 @@ void MainComponent::resized()
     // Marcadores: fluyen en varias filas (hasta 4) en vez de salirse de la ventana
     constexpr int markerH = 30, markerGap = 4, maxMarkerRows = 4;
     auto markerRow = r.removeFromTop (markerH);
-    addMarkerBtn.setBounds (markerRow.removeFromLeft (110));
-    markerRow.removeFromLeft (8);
-    addNoteBtn.setBounds (markerRow.removeFromLeft (80));
-    markerRow.removeFromLeft (8);
-    cutModeBox.setVisible (! liveMode);
-    if (! liveMode)
+    addMarkerBtn.setVisible (! playbackMode);
+    addNoteBtn.setVisible (! playbackMode);
+    if (! playbackMode)
+    {
+        addMarkerBtn.setBounds (markerRow.removeFromLeft (110));
+        markerRow.removeFromLeft (8);
+        addNoteBtn.setBounds (markerRow.removeFromLeft (80));
+        markerRow.removeFromLeft (8);
+    }
+    cutModeBox.setVisible (! liveMode && ! playbackMode);
+    if (! liveMode && ! playbackMode)
     {
         cutModeBox.setBounds (markerRow.removeFromLeft (180));
         markerRow.removeFromLeft (8);
@@ -666,8 +787,14 @@ void MainComponent::resized()
     }
     r.removeFromTop ((rows - 1) * (markerH + markerGap));
 
+    // En reproducción no se edita el click, el tempo ni el tono (ni se analiza o nivela): sin esas filas
+    for (auto* c : std::initializer_list<juce::Component*> { &clickBtn, &bpmLabel, &bpmSlider, &offsetLabel, &offsetSlider, &clickVolLabel,
+                                                              &clickGainSlider, &clickOutBox, &analyzeBtn, &levelBtn, &targetBox,
+                                                              &tempoLabel, &tempoSlider, &tempoOrigBtn, &transposeLabel, &transposeSlider,
+                                                              &tempoInfoLabel })
+        c->setVisible (! playbackMode);
     r.removeFromTop (8);
-    auto clickRow = r.removeFromTop (28);
+    auto clickRow = playbackMode ? juce::Rectangle<int>() : r.removeFromTop (28);
     clickBtn.setBounds (clickRow.removeFromLeft (80));
     bpmLabel.setBounds (clickRow.removeFromLeft (40));
     bpmSlider.setBounds (clickRow.removeFromLeft (130));
@@ -676,17 +803,18 @@ void MainComponent::resized()
     offsetSlider.setBounds (clickRow.removeFromLeft (130));
     clickRow.removeFromLeft (10);
     clickVolLabel.setBounds (clickRow.removeFromLeft (30));
-    clickGainSlider.setBounds (clickRow.removeFromLeft (120));
+    clickGainSlider.setBounds (clickRow.removeFromLeft (100));
     clickRow.removeFromLeft (10);
     clickOutBox.setBounds (clickRow.removeFromLeft (120));
-    clickRow.removeFromLeft (16);
-    analyzeBtn.setBounds (clickRow.removeFromLeft (120));
-    clickRow.removeFromLeft (16);
+    clickRow.removeFromLeft (10);
+    analyzeBtn.setBounds (clickRow.removeFromLeft (110));
+    clickRow.removeFromLeft (10);
     levelBtn.setBounds (clickRow.removeFromLeft (80));
     targetBox.setBounds (clickRow.removeFromLeft (112));
 
-    r.removeFromTop (6);
-    auto tempoRow = r.removeFromTop (28);
+    if (! playbackMode)
+        r.removeFromTop (6);
+    auto tempoRow = playbackMode ? juce::Rectangle<int>() : r.removeFromTop (28);
     tempoLabel.setBounds (tempoRow.removeFromLeft (55));
     tempoSlider.setBounds (tempoRow.removeFromLeft (130));
     tempoRow.removeFromLeft (6);
@@ -756,16 +884,22 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     else if (code == juce::KeyPress::F11Key)
         setLiveMode (! liveMode);
     else if (key.getModifiers().isCtrlDown() && (code == 'Z' || code == 'z'))
-        undoLastEdit();
-    else if ((code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) && timeline.deleteSelectedMidiHits())
+    {
+        if (! playbackMode)
+            undoLastEdit();
+    }
+    else if (! playbackMode && (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) && timeline.deleteSelectedMidiHits())
         {}
     else if (code == juce::KeyPress::F12Key)
         showStage (stageWindow == nullptr || ! stageWindow->isVisible());
+    else if (key.getModifiers().isCtrlDown() && (code == 'E' || code == 'e'))
+        exportMixDialog();
     else
     {
         const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
-        if (c == 'm')      addMarkerHere();
-        else if (c == 'n') addNoteHere();
+        if (c == 'm' && ! playbackMode)      addMarkerHere();
+        else if (c == 'n' && ! playbackMode) addNoteHere();
+        else if (c == 'm' || c == 'n')       {}   // en reproducción no se edita
         else if (c == 'l') { loopBtn.setToggleState (! loopBtn.getToggleState(), juce::dontSendNotification); updateLoopRegion(); }
         else               handled = false;
     }
@@ -790,10 +924,50 @@ void MainComponent::focusLost (FocusChangeType)
 }
 
 //==============================================================================
-int MainComponent::getNumRows() { return (int) library.songs.size(); }
+int MainComponent::getNumRows() { return playbackMode ? (int) showRows.size() : (int) library.songs.size(); }
 
 void MainComponent::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
 {
+    if (playbackMode)
+    {
+        // Show: número, nombre, largo y si ya está en memoria (punto verde) o cargándose (naranja)
+        if (! juce::isPositiveAndBelow (row, (int) showRows.size()))
+            return;
+        const int idx = showRows[(size_t) row];
+        const auto& info = library.songs[(size_t) idx];
+        if (selected)
+            g.fillAll (accent.withAlpha (0.25f));
+        if (idx == currentIndex)
+        {
+            g.setColour (accent);
+            g.fillRect (0, 0, 4, h);
+        }
+        g.setColour (juce::Colours::grey);
+        g.setFont (font (14.0f));
+        g.drawText (juce::String (row + 1), 10, 0, 26, h, juce::Justification::centredLeft);
+        int right = w - 6;
+        const auto folder = info.folder.getFullPathName();
+        const bool ready = preloaded.count (folder) > 0 || (idx == currentIndex && currentSong != nullptr);
+        const bool loading = preloadingFolder == folder;
+        const auto dot = juce::Rectangle<float> ((float) w - 16.0f, (float) h * 0.5f - 4.0f, 8.0f, 8.0f);
+        g.setColour (ready ? juce::Colour (0xff66bb6a) : loading ? juce::Colours::orange : juce::Colours::grey.withAlpha (0.5f));
+        if (ready || loading)
+            g.fillEllipse (dot);
+        else
+            g.drawEllipse (dot, 1.2f);
+        right = w - 22;
+        if (const double secs = knownSeconds (info); secs > 0.0)
+        {
+            g.setColour (juce::Colours::lightgrey);
+            g.setFont (font (13.0f));
+            g.drawText (formatTime (secs), right - 46, 0, 44, h, juce::Justification::centredRight);
+            right -= 50;
+        }
+        g.setColour (juce::Colours::white);
+        g.setFont (font (16.0f, idx == currentIndex));
+        g.drawText (info.name, 38, 0, juce::jmax (0, right - 38), h, juce::Justification::centredLeft, true);
+        return;
+    }
     if (! juce::isPositiveAndBelow (row, (int) library.songs.size()))
         return;
 
@@ -830,20 +1004,43 @@ void MainComponent::selectedRowsChanged (int lastRow)
     // El clic derecho también selecciona la fila; no debe cargar la canción (solo abre el menú)
     if (juce::ModifierKeys::currentModifiers.isPopupMenu())
         return;
-    if (lastRow >= 0 && lastRow != currentIndex)
-        loadSongAt (lastRow);
+    const int index = playbackMode ? (juce::isPositiveAndBelow (lastRow, (int) showRows.size()) ? showRows[(size_t) lastRow] : -1) : lastRow;
+    if (index >= 0 && index != currentIndex)
+        loadSongAt (index);
 }
 
 void MainComponent::listBoxItemClicked (int row, const juce::MouseEvent& e)
 {
     if (e.mods.isPopupMenu())
-        songMenu (row);
+    {
+        if (playbackMode)
+            showSongMenu (row);
+        else
+            songMenu (row);
+    }
 }
 
 void MainComponent::refreshSetlist()
 {
+    if (playbackMode)
+        showRows = library.showSongs (library.activeShow);
     setlist.updateContent();
     setlist.repaint();
+    if (playbackMode)
+    {
+        allSongsList.updateContent();
+        allSongsList.repaint();
+        showInfoLabel.setText (showSummary(), juce::dontSendNotification);
+        // La siguiente del show (lo que sonará al pisar el pedal o al terminar)
+        const int row = showRowOf (currentIndex);
+        const int next = row >= 0 ? row + 1 : (currentIndex < 0 ? 0 : -1);
+        nextLabel.setText (juce::isPositiveAndBelow (next, (int) showRows.size())
+                               ? tr ("Siguiente: ") + library.songs[(size_t) showRows[(size_t) next]].name
+                               : juce::String(),
+                           juce::dontSendNotification);
+        repaint();
+        return;
+    }
 
     const int next = currentIndex + 1;
     nextLabel.setText (juce::isPositiveAndBelow (next, (int) library.songs.size())
@@ -853,12 +1050,35 @@ void MainComponent::refreshSetlist()
     repaint();
 }
 
+void MainComponent::chooseSong (int index)
+{
+    // En reproducción la lista es la del show: la canción se carga directamente
+    if (playbackMode)
+        loadSongAt (index);
+    else
+        setlist.selectRow (index);
+}
+
 void MainComponent::restoreSetlistSelection()
 {
     // La fila seleccionada vuelve a ser la canción cargada (sin disparar una carga)
     setlist.deselectAllRows();
-    if (currentIndex >= 0)
-        setlist.selectRow (currentIndex, true, true);
+    const int row = playbackMode ? showRowOf (currentIndex) : currentIndex;
+    if (row >= 0)
+        setlist.selectRow (row, true, true);
+}
+
+void MainComponent::layoutPlaybackPanel (juce::Rectangle<int> left)
+{
+    showBox.setBounds (left.removeFromTop (26));
+    left.removeFromTop (4);
+    const int listH = juce::jmax (120, (int) (left.getHeight() * 0.58f));
+    setlist.setBounds (left.removeFromTop (listH));
+    left.removeFromTop (2);
+    showInfoLabel.setBounds (left.removeFromTop (36));
+    left.removeFromTop (4);
+    allSongsTitle.setBounds (left.removeFromTop (18));
+    allSongsList.setBounds (left);
 }
 
 void MainComponent::songMenu (int row)
@@ -868,6 +1088,7 @@ void MainComponent::songMenu (int row)
     m.addItem (2, "Bajar", row < (int) library.songs.size() - 1);
     m.addItem (3, "Renombrar...");
     m.addSeparator();
+    m.addItem (9, tr ("Exportar la mezcla (un archivo para mandar a los músicos)... (Ctrl+E)"), row == currentIndex && currentSong != nullptr);
     m.addItem (5, tr ("Exportar canción (carpeta con stems y ajustes)..."));
     m.addItem (6, tr ("Exportar todo el setlist..."));
     if (library.songs[(size_t) row].mixLink.isLinked())
@@ -883,6 +1104,11 @@ void MainComponent::songMenu (int row)
     m.showMenuAsync (juce::PopupMenu::Options(), [this, row] (int result)
     {
         restoreSetlistSelection();
+        if (result == 9)
+        {
+            exportMixDialog();
+            return;
+        }
         if (result == 7)
         {
             openLinkedMix (row);
@@ -1092,51 +1318,96 @@ void MainComponent::loadSongAt (int index)
         const auto banksDir = library.banksFolder();
         juce::Component::SafePointer<MainComponent> safe (this);
 
-        loaderPool.addJob ([this, safe, info, sr, gen, banksDir]
+        // Modo reproducción: la canción ya está precargada (lista para sonar), o se carga usando la caché en disco
+        const juce::String cacheKey = playbackMode ? playbackKey (info, sr) : juce::String();
+        if (playbackMode)
+            if (const auto it = preloaded.find (info.folder.getFullPathName()); it != preloaded.end() && it->second.key == cacheKey)
+            {
+                installPreloaded (it->second, info, gen);
+                return;
+            }
+        loaderPool.addJob ([this, safe, info, sr, gen, banksDir, cacheKey]
         {
-            std::shared_ptr<LoadedSong> song, source, arranged;
-            std::shared_ptr<SamplerSet> samplerSet;
-            juce::String error;
+            LoadParts parts;
             try
             {
                 auto abort = [this, gen] { return gen != loadGeneration.load(); };
-                source = AudioEngine::loadSong (info, sr, formatManager, abort);
-                song = source;
-                if (source != nullptr && ! source->tracks.empty())
-                {
-                    // Arreglo (tramos cortados o movidos) y, si hay tempo o tono guardados, el estirado: la
-                    // versión que suena se renderiza antes de mostrarla
-                    arranged = arrangement::render (source, info.clips, sr, abort, info.trackClips, stemFilesOf (info));
-                    song = arranged;
-                    if (arranged != nullptr)
-                    {
-                        const auto map = TimeMap::build (info, (double) arranged->length / sr);
-                        if (! map.isPlain())
-                        {
-                            juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->sectionLabel.setText (tr ("Renderizando tempo y tono..."), juce::dontSendNotification); });
-                            song = stretcher::render (arranged, map, sr, abort);
-                        }
-                        if (song != nullptr)
-                            samplerSet = buildSamplers (*song, info, sr, banksDir, formatManager, bankCache);
-                    }
-                }
+                auto onStretch = [safe] { juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->sectionLabel.setText (tr ("Renderizando tempo y tono..."), juce::dontSendNotification); }); };
+                parts = loadParts (info, sr, banksDir, abort, onStretch, cacheKey);
             }
             catch (const std::bad_alloc&)
             {
                 // Sin esto el job muere en silencio y la UI se queda en "Cargando..." para siempre
-                error = tr ("No hay memoria suficiente para cargar la canción");
+                parts.error = tr ("No hay memoria suficiente para cargar la canción");
             }
             catch (const std::exception& e)
             {
-                error = tr ("Error al cargar: ") + juce::String (e.what());
+                parts.error = tr ("Error al cargar: ") + juce::String (e.what());
             }
-            juce::MessageManager::callAsync ([safe, song, source, arranged, samplerSet, gen, error]
+            juce::MessageManager::callAsync ([safe, parts, gen]
             {
                 if (auto* self = safe.getComponent())
-                    self->songLoaded (song, source, arranged, samplerSet, gen, error);
+                    self->songLoaded (parts.song, parts.source, parts.arranged, parts.samplers, gen, parts.error);
             });
         });
     });
+}
+
+MainComponent::LoadParts MainComponent::loadParts (const SongInfo& info, double sr, const juce::File& banksDir,
+                                                   const std::function<bool()>& abort, const std::function<void()>& onStretch,
+                                                   const juce::String& cacheKey)
+{
+    LoadParts parts;
+    // Ya renderizada en la caché de disco (modo reproducción, canciones estiradas): solo leerla
+    if (cacheKey.isNotEmpty())
+    {
+        double sourceSeconds = 0.0;
+        for (auto& st : info.stems)
+            if (std::unique_ptr<juce::AudioFormatReader> r (formatManager.createReaderFor (info.folder.getChildFile (st.fileName)));
+                r != nullptr && r->sampleRate > 0.0)
+                sourceSeconds = juce::jmax (sourceSeconds, (double) r->lengthInSamples / r->sampleRate);
+        const double arrangedSeconds = arrangement::songLength (info, sourceSeconds);
+        if (! TimeMap::build (info, arrangedSeconds).isPlain())
+            if (auto cached = rendercache::load (rendercache::defaultFolder(), cacheKey, info, sr, formatManager, abort))
+            {
+                parts.song = cached;
+                parts.sourceSeconds = sourceSeconds;
+                parts.arrangedSeconds = arrangedSeconds;
+                parts.source = lengthOnlySong (sourceSeconds, sr);   // el mapa de tempo se arma con estos largos
+                parts.arranged = lengthOnlySong (arrangedSeconds, sr);
+                parts.samplers = buildSamplers (*cached, info, sr, banksDir, formatManager, bankCache);
+                return parts;
+            }
+    }
+    parts.source = AudioEngine::loadSong (info, sr, formatManager, abort);
+    parts.song = parts.source;
+    if (parts.source == nullptr || parts.source->tracks.empty())
+        return parts;
+    parts.sourceSeconds = (double) parts.source->length / sr;
+    // Arreglo (tramos cortados o movidos) y, si hay tempo o tono guardados, el estirado: la versión que suena se
+    // renderiza antes de mostrarla
+    parts.arranged = arrangement::render (parts.source, info.clips, sr, abort, info.trackClips, stemFilesOf (info));
+    parts.song = parts.arranged;
+    if (parts.arranged == nullptr)
+        return parts;
+    parts.arrangedSeconds = (double) parts.arranged->length / sr;
+    const auto map = TimeMap::build (info, parts.arrangedSeconds);
+    if (! map.isPlain())
+    {
+        if (onStretch)
+            onStretch();
+        parts.song = stretcher::render (parts.arranged, map, sr, abort);
+        // En el modo reproducción queda guardada en disco: la próxima vez se lee sin estirar
+        if (parts.song != nullptr && cacheKey.isNotEmpty() && ! (abort && abort()))
+        {
+            const auto root = rendercache::defaultFolder();
+            if (root.createDirectory().wasOk() && rendercache::store (root, cacheKey, *parts.song))
+                rendercache::prune (root, (juce::int64) 20 * 1024 * 1024 * 1024);
+        }
+    }
+    if (parts.song != nullptr)
+        parts.samplers = buildSamplers (*parts.song, info, sr, banksDir, formatManager, bankCache);
+    return parts;
 }
 
 void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_ptr<LoadedSong> source, std::shared_ptr<LoadedSong> arranged,
@@ -1156,7 +1427,29 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     currentSong = song;
     sourceSong = source;
     arrangedSong = arranged != nullptr ? arranged : source;
+    // Sin la fuente en RAM (precargada o leída de la caché en disco): para editarla hay que cargarla completa
+    currentFromPreload = source == nullptr || source->tracks.empty();
     auto* info = currentInfo();
+    if (playbackMode && info != nullptr)
+    {
+        // Lo que se cargó pasa a la precarga (si es del show, se queda; si no, updatePreload la suelta)
+        const auto key = playbackKey (*info, engine.getSampleRate());
+        const auto folder = info->folder.getFullPathName();
+        if (const auto it = preloaded.find (folder); it == preloaded.end() || it->second.key != key)
+        {
+            PreloadEntry e;
+            e.key = key;
+            e.song = song;
+            e.samplers = samplerSet;
+            e.seconds = (double) song->length / engine.getSampleRate();
+            e.sourceSeconds = source != nullptr ? (double) source->length / engine.getSampleRate() : e.seconds;
+            e.arrangedSeconds = arrangedSong != nullptr ? (double) arrangedSong->length / engine.getSampleRate() : e.seconds;
+            for (auto& t : song->tracks)
+                e.bytes += (juce::int64) t->buffer.getNumChannels() * t->buffer.getNumSamples() * (juce::int64) sizeof (float);
+            preloaded[folder] = e;
+            estimatedSeconds[key] = e.seconds;
+        }
+    }
     renderedClips = info != nullptr ? info->clips : std::vector<Clip>();
     renderedTrackClips = info != nullptr ? info->trackClips : std::vector<TrackClips>();
     renderedTriggers = info != nullptr ? triggersOf (*info) : std::vector<TriggerSettings>();
@@ -1183,9 +1476,15 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     tempoControlsFromSong();
     showChordAndKey (0.0);
     updateLoopRegion();
-    // Nivelado activo con tramos sin medir (marcadores añadidos con otra versión o sin medir): medir ahora
-    if (info != nullptr && info->levelingEnabled && needsLevelMeasure (*info))
+    // Nivelado activo con tramos sin medir (marcadores añadidos con otra versión o sin medir): medir ahora (en
+    // reproducción no: se usa lo medido)
+    if (info != nullptr && info->levelingEnabled && needsLevelMeasure (*info) && ! playbackMode)
         measureAndLevel();
+    if (playbackMode)
+    {
+        restoreSetlistSelection();
+        updatePreload();   // cambió la actual: las prioridades de la precarga también
+    }
 }
 
 void MainComponent::saveCurrentMix()
@@ -1231,6 +1530,17 @@ void MainComponent::markSongDirty()
 
 void MainComponent::nextSong (int delta)
 {
+    if (playbackMode)
+    {
+        // Dentro del show (si lo que suena no es del show, la primera)
+        if (showRows.empty())
+            return;
+        const int row = showRowOf (currentIndex);
+        const int target = row < 0 ? 0 : juce::jlimit (0, (int) showRows.size() - 1, row + delta);
+        if (showRows[(size_t) target] != currentIndex)
+            loadSongAt (showRows[(size_t) target]);
+        return;
+    }
     if (library.songs.empty())
         return;
     const int idx = juce::jlimit (0, (int) library.songs.size() - 1, currentIndex + delta);
@@ -1855,6 +2165,11 @@ void MainComponent::noteMenu (int index, double playbackSeconds)
 
 void MainComponent::markerMenu (int index)
 {
+    if (playbackMode)
+    {
+        jumpToMarker (index);   // en reproducción los marcadores solo llevan a su lugar
+        return;
+    }
     juce::PopupMenu m;
     m.addItem (1, "Renombrar...");
     m.addItem (2, tr ("Mover a la posición actual"));
@@ -5463,7 +5778,7 @@ void MainComponent::mixSongBuilt (const MixSongResult& r)
         sepLabel.setText (tr ("«") + s.name + tr ("» está en el setlist, ligada a su mix: si cambias los tramos, se actualiza al volver a ella"),
                           juce::dontSendNotification);
         if (! engine.isPlaying() && mixEditor == nullptr)
-            setlist.selectRow (idx);
+            chooseSong (idx);
         return;
     }
 
@@ -6564,6 +6879,9 @@ void MainComponent::pushClick()
 //==============================================================================
 void MainComponent::timerCallback()
 {
+    if (exporting)
+        exportProgress = exportFraction.load();   // la barra del diálogo de exportar
+
     // Una actualización desde el mix que esperaba a que se detuviera la canción (nunca se corta lo que suena)
     if (pendingMixUpdate != nullptr && ! engine.isPlaying() && ! recording.active && engine.isSilent())
     {
@@ -6589,6 +6907,16 @@ void MainComponent::timerCallback()
     {
         if (rack != nullptr)
             rack->prepareAll (engine.getSampleRate());   // los plugins se preparan a la frecuencia nueva
+        if (playbackMode)
+        {
+            // Lo precargado está a la frecuencia anterior: se vuelve a cargar todo
+            ++preloadGeneration;
+            preloadingFolder.clear();
+            durationsPending = false;   // el trabajo de antes ya no avisa
+            preloaded.clear();
+            failedPreloads.clear();
+            requestDurations();
+        }
         if (currentIndex >= 0)
             loadSongAt (currentIndex);   // guarda la mezcla y recarga a la nueva frecuencia
         if (mixEditor != nullptr)
@@ -6597,6 +6925,20 @@ void MainComponent::timerCallback()
 
     if (mixEditor != nullptr)
         updateMixTimer();
+
+    // Modo reproducción: al terminar una canción del show queda lista la siguiente (detenida, en el inicio: Play o el
+    // pedal la arrancan al instante)
+    {
+        const bool playingNow = engine.isPlaying();
+        if (playbackMode && ! exporting && wasPlayingLastTick && ! playingNow && currentSong != nullptr
+            && engine.getPositionSeconds() >= engine.getLengthSeconds() - 0.05)
+        {
+            const int row = showRowOf (currentIndex);
+            if (row >= 0 && row + 1 < (int) showRows.size())
+                loadSongAt (showRows[(size_t) row + 1]);
+        }
+        wasPlayingLastTick = playingNow;
+    }
 
     if (recording.active)
     {
@@ -6802,7 +7144,7 @@ void MainComponent::timerCallback()
         {
             // Solo se cambia a la canción nueva si no hay nada sonando
             sepLabel.setText (tr ("«") + name + tr ("» separada y agregada al setlist"), juce::dontSendNotification);
-            setlist.selectRow (idx);
+            chooseSong (idx);
         }
     }
     else if (st == Separator::State::cancelled)
@@ -6932,7 +7274,7 @@ void MainComponent::importStems (const juce::Array<juce::File>& selection)
     {
         refreshSetlist();
         if (! engine.isPlaying())
-            setlist.selectRow (lastProject);
+            chooseSong (lastProject);
         sepLabel.setText (juce::String (projects) + tr (projects == 1 ? " canción importada con sus ajustes" : " canciones importadas con sus ajustes"), juce::dontSendNotification);
         return;
     }
@@ -6968,7 +7310,7 @@ void MainComponent::importStems (const juce::Array<juce::File>& selection)
             juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Importar stems",
                                                     tr ("No se pudieron copiar los archivos a la biblioteca."));
         else if (! engine.isPlaying())
-            setlist.selectRow (idx);   // con algo sonando, solo se agrega al setlist
+            chooseSong (idx);   // con algo sonando, solo se agrega al setlist
     });
 }
 
@@ -7144,6 +7486,12 @@ bool MainComponent::startSeparationWith (const juce::File& file, const juce::Str
 
 void MainComponent::filesDropped (const juce::StringArray& paths, int, int)
 {
+    if (playbackMode)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Modo reproducción"),
+                                                tr ("Para importar o separar canciones, vuelve a editar (botón «Volver a editar»)."));
+        return;
+    }
     juce::Array<juce::File> files;
     for (auto& p : paths)
         files.add (juce::File (p));
@@ -7279,14 +7627,829 @@ void MainComponent::launchInstaller (bool withRoformer)
 }
 
 //==============================================================================
+//==============================================================================
+// Modo reproducción: shows (listas de canciones para tocar en vivo) con todo precargado. Solo se ajustan el
+// volumen, el mute, el solo y la salida de cada pista; no se edita nada más.
+
+void MainComponent::showHelpText()
+{
+    helpLabel.setText (playbackMode
+                           ? tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción del show · 1-9: marcador · "
+                                 "L: loop · F11: en vivo · Ctrl+rueda: zoom · Solo volumen y salida de cada pista")
+                           : tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción · 1-9: marcador · M: añadir marcador · "
+                                 "L: loop · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
+                       juce::dontSendNotification);
+}
+
+void MainComponent::setPlaybackMode (bool on)
+{
+    if (on == playbackMode)
+        return;
+    if (on)
+    {
+        if (mixEditor != nullptr)
+            closeMix (false);
+        if (recording.active)
+            stopRecording (false);
+    }
+    playbackMode = on;
+    props.getUserSettings()->setValue ("playbackMode", on);
+    playbackBtn.setToggleState (on, juce::dontSendNotification);
+    playbackBtn.setButtonText (on ? juce::String ("Volver a editar") : tr ("Reproducción"));
+    showHelpText();
+    timeline.setReadOnly (on);
+    mixer.setReadOnly (on);
+    ++preloadGeneration;   // los trabajos de antes ya no valen (ni avisan: nada queda esperándolos)
+    preloadingFolder.clear();
+    durationsPending = false;
+    if (on)
+    {
+        refreshShowControls();
+        refreshSetlist();
+        requestDurations();
+        // Lo que suena pasa a la precarga si es del show; si no hay nada cargado, la primera del show
+        if (currentIndex < 0 && ! showRows.empty() && ! engine.isPlaying())
+            loadSongAt (showRows.front());
+        else
+            updatePreload();
+    }
+    else
+    {
+        preloaded.clear();   // la memoria vuelve a estar libre para editar
+        failedPreloads.clear();
+        // Lo que suena salió de la precarga (sin la fuente ni el arreglo aparte): se carga completo para editarlo
+        if (currentFromPreload && currentIndex >= 0)
+            loadSongAt (currentIndex);
+        refreshSetlist();
+    }
+    restoreSetlistSelection();
+    resized();
+    repaint();
+}
+
+void MainComponent::refreshShowControls()
+{
+    showBox.clear (juce::dontSendNotification);
+    for (int i = 0; i < (int) library.shows.size(); ++i)
+        showBox.addItem (library.shows[(size_t) i].name, i + 1);
+    showBox.addSeparator();
+    showBox.addItem ("Nuevo show...", 1001);
+    showBox.addItem ("Renombrar este show...", 1002);
+    showBox.addItem ("Duplicar este show...", 1003);
+    showBox.addItem ("Borrar este show...", 1004);
+    showBox.setSelectedId (library.activeShow + 1, juce::dontSendNotification);
+}
+
+void MainComponent::showBoxChanged()
+{
+    const int id = showBox.getSelectedId();
+    if (id >= 1 && id <= (int) library.shows.size())
+    {
+        if (id - 1 != library.activeShow)
+        {
+            library.activeShow = id - 1;
+            library.saveShows();
+            refreshSetlist();
+            requestDurations();
+            updatePreload();
+        }
+        return;
+    }
+    showBox.setSelectedId (library.activeShow + 1, juce::dontSendNotification);   // las acciones no quedan elegidas
+    auto* current = library.currentShow();
+    if (current == nullptr)
+        return;
+    if (id == 1001 || id == 1003)
+    {
+        const bool duplicate = id == 1003;
+        askText (duplicate ? tr ("Nombre de la copia") : tr ("Nombre del show nuevo"),
+                 duplicate ? current->name + " (copia)" : juce::String ("Show ") + juce::String ((int) library.shows.size() + 1),
+                 [this, duplicate] (const juce::String& name)
+        {
+            if (name.trim().isEmpty())
+                return;
+            SongShow s;
+            s.name = name.trim();
+            if (duplicate && library.currentShow() != nullptr)
+                s.folders = library.currentShow()->folders;
+            library.shows.push_back (s);
+            library.activeShow = (int) library.shows.size() - 1;
+            library.saveShows();
+            refreshShowControls();
+            refreshSetlist();
+            requestDurations();
+            updatePreload();
+        });
+    }
+    else if (id == 1002)
+    {
+        askText (tr ("Nombre del show"), current->name, [this] (const juce::String& name)
+        {
+            if (auto* s = library.currentShow(); s != nullptr && name.trim().isNotEmpty())
+            {
+                s->name = name.trim();
+                library.saveShows();
+                refreshShowControls();
+            }
+        });
+    }
+    else if (id == 1004)
+    {
+        if (library.shows.size() <= 1)
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Borrar show"),
+                                                    tr ("Es el único show: para empezar de nuevo, quita sus canciones (clic derecho)."));
+            return;
+        }
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, tr ("¿Borrar el show?"),
+            tr ("«") + current->name + tr ("» se borra (las canciones siguen en la biblioteca)."), "Borrar", "Cancelar", this,
+            juce::ModalCallbackFunction::create ([safe] (int ok)
+            {
+                auto* self = safe.getComponent();
+                if (self == nullptr || ok == 0 || self->library.shows.size() <= 1)
+                    return;
+                self->library.shows.erase (self->library.shows.begin() + self->library.activeShow);
+                self->library.activeShow = juce::jlimit (0, (int) self->library.shows.size() - 1, self->library.activeShow - 1);
+                self->library.saveShows();
+                self->refreshShowControls();
+                self->refreshSetlist();
+                self->requestDurations();
+                self->updatePreload();
+            }));
+    }
+}
+
+int MainComponent::showRowOf (int songIndex) const
+{
+    for (size_t r = 0; r < showRows.size(); ++r)
+        if (showRows[r] == songIndex)
+            return (int) r;
+    return -1;
+}
+
+void MainComponent::addToShow (int songIndex, int show)
+{
+    if (! juce::isPositiveAndBelow (songIndex, (int) library.songs.size()) || ! juce::isPositiveAndBelow (show, (int) library.shows.size()))
+        return;
+    auto& s = library.shows[(size_t) show];
+    const auto folder = library.songs[(size_t) songIndex].folder.getFileName();
+    if (s.folders.contains (folder))
+        return;
+    s.folders.add (folder);
+    library.saveShows();
+    refreshSetlist();
+    requestDurations();
+    updatePreload();
+}
+
+void MainComponent::allSongsMenu (int songIndex)
+{
+    if (! juce::isPositiveAndBelow (songIndex, (int) library.songs.size()))
+        return;
+    juce::PopupMenu m;
+    const auto& song = library.songs[(size_t) songIndex];
+    m.addSectionHeader (song.name);
+    const bool inShow = showRowOf (songIndex) >= 0;
+    const auto* current = library.currentShow();
+    m.addItem (1, tr ("Agregar al show «") + (current != nullptr ? current->name : juce::String()) + tr ("» (doble clic)"), ! inShow);
+    juce::PopupMenu others;
+    for (int i = 0; i < (int) library.shows.size(); ++i)
+        if (i != library.activeShow)
+            others.addItem (100 + i, library.shows[(size_t) i].name, ! library.shows[(size_t) i].folders.contains (song.folder.getFileName()));
+    if (others.getNumItems() > 0)
+        m.addSubMenu (tr ("Agregar a otro show"), others);
+    m.addItem (2, tr ("Escuchar ahora (sin agregarla)"));
+    m.showMenuAsync (juce::PopupMenu::Options(), [this, songIndex] (int result)
+    {
+        if (result == 1)
+            addToShow (songIndex, library.activeShow);
+        else if (result >= 100)
+            addToShow (songIndex, result - 100);
+        else if (result == 2)
+            loadSongAt (songIndex);
+    });
+}
+
+void MainComponent::showSongMenu (int row)
+{
+    if (! juce::isPositiveAndBelow (row, (int) showRows.size()))
+        return;
+    juce::PopupMenu m;
+    m.addSectionHeader (library.songs[(size_t) showRows[(size_t) row]].name);
+    m.addItem (1, "Subir", row > 0);
+    m.addItem (2, "Bajar", row + 1 < (int) showRows.size());
+    m.addItem (3, "Quitar del show");
+    m.addSeparator();
+    m.addItem (4, tr ("Exportar la mezcla... (Ctrl+E)"), showRows[(size_t) row] == currentIndex && currentSong != nullptr);
+    m.showMenuAsync (juce::PopupMenu::Options(), [this, row] (int result)
+    {
+        restoreSetlistSelection();
+        auto* s = library.currentShow();
+        if (s == nullptr || ! juce::isPositiveAndBelow (row, (int) showRows.size()))
+            return;
+        const auto folder = library.songs[(size_t) showRows[(size_t) row]].folder.getFileName();
+        const int at = s->folders.indexOf (folder);
+        if (result == 4)
+        {
+            exportMixDialog();
+            return;
+        }
+        if (at < 0 || result == 0)
+            return;
+        if (result == 1 || result == 2)
+        {
+            // Se mueve junto a la canción vecina del show (las carpetas que ya no existen no cuentan)
+            const int otherRow = row + (result == 1 ? -1 : 1);
+            const int other = s->folders.indexOf (library.songs[(size_t) showRows[(size_t) otherRow]].folder.getFileName());
+            if (other >= 0)
+                s->folders.move (at, other);
+        }
+        else if (result == 3)
+            s->folders.remove (at);
+        library.saveShows();
+        refreshSetlist();
+        restoreSetlistSelection();
+        updatePreload();
+    });
+}
+
+juce::String MainComponent::playbackKey (const SongInfo& info, double sr)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("sr", sr);
+    o->setProperty ("folder", info.folder.getFullPathName());
+    juce::Array<juce::var> stems;
+    for (auto& st : info.stems)
+    {
+        const auto f = info.folder.getChildFile (st.fileName);
+        auto* so = new juce::DynamicObject();
+        so->setProperty ("file", st.fileName);
+        so->setProperty ("songTime", st.songTime);
+        so->setProperty ("size", (double) f.getSize());
+        so->setProperty ("modified", (double) f.getLastModificationTime().toMilliseconds());
+        const auto& t = st.trigger;
+        so->setProperty ("trigger", juce::String (t.enabled ? 1 : 0) + "|" + (t.keepAudio ? "1" : "0") + "|" + t.sound + "|" + juce::String (t.note)
+                                        + "|" + juce::String (t.thresholdDb) + "|" + juce::String (t.sensitivity) + "|" + juce::String (t.minMs));
+        stems.add (juce::var (so));
+    }
+    o->setProperty ("stems", stems);
+    auto clipsVar = [] (const std::vector<Clip>& clips)
+    {
+        juce::Array<juce::var> list;
+        for (auto& c : clips)
+            list.add (juce::Array<juce::var> { c.srcStart, c.srcEnd, c.position });
+        return list;
+    };
+    o->setProperty ("clips", clipsVar (info.clips));
+    juce::Array<juce::var> own;
+    for (auto& tc : info.trackClips)
+        own.add (juce::Array<juce::var> { tc.stem, clipsVar (tc.clips) });
+    o->setProperty ("trackClips", own);
+    juce::Array<juce::var> regions;
+    for (auto& r : info.tempoRegions)
+        regions.add (juce::Array<juce::var> { r.start, r.origBpm, r.playBpm, r.transpose });
+    o->setProperty ("tempo", regions);
+    o->setProperty ("playBpm", info.playBpm);
+    o->setProperty ("transpose", info.transpose);
+    o->setProperty ("bpm", info.bpm);
+    o->setProperty ("analysisBpm", info.analysis.bpm);
+    juce::Array<juce::var> midi;
+    for (auto& mt : info.midiTracks)
+        midi.add (mt.sourceFile);   // una pista MIDI reemplaza al trigger en vivo de su pista
+    o->setProperty ("midi", midi);
+    return juce::JSON::toString (juce::var (o), true);
+}
+
+void MainComponent::resetSamplerPlayback (SamplerSet& set)
+{
+    set.previous.reset();
+    set.adopted = false;
+    for (auto& lane : set.lanes)
+    {
+        lane->nextEvent = 0;
+        lane->lastPos = -2;
+        lane->lastHit = -1;
+        lane->superseded = false;
+        for (auto& v : lane->voices)
+            v = SamplerLane::Voice();
+    }
+}
+
+juce::int64 MainComponent::preloadBudget() const
+{
+    const juce::int64 ramMb = juce::jmax (2048, juce::SystemStats::getMemorySizeInMegabytes());
+    return ramMb / 2 * 1024 * 1024;
+}
+
+double MainComponent::knownSeconds (const SongInfo& info) const
+{
+    if (const auto it = preloaded.find (info.folder.getFullPathName()); it != preloaded.end())
+        return it->second.seconds;
+    const auto key = playbackKey (info, engine.getSampleRate());
+    if (const auto it = estimatedSeconds.find (key); it != estimatedSeconds.end())
+        return it->second;
+    return -1.0;
+}
+
+void MainComponent::requestDurations()
+{
+    if (! playbackMode)
+        return;
+    const double sr = engine.getSampleRate();
+    std::vector<SongInfo> pending;
+    for (int idx : library.showSongs (library.activeShow))
+    {
+        const auto& info = library.songs[(size_t) idx];
+        if (knownSeconds (info) < 0.0)
+            pending.push_back (info);
+    }
+    if (pending.empty())
+        return;
+    durationsPending = true;
+    const int gen = preloadGeneration.load();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    preloadPool.addJob ([this, safe, pending, sr, gen]
+    {
+        // Largo de lo que suena sin cargar el audio: los encabezados de las pistas, el arreglo y el tempo
+        std::vector<std::pair<juce::String, double>> found;
+        for (auto& info : pending)
+        {
+            if (gen != preloadGeneration.load())
+                return;
+            double sourceSeconds = 0.0;
+            for (auto& st : info.stems)
+                if (std::unique_ptr<juce::AudioFormatReader> r (formatManager.createReaderFor (info.folder.getChildFile (st.fileName)));
+                    r != nullptr && r->sampleRate > 0.0)
+                    sourceSeconds = juce::jmax (sourceSeconds, (double) r->lengthInSamples / r->sampleRate);
+            const double arranged = arrangement::songLength (info, sourceSeconds);
+            found.push_back ({ playbackKey (info, sr), TimeMap::build (info, arranged).playbackLength() });
+        }
+        juce::MessageManager::callAsync ([safe, found, gen]
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || gen != self->preloadGeneration.load())
+                return;
+            self->durationsPending = false;
+            for (auto& [key, seconds] : found)
+                self->estimatedSeconds[key] = seconds;
+            self->refreshSetlist();
+            self->updatePreload();
+        });
+    });
+}
+
+void MainComponent::updatePreload()
+{
+    if (! playbackMode)
+        return;
+    const double sr = engine.getSampleRate();
+    const auto rows = library.showSongs (library.activeShow);
+    // Orden de prioridad: la actual, la siguiente, la anterior, la de después... (las más cercanas primero)
+    int at = showRowOf (currentIndex);
+    if (at < 0)
+        at = 0;
+    std::vector<int> order;
+    auto push = [&order, &rows] (int r)
+    {
+        if (juce::isPositiveAndBelow (r, (int) rows.size()) && std::find (order.begin(), order.end(), r) == order.end())
+            order.push_back (r);
+    };
+    push (at);
+    push (at + 1);   // la siguiente antes que la anterior: al avanzar es la que hace falta
+    push (at - 1);
+    push (at + 2);
+    for (int d = 1; d <= (int) rows.size(); ++d)
+    {
+        push (at + d);
+        push (at - d);
+    }
+    // Lo que cabe en el presupuesto, en ese orden; la actual, la anterior y las 2 siguientes siempre
+    const auto budget = preloadBudget();
+    juce::int64 used = 0;
+    std::set<juce::String> wanted;
+    std::vector<int> toLoad;
+    for (int r : order)
+    {
+        const auto& info = library.songs[(size_t) rows[(size_t) r]];
+        const auto folder = info.folder.getFullPathName();
+        const auto key = playbackKey (info, sr);
+        juce::int64 bytes = 0;
+        if (const auto it = preloaded.find (folder); it != preloaded.end() && it->second.key == key)
+            bytes = it->second.bytes;
+        else
+        {
+            const double secs = estimatedSeconds.count (key) > 0 ? estimatedSeconds[key] : 300.0;
+            bytes = (juce::int64) (secs * sr * 2.0 * sizeof (float)) * (juce::int64) juce::jmax ((size_t) 1, info.stems.size());
+        }
+        const bool essential = r == at || r == at - 1 || r == at + 1 || r == at + 2;
+        if (! essential && used + bytes > budget)
+            continue;
+        used += bytes;
+        wanted.insert (folder);
+        if (preloaded.count (folder) == 0 || preloaded[folder].key != key)
+            if (failedPreloads.count (key) == 0)
+                toLoad.push_back (rows[(size_t) r]);
+    }
+    // Lo que ya no va (u otra versión de la canción) se suelta; lo que suena sigue vivo por su cuenta
+    for (auto it = preloaded.begin(); it != preloaded.end();)
+    {
+        bool keep = wanted.count (it->first) > 0;
+        if (keep)
+            for (auto& s : library.songs)
+                if (s.folder.getFullPathName() == it->first)
+                    keep = it->second.key == playbackKey (s, sr);
+        it = keep ? std::next (it) : preloaded.erase (it);
+    }
+    refreshSetlist();
+    if (preloadingFolder.isNotEmpty() || durationsPending || toLoad.empty())
+        return;
+
+    // La siguiente carga (una a la vez, en su propio hilo: no demora la canción que se elige)
+    const auto info = library.songs[(size_t) toLoad.front()];
+    const auto folder = info.folder.getFullPathName();
+    const auto key = playbackKey (info, sr);
+    preloadingFolder = folder;
+    const int gen = preloadGeneration.load();
+    const auto banksDir = library.banksFolder();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    preloadPool.addJob ([this, safe, info, sr, key, folder, gen, banksDir]
+    {
+        PreloadEntry entry;
+        entry.key = key;
+        try
+        {
+            auto abort = [this, gen] { return gen != preloadGeneration.load() || abortJobs.load(); };
+            auto parts = loadParts (info, sr, banksDir, abort, {}, key);
+            if (parts.song != nullptr && ! parts.song->tracks.empty() && ! abort())
+            {
+                entry.song = parts.song;   // la fuente y el arreglo se sueltan aquí: solo lo que suena
+                entry.samplers = parts.samplers;
+                entry.seconds = (double) parts.song->length / sr;
+                entry.sourceSeconds = parts.sourceSeconds;
+                entry.arrangedSeconds = parts.arrangedSeconds;
+                for (auto& t : parts.song->tracks)
+                    entry.bytes += (juce::int64) t->buffer.getNumChannels() * t->buffer.getNumSamples() * (juce::int64) sizeof (float);
+            }
+        }
+        catch (const std::exception&) { entry.song.reset(); }
+        juce::MessageManager::callAsync ([safe, folder, entry, gen]
+        {
+            if (auto* self = safe.getComponent())
+                self->preloadDone (folder, entry, gen);
+        });
+    });
+}
+
+void MainComponent::preloadDone (const juce::String& folder, const PreloadEntry& entry, int generation)
+{
+    if (generation != preloadGeneration.load() || ! playbackMode)
+        return;
+    preloadingFolder.clear();
+    if (entry.song == nullptr)
+        failedPreloads.insert (entry.key);
+    else if (const auto it = preloaded.find (folder); it == preloaded.end() || it->second.key != entry.key)
+    {
+        preloaded[folder] = entry;
+        estimatedSeconds[entry.key] = entry.seconds;
+    }
+    updatePreload();
+}
+
+void MainComponent::installPreloaded (const PreloadEntry& entry, const SongInfo& info, int generation)
+{
+    // El conjunto de triggers y las pistas vuelven a empezar limpios, con la mezcla guardada de la canción
+    for (auto& t : entry.song->tracks)
+        if (juce::isPositiveAndBelow (t->stemIndex, (int) info.stems.size()))
+        {
+            AudioEngine::applyStemMix (*t, info.stems[(size_t) t->stemIndex]);
+            t->smoothedGain = t->gain.load();
+        }
+    if (entry.samplers != nullptr)
+        resetSamplerPlayback (*entry.samplers);
+    // Sin la fuente ni el arreglo aparte: solo su largo (el mapa de tempo y los tramos se dibujan con él)
+    const double sr = engine.getSampleRate();
+    songLoaded (entry.song, lengthOnlySong (entry.sourceSeconds, sr), lengthOnlySong (entry.arrangedSeconds, sr),
+                entry.samplers, generation, {});
+}
+
+std::shared_ptr<LoadedSong> MainComponent::lengthOnlySong (double seconds, double sr)
+{
+    auto song = std::make_shared<LoadedSong>();
+    song->sampleRate = sr;
+    song->length = (juce::int64) std::llround (seconds * sr);
+    return song;
+}
+
+juce::String MainComponent::showSummary() const
+{
+    const auto rows = library.showSongs (library.activeShow);
+    if (rows.empty())
+        return tr ("Show vacío: agrega canciones de la lista de abajo (doble clic o clic derecho)");
+    double total = 0.0;
+    int unknown = 0, inMemory = 0;
+    juce::int64 bytes = 0;
+    for (int idx : rows)
+    {
+        const auto& info = library.songs[(size_t) idx];
+        const double secs = knownSeconds (info);
+        if (secs > 0.0)
+            total += secs;
+        else
+            ++unknown;
+        if (const auto it = preloaded.find (info.folder.getFullPathName()); it != preloaded.end())
+        {
+            ++inMemory;
+            bytes += it->second.bytes;
+        }
+    }
+    const int n = (int) rows.size();
+    auto text = juce::String (n) + (n == 1 ? tr (" canción · ") : tr (" canciones · ")) + (unknown > 0 ? juce::String ("~") : juce::String())
+              + formatTime (total) + tr (" de música");
+    text += "\n" + tr ("En memoria: ") + juce::String (inMemory) + tr (" de ") + juce::String (n) + " · "
+          + juce::String ((double) bytes / (1024.0 * 1024.0 * 1024.0), 1).replaceCharacter ('.', ',') + " GB"
+          + (preloadingFolder.isNotEmpty() ? tr (" · cargando...") : (inMemory == n ? tr (" · todo listo") : juce::String()));
+    return text;
+}
+
+void MainComponent::setPlaybackModeForCapture (const juce::String& showSongs)
+{
+    if (showSongs.isNotEmpty())
+        if (auto* s = library.currentShow())
+        {
+            s->folders.clear();
+            for (auto& token : juce::StringArray::fromTokens (showSongs, ",", ""))
+                if (const int i = token.getIntValue() - 1; juce::isPositiveAndBelow (i, (int) library.songs.size()))
+                    s->folders.addIfNotAlreadyThere (library.songs[(size_t) i].folder.getFileName());
+            library.saveShows();
+        }
+    setPlaybackMode (true);
+}
+
+void MainComponent::exportForCapture (const juce::File& folder)
+{
+    ExportRequest req;
+    req.name = currentInfo() != nullptr ? juce::File::createLegalFileName (currentInfo()->name) : juce::String ("Mezcla");
+    req.options.clickFile = true;
+    req.options.stems = true;
+    req.folder = folder;
+    folder.createDirectory();
+    startExport (req);
+}
+
+//==============================================================================
+// Exportar la mezcla (un consolidado para los músicos)
+
+void MainComponent::exportMixDialog()
+{
+    auto* info = currentInfo();
+    if (exporting)
+        return;
+    if (mixEditor != nullptr || info == nullptr || currentSong == nullptr || loadedFolder != info->folder)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Exportar la mezcla"),
+                                                tr ("Elige y carga la canción que quieres exportar (con el armado de mix cerrado)."));
+        return;
+    }
+    if (recording.active || rendering)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, tr ("Exportar la mezcla"),
+                                                recording.active ? tr ("Termina la grabación antes de exportar.")
+                                                                 : tr ("La canción se está preparando: espera un momento y vuelve a intentarlo."));
+        return;
+    }
+    const bool canMp3 = Separator::findFfmpeg() != juce::File();
+    auto* settings = props.getUserSettings();
+    auto* w = new juce::AlertWindow (tr ("Exportar la mezcla"),
+        tr ("Un archivo con todo lo que suena en «") + info->name
+            + tr ("»: el arreglo, el tempo y el tono, los faders y el mute, el nivelado, los triggers, las pistas MIDI y los "
+                  "instrumentos. Sirve para mandarlo a los demás músicos. El solo no cuenta."),
+        juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("nombre", info->name, tr ("Nombre del archivo"));
+    juce::StringArray formats { tr ("WAV (24 bits, sin pérdida)") };
+    if (canMp3)
+        formats.add (tr ("MP3 (320 kbps, más liviano para mandar)"));
+    w->addComboBox ("formato", formats, "Formato");
+    w->addComboBox ("click", { "Sin click", "Con el click mezclado", "El click en un archivo aparte" }, "Click");
+    w->addComboBox ("pistas", { "Solo la mezcla", "La mezcla y cada pista por separado" }, "Pistas");
+    w->addComboBox ("nivel", { tr ("Como suena (sin saturar)"), tr ("Llevar a ") + loudness::targetText (levelTargetLufs()) + tr (" (con limitador)") },
+                    "Sonoridad");
+    w->getComboBoxComponent ("formato")->setSelectedItemIndex (canMp3 ? juce::jlimit (0, 1, settings->getIntValue ("exportFormat", 1)) : 0, juce::dontSendNotification);
+    w->getComboBoxComponent ("click")->setSelectedItemIndex (juce::jlimit (0, 2, settings->getIntValue ("exportClick", 0)), juce::dontSendNotification);
+    w->getComboBoxComponent ("pistas")->setSelectedItemIndex (juce::jlimit (0, 1, settings->getIntValue ("exportStems", 0)), juce::dontSendNotification);
+    w->getComboBoxComponent ("nivel")->setSelectedItemIndex (juce::jlimit (0, 1, settings->getIntValue ("exportLevel", 0)), juce::dontSendNotification);
+    if (! canMp3)
+        w->addTextBlock (tr ("Para exportar en MP3 hace falta ffmpeg (en Ubuntu: sudo apt install ffmpeg; en Mac: brew install ffmpeg)."));
+    w->addButton ("Exportar", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<MainComponent> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w, canMp3] (int result)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || result != 1)
+            return;
+        auto* s = self->props.getUserSettings();
+        const int format = w->getComboBoxComponent ("formato")->getSelectedItemIndex();
+        const int click = w->getComboBoxComponent ("click")->getSelectedItemIndex();
+        const int stems = w->getComboBoxComponent ("pistas")->getSelectedItemIndex();
+        const int level = w->getComboBoxComponent ("nivel")->getSelectedItemIndex();
+        if (canMp3)
+            s->setValue ("exportFormat", format);
+        s->setValue ("exportClick", click);
+        s->setValue ("exportStems", stems);
+        s->setValue ("exportLevel", level);
+        ExportRequest req;
+        req.name = juce::File::createLegalFileName (w->getTextEditorContents ("nombre").trim());
+        if (req.name.isEmpty())
+            req.name = "Mezcla";
+        req.mp3 = canMp3 && format == 1;
+        req.options.click = click == 1;
+        req.options.clickFile = click == 2;
+        req.options.stems = stems == 1;
+        req.level = level == 1;
+        req.target = self->levelTargetLufs();
+        auto start = juce::File (s->getValue ("exportFolder"));
+        if (! start.isDirectory())
+            start = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+        self->pickFiles (tr ("Carpeta donde guardar la mezcla"),
+                         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, start, "*",
+                         [safe, req] (const juce::Array<juce::File>& files) mutable
+        {
+            auto* me = safe.getComponent();
+            const auto dest = files.size() > 0 ? files[0] : juce::File();
+            if (me == nullptr || ! dest.isDirectory())
+                return;
+            me->props.getUserSettings()->setValue ("exportFolder", dest.getFullPathName());
+            req.folder = dest;
+            me->startExport (req);
+        });
+    }), true);
+}
+
+void MainComponent::startExport (const ExportRequest& req)
+{
+    auto* info = currentInfo();
+    if (exporting || info == nullptr || currentSong == nullptr || loadedFolder != info->folder || rendering || recording.active)
+        return;
+    exporting = true;
+    exportCancel = false;
+    exportFraction = 0.0f;
+    exportProgress = 0.0;
+    exportResumePosition = engine.getPositionSeconds();
+    saveCurrentMix();
+    engine.pause();
+    auto song = currentSong;
+    const double sr = engine.getSampleRate();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    afterFadeOut ([this, safe, req, song, sr]
+    {
+        // Mientras dura el render, el motor no está en el dispositivo: solo lo usa el hilo de exportación
+        deviceManager.removeAudioCallback (&engine);
+        auto* w = new juce::AlertWindow (tr ("Exportando «") + req.name + tr ("»"), tr ("Renderizando la mezcla..."),
+                                         juce::MessageBoxIconType::NoIcon, this);
+        w->addProgressBarComponent (exportProgress);
+        w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        exportWindow = w;
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([safe] (int)
+        {
+            if (safe != nullptr)
+                safe->exportCancel = true;   // (también al cerrarlo al terminar: ya no importa)
+        }), true);
+
+        exportPool.addJob ([this, safe, req, song, sr]
+        {
+            bool ok = false;
+            juce::String message;
+            juce::File reveal;
+            try
+            {
+                auto abort = [this] { return exportCancel.load() || abortJobs.load(); };
+                auto res = bounce::render (engine, *song, req.options, abort, [this] (float p) { exportFraction = 0.85f * p; });
+                if (res.aborted)
+                    message = tr ("Exportación cancelada.");
+                else
+                {
+                    juce::String notes;
+                    if (req.level)
+                    {
+                        const double g = bounce::normalize (res, sr, req.target);
+                        notes += tr ("\nLlevada a ") + loudness::targetText (req.target) + " ("
+                               + (g >= 0.0 ? "+" : "") + juce::String (g, 1).replaceCharacter ('.', ',') + " dB).";
+                    }
+                    if (const double reduced = bounce::preventClipping (res); reduced > 0.05)
+                        notes += tr ("\nSe bajó ") + juce::String (reduced, 1).replaceCharacter ('.', ',') + tr (" dB para no saturar.");
+                    exportFraction = 0.9f;
+                    const auto ffmpeg = Separator::findFfmpeg();
+                    const juce::String ext = req.mp3 ? ".mp3" : ".wav";
+                    // Un archivo: WAV de 24 bits o, en MP3, un WAV temporal que convierte ffmpeg
+                    auto writeOne = [&] (const juce::AudioBuffer<float>& audio, const juce::File& target) -> bool
+                    {
+                        if (! req.mp3)
+                            return triggers::writeWav (audio, sr, target, 24);
+                        const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                              .getNonexistentChildFile ("secuencias_export", ".wav", false);
+                        if (! triggers::writeWav (audio, sr, temp, 24))
+                            return false;
+                        juce::ChildProcess p;
+                        const bool started = p.start (juce::StringArray { ffmpeg.getFullPathName(), "-y", "-loglevel", "error", "-i",
+                                                                          temp.getFullPathName(), "-codec:a", "libmp3lame", "-b:a", "320k",
+                                                                          target.getFullPathName() });
+                        const bool done = started && p.waitForProcessToFinish (30 * 60 * 1000) && p.getExitCode() == 0;
+                        temp.deleteFile();
+                        return done && target.existsAsFile();
+                    };
+                    const auto mixFile = req.folder.getNonexistentChildFile (req.name, ext, false);
+                    ok = writeOne (res.mix, mixFile);
+                    reveal = mixFile;
+                    int written = ok ? 1 : 0;
+                    if (ok && req.options.clickFile && res.click.getNumSamples() > 0)
+                    {
+                        ok = writeOne (res.click, req.folder.getNonexistentChildFile (req.name + " - click", ext, false));
+                        written += ok ? 1 : 0;
+                    }
+                    if (ok && req.options.stems && ! res.stems.empty())
+                    {
+                        const auto dir = req.folder.getNonexistentChildFile (req.name + " - pistas", "", false);
+                        ok = dir.createDirectory().wasOk();
+                        for (size_t k = 0; ok && k < res.stems.size(); ++k)
+                        {
+                            auto stemName = juce::File::createLegalFileName (res.stems[k].name.trim());
+                            if (stemName.isEmpty())
+                                stemName = "Pista " + juce::String ((int) k + 1);
+                            ok = writeOne (res.stems[k].audio, dir.getNonexistentChildFile (juce::String ((int) k + 1).paddedLeft ('0', 2) + " " + stemName, ext, false));
+                            written += ok ? 1 : 0;
+                            exportFraction = 0.9f + 0.1f * (float) (k + 1) / (float) res.stems.size();
+                        }
+                    }
+                    message = ok ? tr ("Listo: ") + juce::String (written) + (written == 1 ? tr (" archivo en ") : tr (" archivos en "))
+                                       + req.folder.getFullPathName() + notes
+                                 : tr ("No se pudo escribir en ") + req.folder.getFullPathName()
+                                       + (req.mp3 ? tr (" (o ffmpeg no pudo convertir a MP3)") : juce::String());
+                }
+            }
+            catch (const std::bad_alloc&) { message = tr ("No hay memoria suficiente para exportar esta canción."); }
+            catch (const std::exception& e) { message = tr ("Error al exportar: ") + juce::String (e.what()); }
+            juce::MessageManager::callAsync ([safe, ok, message, reveal]
+            {
+                if (auto* self = safe.getComponent())
+                    self->exportFinished (ok, message, reveal);
+            });
+        });
+    });
+}
+
+void MainComponent::exportFinished (bool ok, const juce::String& message, const juce::File& reveal)
+{
+    // El motor vuelve al dispositivo donde estaba (detenido)
+    deviceManager.addAudioCallback (&engine);
+    engine.seekSeconds (exportResumePosition);
+    updateLoopRegion();
+    exporting = false;
+    if (exportWindow != nullptr)
+        exportWindow->exitModalState (1);
+    sepLabel.setText (message.upToFirstOccurrenceOf ("\n", false, false), juce::dontSendNotification);
+    if (! ok)
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, tr ("Exportar la mezcla"), message);
+        return;
+    }
+    auto* w = new juce::AlertWindow (tr ("Exportar la mezcla"), message, juce::MessageBoxIconType::InfoIcon, this);
+    w->addButton (tr ("Abrir la carpeta"), 1);
+    w->addButton ("OK", 0, juce::KeyPress (juce::KeyPress::returnKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([reveal] (int result)
+    {
+        if (result == 1)
+            reveal.revealToUser();
+    }), true);
+}
+
 double MainComponent::levelTargetLufs() const
 {
-    switch (targetBox.getSelectedId())
+    return levelTarget;
+}
+
+void MainComponent::showLevelTarget()
+{
+    for (int id = 1; id <= 4; ++id)
+        if (std::abs (levelTarget - (-10.0 - 2.0 * id)) < 0.05)
+        {
+            targetBox.setSelectedId (id, juce::dontSendNotification);
+            return;
+        }
+    targetBox.setText (loudness::targetText (levelTarget), juce::dontSendNotification);
+}
+
+void MainComponent::setLevelTarget (double lufs)
+{
+    levelTarget = juce::jlimit (loudness::minTargetLufs, loudness::maxTargetLufs, lufs);
+    props.getUserSettings()->setValue ("levelTargetLufs", levelTarget);
+    showLevelTarget();
+    if (auto* info = currentInfo())
     {
-        case 1:  return -12.0;
-        case 3:  return -16.0;
-        case 4:  return -18.0;
-        default: return -14.0;
+        recomputeSectionGains (*info);   // las mediciones valen; solo cambia el objetivo
+        library.saveSong (*info);
+        updateGainCurve();
+        rebuildMarkers();
     }
 }
 
@@ -7794,7 +8957,7 @@ bool MainComponent::useFlats() const
 
 void MainComponent::mouseUp (const juce::MouseEvent& e)
 {
-    if (e.eventComponent == &keyLabel && e.mouseWasClicked() && keyLabel.getText().isNotEmpty())
+    if (e.eventComponent == &keyLabel && e.mouseWasClicked() && keyLabel.getText().isNotEmpty() && ! playbackMode)
         keyMenu();
 }
 

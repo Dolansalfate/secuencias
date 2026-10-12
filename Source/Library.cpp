@@ -797,6 +797,70 @@ void Library::load()
             songs.push_back (readSong (d));
 
     saveSetlist();
+    loadShows();
+}
+
+void Library::loadShows()
+{
+    shows.clear();
+    activeShow = 0;
+    const auto v = juce::JSON::parse (root.getChildFile ("shows.json"));
+    if (auto* arr = v.getProperty ("shows", juce::var()).getArray())
+        for (auto& sv : *arr)
+        {
+            SongShow s;
+            s.name = sv.getProperty ("name", "").toString().trim();
+            if (s.name.isEmpty())
+                s.name = "Show";
+            if (auto* list = sv.getProperty ("songs", juce::var()).getArray())
+                for (auto& f : *list)
+                {
+                    const auto folder = juce::File::createLegalFileName (f.toString());
+                    if (folder.isNotEmpty() && folder != "." && folder != "..")
+                        s.folders.addIfNotAlreadyThere (folder);
+                }
+            shows.push_back (s);
+        }
+    if (shows.empty())
+        shows.push_back ({ "Show", {} });
+    activeShow = juce::jlimit (0, (int) shows.size() - 1, (int) v.getProperty ("active", 0));
+}
+
+void Library::saveShows() const
+{
+    auto* obj = new juce::DynamicObject();
+    obj->setProperty ("active", activeShow);
+    juce::Array<juce::var> list;
+    for (auto& s : shows)
+    {
+        auto* so = new juce::DynamicObject();
+        so->setProperty ("name", s.name);
+        juce::Array<juce::var> folders;
+        for (auto& f : s.folders)
+            folders.add (f);
+        so->setProperty ("songs", folders);
+        list.add (juce::var (so));
+    }
+    obj->setProperty ("shows", list);
+    const auto file = root.getChildFile ("shows.json");
+    const auto text = juce::JSON::toString (juce::var (obj));
+    if (! file.existsAsFile() || file.loadFileAsString() != text)
+        file.replaceWithText (text);
+}
+
+std::vector<int> Library::showSongs (int show) const
+{
+    std::vector<int> out;
+    if (! juce::isPositiveAndBelow (show, (int) shows.size()))
+        return out;
+    for (auto& f : shows[(size_t) show].folders)
+        for (int i = 0; i < (int) songs.size(); ++i)
+            if (songs[(size_t) i].folder.getFileName() == f)
+            {
+                out.push_back (i);
+                break;
+            }
+    return out;
 }
 
 juce::StringArray Library::listBanks() const
@@ -984,8 +1048,12 @@ bool Library::moveToTrash (int index)
         return false;
     if (! sendToTrash (songs[(size_t) index].folder))
         return false;
+    const auto folderName = songs[(size_t) index].folder.getFileName();
     songs.erase (songs.begin() + index);
     saveSetlist();
+    for (auto& s : shows)
+        s.folders.removeString (folderName);
+    saveShows();
     return true;
 }
 

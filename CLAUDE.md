@@ -62,7 +62,8 @@ modelo que usa Moises).
   Shift + clic lleva ahí el borde más cercano, el clic derecho ofrece "Inicio / Fin del tramo aquí", y
   en la cabecera de la fuente los compases se escriben ("Compases [8] a [16]"; sin análisis, tiempos
   m:ss). Un clic suelto solo mueve el cabezal desde donde escucha "Escuchar". **Nivelado** (selector de
-  la cabecera: sin nivelar o -12/-14/-16/-18 LUFS; los mixes nuevos empiezan en -14): al renderizar,
+  la cabecera: sin nivelar, -12/-14/-16/-18 LUFS u "Otro valor..." entre -30 y -6; los mixes nuevos empiezan
+  en -14): al renderizar,
   cada tramo se mide (EBU R128) y recibe la ganancia que lo lleva a esa sonoridad (tope ±12 dB), con
   su ganancia propia encima; un limitador con anticipación baja solo los picos que pasarían de -1,5 dB
   (pico real cerca de -1 dBTP), así una grabación antigua, baja y con picos altos también llega. El
@@ -264,7 +265,8 @@ modelo que usa Moises).
   en 0: así la batería del tema 2 de un mix suena como la del tema 1 sin tocar los faders, y no
   se levanta ruido donde no toca); después mide la **suma** con esas ganancias (a unidad, sin
   normalizar) y aplica a cada tramo la ganancia general que lo lleva al objetivo
-  (-12/-14/-16/-18 LUFS), sin pasar de -1 dBTP. El motor aplica ambas con rampas de 50 ms
+  (-12/-14/-16/-18 LUFS u "Otro valor...": cualquiera entre -30 y -6, `loudness::parseTarget`), sin pasar de
+  -1 dBTP. El motor aplica ambas con rampas de 50 ms
   (`GainCurve` con `trackGains` por stem), encima de los faders y sin tocar el click. En el
   mezclador, cada canal muestra "Niv +x dB": la ganancia por pista del tramo donde está el
   cabezal; un clic la edita y cambia ese tramo completo (volver a medir la reemplaza). Las
@@ -301,6 +303,24 @@ modelo que usa Moises).
   1-9 o teclado numérico (marcador), M (añadir marcador), L (loop), F11 (en vivo). La
   autorrepetición de una tecla mantenida se ignora (un pedal pisado no salta varias canciones).
   Cerrar la ventana con una canción sonando pide confirmación.
+- **Exportar la mezcla** (Ctrl+E o "Exportar la mezcla..." en el menú de la canción; `Bounce`): un
+  consolidado de la canción cargada para mandar a los demás músicos, con todo lo que suena (arreglo, tempo y
+  tono, faders y mute, nivelado, fader maestro, triggers, pistas MIDI e instrumentos; el solo no cuenta). Se
+  elige nombre, formato (WAV de 24 bits, o MP3 de 320 kbps si hay ffmpeg), click (sin click, mezclado o en un
+  archivo aparte), si van también las pistas por separado (una carpeta "<nombre> - pistas" con "01 Bajo.wav"...,
+  que suman la mezcla) y el nivel (como suena, sin saturar, o llevado al objetivo de LUFS con limitador). Se
+  renderiza fuera de tiempo real con barra de progreso y Cancelar; mientras dura, la app no suena.
+- **Modo reproducción** (botón "Reproducción"; "Volver a editar" sale; se recuerda al reabrir): la misma vista
+  de pistas y el mezclador, pero sin edición: solo volumen (fader, mute, solo, maestro y click) y salida de
+  cada pista, saltar, marcadores, loop, en vivo y guía de escenario. A la izquierda, el **show** activo (selector
+  con varios shows: nuevo, renombrar, duplicar, borrar), con número, duración y un punto verde por canción lista
+  en memoria, y debajo el total de música del show y cuánto hay en RAM; más abajo "Todas las canciones"
+  (doble clic o clic derecho para agregar al show o escuchar sin agregar). Clic derecho en el show: subir,
+  bajar, quitar, exportar. Todo el show se **precarga** en RAM ya renderizado (tempo, tono, arreglo y
+  triggers aplicados) si cabe en la mitad de la memoria del equipo; si no, siempre la actual, la anterior y
+  las dos siguientes, y las estiradas quedan además en una caché en disco para volver a cargarlas sin estirar.
+  Elegir una canción precargada la deja lista al instante. Al terminar una canción del show se carga la
+  siguiente, detenida y lista para el Play. Flechas y RePág/AvPág recorren el show.
 
 ## 3. Compilar, ejecutar y probar
 
@@ -405,6 +425,8 @@ Source/
   MixProject.h/.cpp    Armar mix: fuentes, tramos, mix.json, ubicación (layout), render y la canción que resulta
   MixEditor.h/.cpp     Sección "Armar mix": lista de fuentes, vista de la fuente, línea del mix, panel del tramo
   Stretcher.h/.cpp     Render de tempo y tono con Signalsmith Stretch (FetchContent, MIT)
+  Bounce.h/.cpp        Exportar la mezcla: render fuera de tiempo real con el motor, normalizar, sin saturar
+  RenderCache.h/.cpp   Caché en disco de canciones ya renderizadas (modo reproducción)
 Tests/EngineTests.cpp  Tests sin dispositivo: llaman al callback de audio a mano
 Tests/TestSynth.cpp    VST3 mínimo que compilan los tests para probar el host de instrumentos
 linux/                 .desktop (plantilla con @EXEC@), ícono SVG y empaquetar-deb.sh
@@ -637,7 +659,19 @@ Secuencias/
 Ajustes de la app (`juce::ApplicationProperties`): en Linux `~/.config/Secuencias/Secuencias.settings`,
 en macOS `~/Library/Application Support/Secuencias/`. Claves: `audioDevice` (XML de
 `AudioDeviceManager`), `pythonPath`, `analysisPythonPath`, `stems` (1 = 4 pistas, 2 = 6),
-`quality` (1 normal, 2 alta, 3 máxima), `levelTarget` (1 = -12 LUFS, 2 = -14, 3 = -16, 4 = -18); `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
+`quality` (1 normal, 2 alta, 3 máxima), `levelTargetLufs` (objetivo del nivelado en LUFS, -30 a -6; las
+versiones de antes guardaban en `levelTarget` el índice del selector, 1 = -12 ... 4 = -18, que se lee una vez
+para migrar), `playbackMode` (la app vuelve en el modo reproducción), `exportFormat` (0 WAV, 1 MP3),
+`exportClick` (0 sin click, 1 mezclado, 2 aparte), `exportStems`, `exportLevel` (0 como suena, 1 al objetivo) y
+`exportFolder`; `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
+
+Shows (modo reproducción): `<raíz>/shows.json` = `{ "active": 0, "shows": [{ "name", "songs": [carpetas] }] }`
+(`SongShow`, `Library::shows`, `activeShow`, `loadShows` desde `load()`, `saveShows`; sin archivo, un show "Show"
+vacío; `showSongs` da los índices de las canciones que existen, en orden; `moveToTrash` quita la canción de
+todos los shows). Caché de render: `~/.cache/Secuencias/render` (XDG; `~/Library/Caches/Secuencias/render` en
+macOS, `%LOCALAPPDATA%\Secuencias\render` en Windows), una carpeta por clave (`hashCode64` en hex) con
+`pista-N.wav` (24 bits) y `meta.json` (`{ key, sampleRate, length, tracks: [{ name, stem, songTime }] }`); se
+puede borrar entera sin perder nada.
 
 ### 5.4 Separator (Demucs + Roformer)
 `SeparationOptions` (pistas 4/6, calidad 0-2, `roformerVocals`) se traduce con `planFor()` en
@@ -1084,6 +1118,58 @@ Pasos de `run()`:
   reemplaza). `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
   [--mixtramos] [--mixcancion=1|2] [--mixsel=5-8]` (rutas sin espacios).
 
+### 5.4k Bounce (exportar la mezcla)
+- `bounce::render (motor, canción, opciones, abort, progreso)`: el motor debe estar **fuera del dispositivo**
+  (`startExport` hace `removeAudioCallback` y `exportFinished` lo vuelve a poner, repone la posición y el loop).
+  Cada fuente (pista, línea de trigger o fila MIDI con banco y sin silenciar, instrumento) sale por un par de
+  salida propio y el click por el último (`setClickRouting`); el solo se ignora, el mute se respeta y los
+  plugins pasan a `setNonRealtime`. Antes del `play()` se llama al callback dos veces en silencio
+  (`fadeSamples + 16`): sin eso, el fundido del salto a 0 atrasaba la mezcla 256 muestras. Luego bloques de 1024
+  muestras hasta el largo de la canción; la mezcla es la suma de las fuentes (y del click si va mezclado). Al
+  final devuelve salidas, solos, click y modo de los plugins como estaban.
+- `normalize (resultado, sr, objetivo)`: hasta 3 pasadas de medida (EBU R128) + `loudness::limiterGains` (techo
+  -1,5 dB), la misma ganancia por muestra a la mezcla y a las pistas (siguen sumando la mezcla; el click no se
+  toca). `preventClipping`: si un pico pasa de 0,999 baja todo por igual.
+- En `MainComponent`: `exportMixDialog` (`ExportRequest`, ajustes `export*`, `pickFiles` para la carpeta),
+  `startExport` (ventana de progreso con Cancelar; el trabajo va en `exportPool`, con `exportFraction`
+  atómico que el Timer copia a la barra), escritura con `triggers::writeWav` (24 bits) o, en MP3, un WAV
+  temporal convertido con `ffmpeg -codec:a libmp3lame -b:a 320k` (`Separator::findFfmpeg`, que también busca
+  en `~/.local/bin` y, en macOS, en Homebrew). `--captura --exportar=<carpeta>` exporta la canción con click
+  aparte y pistas.
+
+### 5.4l Modo reproducción (shows, precarga y caché en disco)
+- `setPlaybackMode` (ajuste `playbackMode`): `TimelineView::setReadOnly` (regla: solo saltar a marcadores y
+  al tiempo; carriles: solo saltar; sin menús, sin T, pistas MIDI sin clics) y `MixerPanel::setReadOnly`
+  (sin "Niv" editable ni casilla del trigger; se vuelve a aplicar tras `setSong`, `setSamplers`,
+  `setMidiSamplers` e `setInstruments`). `resized` oculta la barra de importar/separar, Grabar, marcadores y
+  notas nuevas, modo de corte, filas del click y del tempo; `keyPressed` ignora M, N, Ctrl+Z y Supr;
+  `markerMenu` solo salta; `filesDropped` avisa. Salir del modo con una canción que vino de la precarga
+  (`currentFromPreload`: sin la fuente en RAM) la vuelve a cargar completa para editarla.
+- Lista: el `ListBox` del setlist muestra `showRows` (las filas del show en la biblioteca); `AllSongsModel`
+  la de todas; `showBox` (shows y sus acciones, ids 1001+), `showSongMenu`, `allSongsMenu`, `addToShow`,
+  `showSummary` (total de música, "~" si falta alguna duración; memoria usada), `requestDurations` (largos
+  de las que no se cargaron, leídos de la cabecera de los archivos en `preloadPool`, con el mapa de tempo).
+- Precarga (`updatePreload`, `preloadPool {1}`, una a la vez): orden actual, siguiente, anterior, la de
+  después y luego por cercanía; entra lo que cabe en `preloadBudget` (la mitad de la RAM del equipo) y siempre
+  la actual, la anterior y las 2 siguientes. `preloaded` (por carpeta) guarda `PreloadEntry` (la canción
+  renderizada, sus `SamplerSet`, bytes, duración y los largos de la fuente y del arreglo; la fuente y el arreglo
+  en sí se sueltan). La clave `playbackKey` cambia con todo lo que cambia el render (archivos con tamaño y
+  fecha, triggers, tramos, tempo, tono, pistas MIDI, frecuencia), no con la mezcla: si cambia, la entrada se
+  descarta (y se vuelve a precargar). `loadSongAt` instala una entrada que coincide con `installPreloaded`
+  (repone la mezcla guardada con `AudioEngine::applyStemMix` y `resetSamplerPlayback`, y pasa canciones sin
+  pistas con los largos, `lengthOnlySong`, para que el mapa de tempo y los tramos se dibujen); si no, la carga
+  normal con `loadParts` y la clave, y `songLoaded` la registra. `preloadGeneration` invalida trabajos al
+  salir del modo o al cambiar el dispositivo (`needsReload` vacía la precarga). `failedPreloads` evita
+  reintentos en bucle.
+- Caché en disco (`RenderCache`): `loadParts` con clave lee primero `rendercache::load` si el mapa de tempo
+  no es plano (solo lo estirado se guarda: lo demás se carga casi igual de rápido desde los archivos), y
+  tras estirar guarda con `store` y recorta con `prune` a 20 GB (borra las menos usadas: cargar una entrada
+  le actualiza la fecha).
+- Fin de canción: el Timer ve que dejó de sonar al final (`wasPlayingLastTick`) y carga la siguiente del show
+  sin darle play. `nextSong` recorre el show.
+- `--captura --reproduccion [--show=1,2,3]` (el show activo pasa a tener esas canciones del setlist; escribe
+  `shows.json` y el ajuste `playbackMode` reales) espera a que termine la precarga (`isPreloadBusy`).
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -1210,9 +1296,16 @@ Pasos de `run()`:
   build de release tarda unos segundos por canción; con la de Debug, minutos.
 - Click en 4/4 fijo; sin cuenta regresiva (count-in).
 - Sin MIDI (solo teclas; los pedales que emulan teclado funcionan).
-- Al cambiar de canción se detiene la reproducción (con fundido); no hay avance automático.
-  Un pedal mal pisado (AvPág) igual cambia de canción: falta una opción "solo cuando está
-  detenido".
+- Al cambiar de canción se detiene la reproducción (con fundido); en el modo reproducción, al terminar
+  una canción del show queda cargada la siguiente, pero no arranca sola. Un pedal mal pisado (AvPág) igual
+  cambia de canción: falta una opción "solo cuando está detenido".
+- Exportar la mezcla: mientras se renderiza la app no suena (el motor sale del dispositivo); con
+  instrumentos VST/AU tarda lo que tarde el plugin en modo no tiempo real. No se exporta desde el armado de
+  mix (ahí está "Escuchar el mix", que deja `mezcla.wav` en la carpeta del mix).
+- Modo reproducción: la precarga ocupa RAM (la mitad del equipo como máximo, más la actual, la anterior y
+  las 2 siguientes aunque no quepan); la caché en disco puede llegar a 20 GB. Salir del modo con una canción
+  precargada la vuelve a cargar (se detiene). Una canción ligada a un mix que hay que volver a armar se arma
+  al elegirla (no en la precarga).
 - Si se arrastra a la ventana un solo archivo, siempre se separa (no pregunta).
 - Con JACK, JUCE conecta las salidas del cliente a los puertos físicos al abrir el dispositivo;
   la app no elige puertos por nombre (PipeWire puede reconectarlos).
@@ -1295,8 +1388,8 @@ como bancos (hecho, v0.4.1), 3) instrumentos VST3/AU disparados por los triggers
 4) disparo desde un micrófono en vivo (no hace falta por ahora).
 
 Pendientes de antes que siguen vigentes: probar con interfaces multicanal reales, control
-MIDI, precarga de la siguiente canción, opción "cambiar de canción solo cuando está detenido",
-avance automático, count-in y compases distintos de 4/4 en la rejilla fija, AppImage, y
+MIDI, opción "cambiar de canción solo cuando está detenido", avance automático con play (la precarga de
+todo el show y "queda lista la siguiente" están hechas en el modo reproducción, v0.11.0), count-in y compases distintos de 4/4 en la rejilla fija, AppImage, y
 verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
 
 ## 9. Bitácora
@@ -1306,6 +1399,14 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.11.0 (exportar, LUFS libre y modo reproducción)**: `Bounce` (render fuera de tiempo real con el
+  motor, cada fuente y el click por su par, `normalize` con limitador, `preventClipping`), diálogo "Exportar la
+  mezcla" (WAV o MP3 con ffmpeg, click mezclado o aparte, pistas por separado, nivel), `Separator::findFfmpeg`,
+  `AudioEngine::applyStemMix` / `setClickRouting`; objetivo de LUFS escrito a mano (`loudness::parseTarget`,
+  `targetText`, ajuste `levelTargetLufs`, "Otro valor..." en el nivelado y en el armado de mix); modo
+  reproducción (`setPlaybackMode`, shows en `shows.json`, `TimelineView` y `MixerPanel` de solo lectura,
+  precarga por prioridad con presupuesto de RAM, `RenderCache` en disco, siguiente lista al terminar, total
+  del show), `--captura --reproduccion --show --exportar`.
 - **v0.10.0 (cada pista por separado)**: arreglo propio por pista (`TrackClips`, `SongInfo::trackClips` en
   song.json, `arrangement::clipsOf` / `ownClips` / `dropOwnClips` / `songLength`, render por pista), ediciones de toda
   la canción repetidas por tiempo en esas pistas (`cutOwnAt`, `moveOwnRange`, `removeOwnRange`, `insertOwnGap`,

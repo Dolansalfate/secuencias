@@ -17,6 +17,8 @@
 #include "MixProject.h"
 #include "MixEditor.h"
 #include "MidiTracks.h"
+#include "Bounce.h"
+#include "RenderCache.h"
 #include <map>
 #include <set>
 
@@ -45,7 +47,7 @@ public:
     // Cierra la app; si hay una canción sonando, pide confirmación primero.
     void requestQuit();
     // Carga la canción de esa fila del setlist (como un clic en la lista).
-    void selectSong (int row) { if (juce::isPositiveAndBelow (row, (int) library.songs.size())) setlist.selectRow (row); }
+    void selectSong (int row) { if (juce::isPositiveAndBelow (row, (int) library.songs.size())) chooseSong (row); }
     bool isLoading() const    { return currentIndex >= 0 && currentSong == nullptr; }
     bool isAnalyzing() const  { return analyzer.getState() == Analyzer::State::running; }
     bool isLeveling() const   { return levelPool.getNumJobs() > 0; }
@@ -61,6 +63,11 @@ public:
     void setTriggerForCapture (const juce::String& bank);     // activa el trigger de la batería con ese banco (herramienta de captura)
     void setInstrumentForCapture (const juce::String& path);  // carga ese plugin en el rack y lo pone como trigger de la batería (captura)
     bool isLoadingInstruments() const { return rack != nullptr && rack->isLoading(); }
+    // Captura: modo reproducción con el show activo armado con esas canciones del setlist ("1,2,3"; vacío = como está)
+    void setPlaybackModeForCapture (const juce::String& showSongs);
+    bool isPreloadBusy() const        { return playbackMode && (preloadingFolder.isNotEmpty() || durationsPending); }
+    void exportForCapture (const juce::File& folder);   // la mezcla con el click aparte y cada pista, en WAV
+    bool isExporting() const          { return exporting; }
     // Herramienta de captura: abre (o crea) el mix `name` en _mixes, le agrega esas fuentes si no las
     // tiene, y opcionalmente arma tramos de prueba (8 compases de cada fuente desde su 3.er compás) y
     // crea la canción (createMode 1 = separar con IA, 2 = sin separar)
@@ -114,7 +121,69 @@ private:
     void songMenu (int row);
     void refreshSetlist();
     void restoreSetlistSelection();
+    void chooseSong (int index);   // elegir y cargar una canción (en reproducción, la lista es la del show)
     void afterFadeOut (std::function<void()> action, int waitedMs = 0);
+
+    // Lo que hace la carga en el hilo de fondo (canción elegida o precargada): leer las pistas, armar el arreglo,
+    // estirar (o, con `cacheKey`, leerla ya estirada de la caché en disco, y guardarla ahí si hubo que estirar) y armar
+    // los triggers
+    struct LoadParts
+    {
+        std::shared_ptr<LoadedSong> song, source, arranged;
+        std::shared_ptr<SamplerSet> samplers;
+        juce::String error;
+        double sourceSeconds = 0.0, arrangedSeconds = 0.0;
+    };
+    LoadParts loadParts (const SongInfo&, double sampleRate, const juce::File& banksDir, const std::function<bool()>& abort,
+                         const std::function<void()>& onStretch, const juce::String& cacheKey);
+
+    // --- Modo reproducción: shows con todo precargado; solo volumen, mute, solo y salida de cada pista ---
+    // Una canción precargada: solo lo que suena (sin la fuente ni el arreglo aparte, que en este modo no hacen falta)
+    struct PreloadEntry
+    {
+        juce::String key;                       // playbackKey con que se armó
+        std::shared_ptr<LoadedSong> song;
+        std::shared_ptr<SamplerSet> samplers;
+        juce::int64 bytes = 0;
+        double seconds = 0.0;                   // largo de lo que suena
+        double sourceSeconds = 0.0, arrangedSeconds = 0.0;
+    };
+    void setPlaybackMode (bool on);
+    void showHelpText();
+    void layoutPlaybackPanel (juce::Rectangle<int> left);
+    void refreshShowControls();                 // selector de shows (nombres)
+    void showBoxChanged();
+    void showSongMenu (int row);                // clic derecho en una canción del show
+    void allSongsMenu (int songIndex);          // clic derecho en "Todas las canciones"
+    void addToShow (int songIndex, int show);
+    int showRowOf (int songIndex) const;        // fila del show activo con esa canción (-1 = no está)
+    // Todo lo que cambia lo que suena al renderizar una canción (no la mezcla, que se aplica aparte), a esa frecuencia
+    static juce::String playbackKey (const SongInfo&, double sampleRate);
+    static void resetSamplerPlayback (SamplerSet&);   // un conjunto que vuelve a sonar empieza limpio (sin voces viejas)
+    juce::int64 preloadBudget() const;          // RAM para el show: la mitad de la del equipo
+    void updatePreload();                       // qué mantener (todo si cabe; si no, la actual, la anterior y 2 siguientes) y la próxima carga
+    void requestDurations();                    // estima en segundo plano el largo de las canciones del show
+    void preloadDone (const juce::String& folder, const PreloadEntry&, int generation);
+    static std::shared_ptr<LoadedSong> lengthOnlySong (double seconds, double sr);   // sin pistas: solo el largo
+    void installPreloaded (const PreloadEntry&, const SongInfo&, int generation);
+    juce::String showSummary() const;           // "12 canciones · 58:30 de música\nEn memoria: 12 de 12 · 9,8 GB"
+    double knownSeconds (const SongInfo&) const;   // duración (lo que suena) si se conoce; < 0 si no
+    bool playbackMode = false;
+    std::vector<int> showRows;                  // índices en library.songs de las canciones del show activo, en orden
+    std::map<juce::String, PreloadEntry> preloaded;   // por carpeta de la canción
+    juce::String preloadingFolder;              // la que se está precargando (una a la vez)
+    std::set<juce::String> failedPreloads;      // claves que no se pudieron cargar (no se reintentan solas)
+    std::map<juce::String, double> estimatedSeconds;   // largo estimado por clave (antes de precargarla)
+    bool durationsPending = false;
+    std::atomic<int> preloadGeneration { 0 };
+    bool currentFromPreload = false;            // lo que suena salió de la precarga (sin la fuente ni el arreglo aparte)
+    bool wasPlayingLastTick = false;            // para notar el final de una canción del show
+    class AllSongsModel;
+    std::unique_ptr<AllSongsModel> allSongsModel;
+    juce::ComboBox showBox;
+    juce::Label showInfoLabel, allSongsTitle;
+    juce::ListBox allSongsList;
+    juce::TextButton playbackBtn;
 
     // Vista de arreglo, mezclador, marcadores, click, loop
     void syncTimelineMarkers();
@@ -366,6 +435,29 @@ private:
     void updateGainCurve();
     void levelSetlist();                           // mide todas las canciones y las empareja
     double levelTargetLufs() const;
+    // Exportar la mezcla de la canción cargada (Ctrl+E o el menú de la canción): diálogo de opciones, carpeta,
+    // render fuera de tiempo real con bounce::render (el motor sale del dispositivo mientras tanto) y archivos
+    struct ExportRequest
+    {
+        juce::String name;              // nombre de los archivos
+        bool mp3 = false;
+        bool level = false;             // llevar la mezcla a `target` LUFS
+        double target = -14.0;
+        bounce::Options options;
+        juce::File folder;
+    };
+    void exportMixDialog();
+    void startExport (const ExportRequest&);
+    void exportFinished (bool ok, const juce::String& message, const juce::File& reveal);
+    bool exporting = false;
+    std::atomic<float> exportFraction { 0.0f };
+    std::atomic<bool> exportCancel { false };
+    double exportProgress = 0.0;                    // lo lee la barra del diálogo (el Timer la copia de exportFraction)
+    double exportResumePosition = 0.0;
+    juce::Component::SafePointer<juce::AlertWindow> exportWindow;
+    void showLevelTarget();                     // el selector muestra el objetivo (uno de la lista o el escrito)
+    void setLevelTarget (double lufs);          // lo guarda en los ajustes y lo aplica a la canción cargada
+    double levelTarget = -14.0;                 // objetivo de nivelado (LUFS), entre loudness::minTargetLufs y maxTargetLufs
 
     // Importar / separar / ajustes
     void chooseStems();
@@ -517,6 +609,8 @@ private:
     juce::ThreadPool levelPool { 1 };    // mediciones de sonoridad (no bloquean la carga de canciones)
     juce::ThreadPool mixPool { 1 };      // mix: copias de fuentes, formas de onda y lecturas para analizar (no demoran la escucha)
     juce::ThreadPool mixSongPool { 1 };  // pistas de canciones ligadas a un mix (no demoran la carga de otras canciones)
+    juce::ThreadPool exportPool { 1 };   // exportar la mezcla (el motor sale del dispositivo mientras tanto)
+    juce::ThreadPool preloadPool { 1 };  // modo reproducción: precarga de las canciones del show y sus duraciones
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

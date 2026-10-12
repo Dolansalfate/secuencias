@@ -8,6 +8,13 @@
 namespace loudness
 {
     constexpr double unknown = -100.0;   // "sin medir" o silencio total
+    // Objetivos de nivelado que se pueden pedir (LUFS): más bajo no tiene sentido para una mezcla y más alto solo se
+    // lograría aplastando todo con el limitador (el techo de pico se respeta siempre)
+    constexpr double minTargetLufs = -30.0, maxTargetLufs = -6.0;
+    // Un objetivo escrito a mano ("-15,5", "15", "-16 LUFS"): un número positivo se toma como negativo; se acota a
+    // [minTargetLufs, maxTargetLufs]. false si no hay un número.
+    bool parseTarget (const juce::String& text, double& lufs);
+    juce::String targetText (double lufs);   // "-14 LUFS", "-15,5 LUFS"
 
     struct Measurement
     {

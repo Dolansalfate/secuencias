@@ -115,6 +115,13 @@ void ChannelStrip::setTriggerLabel (const juce::String& text, int mode)
     trigBox.setColour (juce::Label::backgroundColourId, mode == 0 ? juce::Colours::black.withAlpha (0.25f) : juce::Colours::orange.withAlpha (0.15f));
 }
 
+void ChannelStrip::setReadOnly (bool ro)
+{
+    levelBox.setEditable (! ro, false, false);
+    trigBox.setInterceptsMouseClicks (! ro, false);
+    nameLabel.setInterceptsMouseClicks (! ro, false);
+}
+
 void ChannelStrip::setTriggerBoxVisible (bool visible)
 {
     trigBoxVisible = visible;
@@ -317,6 +324,19 @@ void MixerPanel::setClickVisible (bool visible)
     }
 }
 
+void MixerPanel::setReadOnly (bool ro)
+{
+    readOnly = ro;
+    applyReadOnly();
+}
+
+void MixerPanel::applyReadOnly()
+{
+    for (auto* list : { &strips, &samplerStrips, &midiStrips, &instrumentStrips })
+        for (auto* strip : *list)
+            strip->setReadOnly (readOnly);
+}
+
 void MixerPanel::setSong (std::shared_ptr<LoadedSong> song)
 {
     strips.clear();
@@ -336,6 +356,7 @@ void MixerPanel::setSong (std::shared_ptr<LoadedSong> song)
             holder.addAndMakeVisible (strip);
         }
     }
+    applyReadOnly();
     resized();
 }
 
@@ -354,6 +375,7 @@ void MixerPanel::setSamplers (std::shared_ptr<SamplerSet> set)
             strip->onChanged = [this] { if (onChanged) onChanged(); };
             holder.addAndMakeVisible (strip);
         }
+    applyReadOnly();
     resized();
 }
 
@@ -372,6 +394,7 @@ void MixerPanel::setMidiSamplers (std::shared_ptr<SamplerSet> set)
             strip->onChanged = [this] { if (onChanged) onChanged(); };
             holder.addAndMakeVisible (strip);
         }
+    applyReadOnly();
     resized();
 }
 
@@ -390,6 +413,7 @@ void MixerPanel::setInstruments (std::shared_ptr<InstrumentSet> set)
             strip->onNameClicked = [this, id] { if (onInstrumentClicked) onInstrumentClicked (id); };
             holder.addAndMakeVisible (strip);
         }
+    applyReadOnly();
     resized();
 }
 

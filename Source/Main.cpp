@@ -77,6 +77,14 @@ public:
                 captureDuplicate = commandLine.fromFirstOccurrenceOf ("--duplicar=", false, false).getDoubleValue();
             if (commandLine.contains ("--modocorte="))
                 captureCutMode = commandLine.fromFirstOccurrenceOf ("--modocorte=", false, false).getIntValue();
+            // Modo reproducción: --reproduccion [--show=1,2,3] (canciones del setlist para el show activo)
+            if (hasFlag ("--reproduccion"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->setPlaybackModeForCapture (commandLine.contains ("--show=")
+                                                       ? commandLine.fromFirstOccurrenceOf ("--show=", false, false).upToFirstOccurrenceOf (" ", false, false)
+                                                       : juce::String());
+            if (commandLine.contains ("--exportar="))
+                captureExport = juce::File (commandLine.fromFirstOccurrenceOf ("--exportar=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted());
             if (commandLine.contains ("--cancion="))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->selectSong (commandLine.fromFirstOccurrenceOf ("--cancion=", false, false).getIntValue() - 1);
@@ -116,10 +124,11 @@ public:
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs, captureLane);
             if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
+            if (captureExport != juce::File()) mc->exportForCapture (captureExport);
         }
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
                                              && ! mc->isRendering() && ! mc->isSeparating() && ! mc->isLoadingInstruments()
-                                             && ! mc->isMixBusy());
+                                             && ! mc->isMixBusy() && ! mc->isPreloadBusy() && ! mc->isExporting());
         if ((ready && ++captureTicks >= 4) || captureTicks++ > 2400)   // tope: 10 min (los renders largos)
         {
             captureTimer.stopTimer();
@@ -204,6 +213,7 @@ private:
     bool captureDrumParts = false, captureSeparateDrums = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;
     int captureLane = -1;   // --pista=N: el corte y el desplazamiento de --corte solo en ese carril
+    juce::File captureExport;   // --exportar=<carpeta>: exportar la mezcla de la canción cargada
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;
 };
