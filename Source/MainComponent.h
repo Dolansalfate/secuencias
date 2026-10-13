@@ -9,6 +9,7 @@
 #include "Stretcher.h"
 #include "Arrangement.h"
 #include "TimelineView.h"
+#include "TempoEditor.h"
 #include "MixerPanel.h"
 #include "FilePicker.h"
 #include "StageView.h"
@@ -56,7 +57,12 @@ public:
     bool isRendering() const  { return rendering || tempoDirtySince != 0; }
     // Corta los stems y desplaza el tramo que sigue (herramienta de captura); con lane >= 0, solo esa pista
     void editForCapture (double cutSeconds, double moveMs, int lane = -1);
-    void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
+    void setCutModeForCapture (int mode)
+    {
+        snapBtn.setToggleState (mode > 1, juce::dontSendNotification);
+        if (mode > 1)
+            cutModeBox.setSelectedId (juce::jlimit (2, 3, mode), juce::dontSendNotification);
+    }
     // --herramienta=cortar|mover [--guiacorte=seg] [--tijera=seg]: elige la herramienta, corta con la tijera en ese
     // instante (en el carril `lane`, o en todas las pistas con -1) y muestra la guía de la tijera
     void toolForCapture (ui::EditTool, double guideSeconds, double cutSeconds, int lane);
@@ -92,6 +98,9 @@ public:
     void openImportPickerForCapture()                         { chooseStems(); }
     void showStage (bool show);                               // ventana de guía de escenario (segunda pantalla)
     juce::Image stageSnapshot();                              // captura de la guía (herramienta de captura)
+    juce::Image tempoEditorSnapshot();                        // captura del editor de tempo (--editortempo)
+    void openTempoEditorForCapture()                          { openTempoEditor (true); }
+    void tempoCurveForCapture (int band, int curve, bool stretches) { timeline.setTempoStretches (stretches); tempoTrackCurve (band, curve); }
     double positionForCapture() const                         { return engine.getPositionSeconds(); }
     void seekForCapture (double seconds)                      { engine.seekSeconds (seconds); }
     void updateStage (double playbackSeconds);                // alimenta la guía de escenario desde el Timer
@@ -197,7 +206,7 @@ private:
     juce::ComboBox showBox;
     juce::Label showInfoLabel, allSongsTitle;
     juce::ListBox allSongsList;
-    juce::TextButton playbackBtn;
+    juce::TextButton editModeBtn, playbackBtn;   // los dos modos: Editar y Show (reproducción)
 
     // Vista de arreglo, mezclador, marcadores, click, loop
     void syncTimelineMarkers();
@@ -411,6 +420,8 @@ private:
     // Objeto: mover los tramos elegidos (ajustado según el modo de corte, por el que se tomó) y recortar un borde
     void moveClipPicks (std::vector<TimelineView::ClipPick>, int primary, double grabSeconds, double deltaSeconds);
     void trimClipEdge (TimelineView::ClipPick, bool startEdge, double edgeSeconds);
+    void clipLookEdited (TimelineView::ClipPick, int what, double value);   // 1 fundido de entrada, 2 de salida, 3 ganancia
+    TimelineView::ClipView clipView (const Clip&) const;                    // el tramo para la vista (tiempo de reproducción)
     void deleteClipPicks();   // Supr con tramos elegidos: dejan silencio
     // Unir, Borrar, Silenciar, Color y Dibujar sobre un carril (allTracks: el tramo de la canción)
     void clipToolClicked (ui::EditTool, double playbackSeconds, int lane, bool allTracks);
@@ -426,6 +437,10 @@ private:
     void tempoTrackMoved (int band, double playbackSeconds);
     void tempoTrackAdd (double playbackSeconds, double bpm);
     void tempoTrackRemove (int band);
+    void tempoTrackCurve (int band, int curve);   // transición de la sección hacia la siguiente (según el modo)
+    void regridSection (SongInfo&, int band);     // "solo el click": la rejilla de la sección con su tempo y su transición
+    void openTempoEditor (bool show);
+    void syncTempoEditor();
     void tempoRegionsEdited (SongInfo&);   // guardar, rehacer la vista y el estirado
     void signatureMenu (int beat, bool popup, double playbackSeconds);
     void signatureDialog (int beat, bool adding);
@@ -454,13 +469,18 @@ private:
     void copyClip (int index);
     void pasteClipboard (double songSeconds, bool insert);   // insert: abre espacio (audio y grilla); si no, superpone
     void duplicateClip (int index);                          // copia y pega insertando justo después del tramo
-    int cutMode() const { return cutModeBox.getSelectedId(); }          // 1 libre, 2 a la rejilla, 3 a la transiente
+    int cutMode() const { return snapBtn.getToggleState() ? cutModeBox.getSelectedId() : 1; }   // 1 libre, 2 a la rejilla, 3 a la transiente
     double nearestGridTime (double songSeconds) const;                   // tiempo detectado (o de la rejilla fija) más cercano
     double onsetNear (double songSeconds, int lane, double window) const; // transiente en la pista del carril (o en la mezcla); -1 si no hay
     double snapCutTime (double songSeconds, int lane, juce::String& how) const;   // según el modo de corte
     void arrangementEdited();                      // guarda, refresca la vista y pide el render
     void pushUndo();                               // copia de la canción antes de una edición (grilla o audio)
     void undoLastEdit();
+    void redoLastEdit();
+    void restoreEdit (SongInfo restored);   // deshacer y rehacer: todo salvo la mezcla, el enlace y los controles MIDI
+    // Opciones de separación (pistas, calidad, batería en partes) en un diálogo: se leen y se guardan en los ajustes
+    void addSeparationOptions (juce::AlertWindow&);
+    void takeSeparationOptions (juce::AlertWindow&);
     void refreshFromInfo();                        // vuelve a aplicar SongInfo a la UI y al motor tras deshacer
 
     // Nivelado de sonoridad (EBU R128)
@@ -593,6 +613,7 @@ private:
         int createMode = 0, selFirst = -1, selLast = -1;
     } mixCapture;
     std::vector<SongInfo> undoStack;           // estados anteriores de la canción (hasta 30)
+    std::vector<SongInfo> redoStack;           // lo deshecho, para rehacerlo (Ctrl+Shift+Z); una edición nueva lo vacía
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)
     int renderedTranspose = 0;
@@ -621,14 +642,24 @@ private:
     juce::ListBox setlist;
 
     juce::Label songTitle, nextLabel, sectionLabel, timeLabel, chordLabel, keyLabel;
-    juce::TextButton prevBtn, playBtn, stopBtn, nextBtn, recordBtn, liveBtn, zoomFitBtn;
-    juce::ToggleButton loopBtn;
+    ui::IconButton prevBtn { ui::TransportIcon::prev }, playBtn { ui::TransportIcon::play }, stopBtn { ui::TransportIcon::stop },
+                   nextBtn { ui::TransportIcon::next }, recordBtn { ui::TransportIcon::record }, loopBtn { ui::TransportIcon::loop };
+    juce::TextButton liveBtn, zoomFitBtn;
     juce::Slider positionSlider;
 
     juce::TextButton addMarkerBtn, addNoteBtn;
     juce::OwnedArray<ui::ToolButton> toolButtons;   // la caja de herramientas, una por ui::EditTool
     juce::TooltipWindow tooltips { this, 600 };     // el nombre y la tecla de cada herramienta
-    juce::ComboBox cutModeBox;                 // modo de corte y de encaje al mover tramos
+    juce::ComboBox cutModeBox;                 // a qué se ajustan el corte y el arrastre: la rejilla o la transiente
+    juce::TextButton snapBtn;                  // ajuste encendido (J), como el snap de Cubase
+    // Inspector de la canción (bajo el setlist, plegable): click, tempo, tono, análisis y nivelado
+    juce::TextButton inspectorBtn;
+    bool inspectorOpen = true;
+    // Barra de estado (abajo): la herramienta y el ajuste, los mensajes, el progreso y los atajos
+    juce::Label statusTool;
+    juce::TextButton shortcutsBtn;
+    void showShortcuts();
+    void refreshStatusTool();
     juce::OwnedArray<MarkerButton> markerButtons;
 
     juce::ToggleButton clickBtn, levelBtn;
@@ -649,6 +680,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<FilePicker> picker;
     std::unique_ptr<StageWindow> stageWindow;
+    std::unique_ptr<TempoEditorWindow> tempoEditor;   // la pista de tempo en una ventana aparte (Ctrl+T)
     juce::TextButton stageBtn;
     juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
     int separationStemIndex = -1;              // >= 0: solo esa pista (la batería) se reemplaza por el resultado

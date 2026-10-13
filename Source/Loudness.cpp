@@ -3,21 +3,8 @@
 #include <algorithm>
 #include <deque>
 
-namespace
+namespace loudness
 {
-    struct Biquad
-    {
-        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-        double z1 = 0, z2 = 0;
-        inline double process (double x)
-        {
-            const double y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2;
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-    };
-
     // Ponderación K (BS.1770-4) para cualquier frecuencia de muestreo, como en libebur128
     void makeKWeighting (double fs, Biquad& shelf, Biquad& highpass)
     {
@@ -43,6 +30,64 @@ namespace
             highpass.a2 = (1.0 - K / Q + K * K) / a0;
         }
     }
+
+    void LiveLoudness::prepare (double sampleRate)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            shelf[ch] = {};
+            highpass[ch] = {};
+            makeKWeighting (sampleRate, shelf[ch], highpass[ch]);
+        }
+        blockLength = juce::jmax (1, (int) std::lround (sampleRate * 0.1));   // bloques de 100 ms
+        blockSum = 0.0;
+        blockCount = 0;
+        blocks.fill (0.0);
+        filled = 0;
+        next = 0;
+        momentaryLufs = shortTermLufs = (float) unknown;
+    }
+
+    void LiveLoudness::process (const float* left, const float* right, int numSamples)
+    {
+        if (left == nullptr)
+            return;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double l = highpass[0].process (shelf[0].process ((double) left[i]));
+            double e = l * l;
+            if (right != nullptr)
+            {
+                const double r = highpass[1].process (shelf[1].process ((double) right[i]));
+                e += r * r;
+            }
+            blockSum += e;
+            if (++blockCount < blockLength)
+                continue;
+            blocks[(size_t) next] = blockSum / blockLength;
+            next = (next + 1) % (int) blocks.size();
+            filled = juce::jmin ((int) blocks.size(), filled + 1);
+            blockSum = 0.0;
+            blockCount = 0;
+            auto meanOf = [this] (int count)
+            {
+                count = juce::jmin (count, filled);
+                double sum = 0.0;
+                for (int k = 1; k <= count; ++k)
+                    sum += blocks[(size_t) ((next - k + (int) blocks.size()) % (int) blocks.size())];
+                return count > 0 ? sum / count : 0.0;
+            };
+            const double m = meanOf (4), st = meanOf ((int) blocks.size());
+            momentaryLufs = m > 1.0e-12 ? (float) (-0.691 + 10.0 * std::log10 (m)) : (float) unknown;
+            shortTermLufs = st > 1.0e-12 ? (float) (-0.691 + 10.0 * std::log10 (st)) : (float) unknown;
+        }
+    }
+}
+
+namespace
+{
+    using loudness::Biquad;
+    using loudness::makeKWeighting;
 
     double toLufs (double meanSquareSum)
     {

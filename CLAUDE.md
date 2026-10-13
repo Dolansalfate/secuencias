@@ -36,8 +36,9 @@ modelo que usa Moises).
   canción (sus pistas se reemplazan por los stems y el audio anterior queda en la subcarpeta
   `original`; marcadores, análisis, tempo y cortes se conservan; `Library::replaceStems`) o
   elegir otro archivo, que se agrega como canción nueva; también se puede arrastrar uno solo a
-  la ventana. Dos selectores:
-  **pistas** (4, o 6 con guitarra y piano) y **calidad** (normal, alta, máxima). El pipeline
+  la ventana. Las opciones van en el mismo diálogo (y en "Ajustes IA", que usan arrastrar un archivo y el
+  armado de mix; `addSeparationOptions` / `takeSeparationOptions`, ajustes `stems`, `quality`, `drumParts`):
+  **pistas** (4, o 6 con guitarra y piano), **calidad** (normal, alta, máxima) y batería en partes. El pipeline
   corre en un hilo aparte con barra de progreso global y al terminar se importa como canción
   nueva. Normal usa `htdemucs` o `htdemucs_6s`; alta usa los modelos afinados `htdemucs_ft`
   (más `htdemucs_6s` solo para guitarra y piano) y, si está instalado `audio-separator`, saca
@@ -45,7 +46,7 @@ modelo que usa Moises).
   La pista "otros" siempre es el residuo exacto (mezcla menos las demás), así la suma de los
   stems reproduce la mezcla original. Si al terminar hay una canción sonando, la nueva solo se
   agrega al final del setlist (no se cambia de canción). Cancelar no muestra error.
-  **Batería en partes**: la casilla junto a la calidad añade una etapa final con el modelo
+  **Batería en partes**: la casilla del diálogo añade una etapa final con el modelo
   MDX23C DrumSep de audio-separator sobre `drums.wav`, que se reemplaza por bombo, caja, toms,
   hi-hat, ride y crash (`drums_kick.wav`… traducidos por `displayNameFor`); "otros" absorbe la
   pequeña diferencia entre la batería y la suma de sus partes. Para canciones ya separadas, el
@@ -111,14 +112,17 @@ modelo que usa Moises).
   m:ss; un carril por stem con forma de onda (escalada al pico de la pista), color, nombre, M y
   S; cabezal; loop sombreado; clic o arrastre = saltar; Ctrl+rueda = zoom, rueda = desplazar,
   "Ajustar" = ver toda la canción. Sigue al cabezal mientras suena.
-- **Mezclador** (`MixerPanel`): un canal por stem con fader en dB, medidor estéreo de pico y
-  RMS con retención de pico, clip que se apaga con un clic, mute, solo y salida; **canal del
-  click** (`ClickStrip`: encendido, fader, medidor del click generado con `takeClickPeak`, y
-  salida propia, sincronizado con la fila del click); canal maestro con fader (se guarda por
-  canción como `masterGainDb`) y medidor con escala en dB. Las salidas que se pueden elegir
+- **Mezclador** (`MixerPanel`): un canal por stem (118 px) con fader en dB (doble clic = 0 dB), medidor
+  estéreo de pico y RMS con retención de pico y su propia escala en dB, clip que se apaga con un clic, mute,
+  solo, **balance** (perilla junto a M y S, doble clic = centro; equal-power, `pan` en la pista, el trigger,
+  la fila MIDI y el instrumento) y salida; "Niv" y la casilla del trigger solo aparecen cuando aplican;
+  **canal del click** (`ClickStrip`: encendido, fader, medidor del click generado con `takeClickPeak`, y
+  salida propia: es el único lugar de esos controles); canal maestro con fader (se guarda por
+  canción como `masterGainDb`), medidor con escala en dB y **sonoridad en vivo** ("M" momentánea de 400 ms
+  y "S" de corto plazo de 3 s, en LUFS, `loudness::LiveLoudness`). Las salidas que se pueden elegir
   son los pares de canales del dispositivo activo: con "default" de PulseAudio solo 1-2; con
   una interfaz multicanal elegida en "Audio" (ALSA directo) o con JACK/PipeWire, los demás.
-- **Guía de escenario** (botón "Pantalla" o F12, `StageView` / `StageWindow`): ventana aparte
+- **Guía de escenario** (botón "Pantalla" junto al transporte, o F12, `StageView` / `StageWindow`): ventana aparte
   para una segunda pantalla: acorde actual enorme y siguiente al centro, compás y tiempo con
   puntos que marcan el pulso (el 1 en color de acento) y barra de avance, tempo de la sección,
   tonalidad, título, sección actual y siguiente, tiempo, y "Detenido · siguiente canción". La
@@ -198,8 +202,9 @@ modelo que usa Moises).
   silencia o no según el modo (solo trigger / ambas). La nota se elige de la lista General MIDI o
   del mapa "AD2 Standard" de Addictive Drums 2 (el que trae por defecto; su ventana MIDI Mapping
   también tiene uno General MIDI); "Escuchar" en el mismo menú toca un golpe con ese sonido.
-- **Modo en vivo** (botón "En vivo" o F11): oculta la vista de arreglo, muestra la barra de
-  posición simple y agranda título, sección, acorde actual y tiempo. El mezclador queda visible.
+- **Vista grande** (F11, o el botón "Vista grande" en el Show; antes "modo en vivo"): oculta la vista de
+  arreglo, las acciones de edición y el inspector, muestra la barra de posición simple y agranda título,
+  sección, acorde actual, tiempo y el transporte (con texto). El mezclador queda visible. "Vista normal" sale.
 - **Análisis musical** (botón "Analizar (IA)", `Analyzer`): madmom en un venv aparte detecta
   tiempos y primeros tiempos de compás (3/4 o 4/4), tempo, acordes (mayor, menor, séptimas)
   sobre la mezcla sin batería, y tonalidad. Se guarda en `song.json` (`analysis`). Con
@@ -220,7 +225,7 @@ modelo que usa Moises).
   final de la sección de tempo (o de la canción, con la opción del menú); el compás anterior
   queda más corto, que es lo que hace falta en un enganche entre canciones de un mix para que
   la siguiente entre en su "1". El click y la regla siguen los tiempos editados.
-- **Click por sección** (submenú "Click de esta sección" en la banda de tempo): "Tiempos a
+- **Click por sección** (submenú "Click de esta sección" en el menú de la sección, clic derecho en la pista de tempo): "Tiempos a
   la mitad" (madmom detectó corcheas: se deja uno de cada dos, conservando el 1 del compás),
   "Tiempos al doble", "Rejilla fija a N BPM desde el inicio de la sección" (reemplaza los
   tiempos detectados por un click regular al tempo de la sección: un cambio de tempo manual,
@@ -265,10 +270,19 @@ modelo que usa Moises).
   mientras se mantiene el clic y al soltar vuelve), **Warp** (W: arrastrar una línea de la rejilla hasta el golpe del
   audio; los tiempos entre los compases vecinos se acomodan, el audio no cambia) y **Color** (K: color del tramo).
   En todas, Shift alcanza al tramo de toda la canción en vez del de la pista del carril, y el clic derecho abre el
-  menú del tramo. La app parte en Objeto y el modo reproducción vuelve a ella. No están el Comp ni la Línea de Cubase
+  menú del tramo. La app parte en Objeto y el Show vuelve a ella. No están el Comp ni la Línea de Cubase
   (no hay tomas ni automatización).
+  **Fundidos y ganancia por tramo** (como las asas de Cubase): en la franja de arriba de un tramo (14 px), el asa de la
+  izquierda arrastrada a lo largo es el fundido de entrada, la de la derecha el de salida (curvas seno) y el asa del
+  centro, arrastrada hacia arriba o abajo, la ganancia del tramo (-24 a +12 dB, "-6,0 dB" sobre el tramo; la onda se
+  dibuja con ella). Al partir un tramo el fundido queda en la parte que lo tiene (`Clip::part`); dos tramos con
+  fundidos en la unión o ganancias distintas no se unen.
+  **Alto de los carriles**: arrastrar el borde de abajo de la cabecera de un carril (5 px) cambia su alto (se recuerda
+  por nombre de pista mientras la app está abierta; doble clic vuelve al de siempre); **Alt + rueda** agranda la onda
+  (zoom vertical, 1 a 16 veces).
 - **Pista de compás y pista de tempo** (sobre los carriles, como las pistas globales de Cubase; botón "Pista de tempo"
-  en la regla para mostrarlas u ocultarlas, ajuste `tempoTrack`; `TimelineView::TempoLane`): vienen con los tempos y
+  en la regla para mostrarlas u ocultarlas, ajuste `tempoTrack`; `TempoTrackView`, en `TempoTrack.h`; si no hay alto
+  para ella y dos carriles, se pliega sola en una fila con el tempo y el botón "Editor"): vienen con los tempos y
   compases de cada canción (del análisis o del mix) y se editan aquí. La de compás muestra cada cambio (4/4, 17/4,
   7/8...; hasta 32 tiempos por compás, `maxBeatsPerBar`, y la figura del tiempo, `Beat::unit`): clic edita el cambio
   (tiempos, figura y hasta dónde: el próximo cambio, solo ese compás o el final), arrastrarlo lo lleva a otro tiempo,
@@ -281,9 +295,23 @@ modelo que usa Moises).
   tempo: **"Estira el audio"** (la sección suena a ese tempo, como "Tempo de la sección") o **"Solo el click"** (la
   rejilla de la sección pasa a ese tempo y el audio suena igual: se conserva la razón del estirado); ajuste
   `tempoTrackStretches`.
-- **Modo de corte** (selector junto a "+ Marcador", ajuste `cutMode`): "Corte libre" corta
-  donde se hizo clic; "Corte a la rejilla" en el tiempo detectado más cercano (o de la
-  rejilla fija del click); "Corte a la transiente" busca el ataque más cercano (±200 ms) en la
+  **Transiciones de tempo** (accelerando y ritardando, como las curvas de la pista de tempo de Cubase): cada sección
+  puede llegar a la siguiente con una curva en vez de un salto: "Salto" (el de siempre), "Rampa lineal", "Curva lenta
+  al inicio", "Curva rápida al inicio" o "Curva en S" (menú de la sección > "Transición hacia la siguiente sección", o
+  el selector "Transición" del editor). Con "Estira el audio", las pistas **siguen la curva** (el tempo de
+  reproducción cambia muestra a muestra: `curve`); con "Solo el click", la grabación ya acelera o frena y la rejilla
+  del click se rehace con esa curva (`gridCurve`, `rampGrid`) sin tocar el audio. La pista dibuja la rampa (la otra
+  curva, punteada) y los tiempos, el click, los acordes y los marcadores la siguen por el mapa.
+  **Editor de la pista de tempo** (Ctrl+T o el botón "Editor" de la pista; `TempoEditor`, `TempoEditorWindow`): la
+  misma pista de compás y de tempo en una ventana aparte y grande, con su propio zoom (Ctrl+rueda, "-" y "+",
+  "Ajustar") y desplazamiento, regla de compases, cabezal, sección elegida con su tempo escrito, su transición,
+  "+ Cambio en el cabezal", "Quitar el cambio" y "Dibujar"; los gestos son los de la pista. Sigue a la canción
+  cargada, recuerda su posición (`tempoEditorWindow`) y en el Show es de solo lectura; las teclas del transporte
+  pasan a la ventana principal.
+- **Ajuste** (snap; botón "Ajuste" junto a las herramientas, tecla J, y su selector "Rejilla" / "Transiente";
+  ajustes `cutMode` y `snapType`; `cutMode()` sigue dando 1 = libre, 2 = rejilla, 3 = transiente): apagado corta
+  donde se hizo clic; "Rejilla" en el tiempo detectado más cercano (o de la
+  rejilla fija del click); "Transiente" busca el ataque más cercano (±200 ms) en la
   pista del carril donde se hizo clic (la batería es la mejor referencia) y corta justo antes
   del golpe (`findOnset`). El menú muestra dónde caerá el corte. El mismo modo rige el
   la tijera, el rango, el recorte y el arrastre con Objeto: a la rejilla encaja el inicio del tramo en el tiempo más cercano; a la
@@ -308,11 +336,11 @@ modelo que usa Moises).
   nivelado activo y tramos sin medir también se mide. Tramos de menos de un par de segundos
   dan mediciones sin sentido: los marcadores para nivelar van en los cambios de tema. "Nivelar setlist" mide todas las canciones y les da
   una ganancia global (`songGainDb`) para que suenen parejas al pasar de una a otra.
-- **Tempo y tono** (`TempoMap`, `Stretcher`, Signalsmith Stretch): fila "Tempo" con el BPM al
-  que suenan todas las secciones (botón "Original" lo devuelve), "Tono" en semitonos para la
-  canción; cada sección de tempo puede tener además su propio tono ("Tono de la sección..." en
-  el menú de la banda; `TempoRegion::transpose`, `followSong` = el de la canción), que se ve
-  en la banda como "+2 st". El tempo cambia sin alterar el tono; el tono solo con esos
+- **Tempo y tono** (`TempoMap`, `Stretcher`, Signalsmith Stretch): en el inspector ("Ajustes de la
+  canción"), "Tempo" con el BPM al que suenan todas las secciones (botón "Original" lo devuelve) y "Tono
+  (st)" en semitonos para la canción; cada sección de tempo puede tener además su propio tono ("Tono de la sección..." en
+  el menú de la sección en la pista de tempo; `TempoRegion::transpose`, `followSong` = el de la canción), que se ve
+  como "+2 st". El tempo cambia sin alterar el tono; el tono solo con esos
   controles. Se renderiza en segundo
   plano a partir de la canción original y se intercambia con fundido conservando el punto y el
   estado de reproducción. Marcadores, tiempos, acordes, click y nivelado se muestran y aplican
@@ -320,18 +348,31 @@ modelo que usa Moises).
   para un mix.
 - **Secciones de tempo** (`tempoRegions`, `detectTempoRegions`): a partir de los tiempos del
   análisis se detectan los tramos con tempo distinto (un mix de canciones a distinto BPM) y se
-  muestran en una fila de la regla, sobre los compases, con su BPM ("82.7 -> 77.5 BPM" si está
-  estirada). Clic en la banda: tempo de reproducción de esa sección, volver a su original,
+  muestran en la pista de tempo con su BPM ("82.7 -> 77.5 BPM" si está estirada; la fila de la regla
+  que las repetía se quitó en la v0.13.0). Clic derecho en la sección: tempo de reproducción de esa sección, volver a su original,
   igualar todas las secciones a ese tempo, dividir o unir secciones, corregir el tempo
-  detectado y crear marcadores en los cambios de tempo. Con análisis, el campo BPM del click
-  no se edita: muestra el tempo de la sección que suena (el click sigue los tiempos
+  detectado, crear marcadores en los cambios de tempo y la transición hacia la siguiente. Con análisis, el
+  campo "Click BPM" del inspector no se edita: muestra el tempo de la sección que suena (el click sigue los tiempos
   detectados). Arriba a la derecha, la tonalidad va con el tempo de la sección actual
   ("96 -> 78 BPM" si está estirada).
 - Atajos: Espacio (play/pausa), Esc (stop y volver al inicio), flechas izquierda/derecha y
   RePág/AvPág (canción anterior/siguiente; los pedales Bluetooth suelen enviar esas teclas),
-  1-9 o teclado numérico (marcador), M (añadir marcador), L (loop), F11 (en vivo). La
-  autorrepetición de una tecla mantenida se ignora (un pedal pisado no salta varias canciones).
+  1-9 o teclado numérico (marcador), M (añadir marcador), L (loop), F11 (vista grande), F12 (pantalla de
+  escenario), Ctrl+Z / Ctrl+Shift+Z o Ctrl+Y (deshacer / rehacer), J (ajuste), Ctrl+T (editor de tempo), Ctrl+E
+  (exportar), las letras de las herramientas y "?" (la ventana de atajos, también en "? Atajos" de la barra de
+  estado). La autorrepetición de una tecla mantenida se ignora (un pedal pisado no salta varias canciones).
   Cerrar la ventana con una canción sonando pide confirmación.
+- **Interfaz (v0.13.0)**: barra de arriba con lo de editar a la izquierda (Importar stems, Separar canción, Armar
+  mix) y lo global a la derecha (Editar | Show, Instrumentos, Ajustes IA, Audio); transporte con íconos dibujados
+  (`ui::IconButton`, `ui::drawTransportIcon`: anterior, play/pausa, stop, siguiente, grabar en rojo, loop), compacto al
+  editar y grande con texto en la vista grande; **inspector** "Ajustes de la canción" bajo el setlist (Click BPM,
+  Click desde, Tempo y Original, Tono, resumen de las secciones, Analizar tempo y acordes, Nivelar y su objetivo; se
+  pliega, ajuste `inspector`); **barra de estado** abajo (herramienta y ajuste, mensajes, progreso de la separación,
+  Cancelar y "? Atajos"); el color de acento solo marca estado (lo elegido, lo encendido, el modo). Tamaño mínimo
+  1000 x 640: en pantallas bajas el mezclador se achica (170 a 230 px) y la pista de tempo se pliega; los marcadores
+  pasan a filas de ancho completo.
+- **Rehacer** (Ctrl+Shift+Z o Ctrl+Y, `redoStack`, `redoLastEdit`): lo que Ctrl+Z deshizo vuelve, hasta 30 pasos;
+  una edición nueva vacía la pila.
 - **Exportar la mezcla** (Ctrl+E o "Exportar la mezcla..." en el menú de la canción; `Bounce`): un
   consolidado de la canción cargada para mandar a los demás músicos, con todo lo que suena (arreglo, tempo y
   tono, faders y mute, nivelado, fader maestro, triggers, pistas MIDI e instrumentos; el solo no cuenta). Se
@@ -339,9 +380,10 @@ modelo que usa Moises).
   archivo aparte), si van también las pistas por separado (una carpeta "<nombre> - pistas" con "01 Bajo.wav"...,
   que suman la mezcla) y el nivel (como suena, sin saturar, o llevado al objetivo de LUFS con limitador). Se
   renderiza fuera de tiempo real con barra de progreso y Cancelar; mientras dura, la app no suena.
-- **Modo reproducción** (botón "Reproducción"; "Volver a editar" sale; se recuerda al reabrir): la misma vista
-  de pistas y el mezclador, pero sin edición: solo volumen (fader, mute, solo, maestro y click) y salida de
-  cada pista, saltar, marcadores, loop, en vivo y guía de escenario. A la izquierda, el **show** activo (selector
+- **Show** (modo reproducción; el selector "Editar | Show" arriba a la derecha une lo que antes eran
+  "Reproducción", "En vivo" y "Pantalla"; se recuerda al reabrir): la misma vista
+  de pistas y el mezclador, pero sin edición: solo volumen (fader, mute, solo, balance, maestro y click) y salida de
+  cada pista, saltar, marcadores, loop, "Vista grande" y "Pantalla" (guía de escenario). A la izquierda, el **show** activo (selector
   con varios shows: nuevo, renombrar, duplicar, borrar), con número, duración y un punto verde por canción lista
   en memoria, y debajo el total de música del show y cuánto hay en RAM; más abajo "Todas las canciones"
   (doble clic o clic derecho para agregar al show o escuchar sin agregar). Clic derecho en el show: subir,
@@ -433,11 +475,14 @@ Source/
   MainComponent.h/.cpp Ventana principal: barra superior, setlist, transporte, marcadores, click,
                        modo en vivo; integra TimelineView y MixerPanel (MarkerButton vive en el .cpp)
   TimelineView.h/.cpp  Vista de arreglo: regla, carriles con forma de onda, cabezal, zoom
+  TempoTrack.h/.cpp    TempoTrackView: pista de compás y de tempo (escalones y transiciones), la de la vista y la del editor
+  TempoEditor.h/.cpp   TempoEditor y TempoEditorWindow: la pista de tempo en una ventana aparte (Ctrl+T)
   MixerPanel.h/.cpp    ChannelStrip, MasterStrip y MixerPanel
   FilePicker.h/.cpp    Selector de archivos dentro de la ventana (Linux y Windows)
   StageView.h/.cpp     Guía de escenario: StageState, StageView (dibujo) y StageWindow (segunda pantalla)
   Meters.h/.cpp        LevelMeter (pico, RMS, retención, clip, escala)
-  UiUtils.h            Colores, fuentes, paleta de pistas, disableFocus, formatTime
+  UiUtils.h            Colores, fuentes, paleta de pistas, disableFocus, formatTime, íconos de herramientas
+                       y de transporte (ToolButton, IconButton)
   AudioEngine.h/.cpp   Motor de reproducción (AudioIODeviceCallback)
   Library.h/.cpp       Modelo de datos + persistencia (setlist.json, song.json)
   Separator.h/.cpp     Hilo que convierte a WAV y ejecuta Demucs (y Roformer)
@@ -486,7 +531,10 @@ LEEME.md               Guía para el usuario final
   frecuencia del dispositivo, del mismo largo que la canción** (se rellenan con ceros al cargar),
   así el callback nunca lee fuera del buffer. Los mono se duplican y el remuestreo usa
   `LagrangeInterpolator`.
-- Controles por pista como atómicos (`gain`, `muted`, `solo`, `outputPair`). Medidores
+- Controles por pista como atómicos (`gain`, `muted`, `solo`, `outputPair`, `pan`). El balance (-1 a 1) es
+  equal-power: el lado contrario baja con cos (p · pi / 2) y el propio queda en 1; `PanRamp` lo lleva en rampa por
+  trozo desde `smoothedPan` (solo lo toca el hilo de audio), en las pistas, las líneas del sampler y los
+  instrumentos (`applyStemMix` también lo repone). Medidores
   post-fader por canal: `peakL/peakR` guardan el pico máximo y la UI los lee con
   `exchange(0)`; `rmsL/rmsR` son el RMS del último bloque. `smoothedGain` hace una rampa lineal
   por bloque (solo lo toca el hilo de audio). `waveform` (`WaveformCache`) guarda mín y máx por
@@ -567,7 +615,9 @@ LEEME.md               Guía para el usuario final
   El fader maestro se aplica también a la escucha (y aunque no haya canción cargada).
 - Fader maestro: `masterGain` se aplica con rampa a todas las salidas al final del callback
   (`applyMasterAndMeter`), que además mide pico (`takeOutputPeak`) y RMS (`getOutputRms`) por
-  canal de salida, hasta `maxMeteredOutputs`.
+  canal de salida, hasta `maxMeteredOutputs`, y la sonoridad del par 1-2 (`masterLoudness`,
+  `loudness::LiveLoudness`: ponderación K y bloques de 100 ms en un anillo prealocado; la UI lee
+  `getMomentaryLufs` / `getShortTermLufs`, atómicos).
 - `setSong()` cambia el `shared_ptr` bajo `songLock` (SpinLock). El callback usa
   `ScopedTryLock` y, si no lo obtiene, entrega silencio en ese bloque. La canción anterior se
   libera **fuera** del lock y en el hilo de UI.
@@ -611,7 +661,7 @@ Secuencias/
   "bpm": 120.0, "clickOffset": 0.0, "clickEnabled": false,
   "clickGainDb": -6.0, "clickOutputPair": 0,
   "markers": [ { "name": "Coro", "seconds": 42.5 } ],
-  "stems":   [ { "name": "Voces", "file": "vocals.wav", "gainDb": 0.0, "muted": false, "outputPair": 0 } ]
+  "stems":   [ { "name": "Voces", "file": "vocals.wav", "gainDb": 0.0, "muted": false, "outputPair": 0, "pan": 0.0 } ]
 }
 ```
 - `load()`: primero las carpetas en el orden de `setlist.json`, después agrega al final las
@@ -622,9 +672,11 @@ Secuencias/
 - `readSong()` acota todo lo numérico (`outputPair >= 0`, ganancias entre -60 y 12 dB, BPM entre
   20 y 400): un `song.json` editado a mano no debe poder sacar al motor de rango.
 - Tempo y tono: `playBpm` (0 = original) y `transpose` (semitonos) por canción, y
-  `tempoRegions`: `[{ "start", "bpm", "playBpm", "transpose"? }]`, las secciones de tempo en
+  `tempoRegions`: `[{ "start", "bpm", "playBpm", "transpose"?, "curve"?, "gridCurve"? }]`, las secciones de tempo en
   segundos del audio original (`bpm` = tempo detectado o corregido, `playBpm` 0 = el de la
-  canción, `transpose` solo si la sección tiene tono propio). Se
+  canción, `transpose` solo si la sección tiene tono propio; `curve` y `gridCurve`, la transición hacia la sección
+  siguiente del tempo de reproducción y de la grabación, `TempoRegion::Curve`: 0 salto, 1 lineal, 2 lenta al inicio,
+  3 rápida al inicio, 4 en S, solo si no son salto). Se
   ordenan al leer y siempre hay una que empieza en 0. Si una canción analizada no las tiene
   (guardada antes de esta versión), `readSong` las detecta de los tiempos guardados
   (`detectTempoRegions`). Sin secciones ni análisis, el tempo original es el `bpm` de la canción.
@@ -643,10 +695,11 @@ Secuencias/
   del compás: 2, 4, 8 o 16) solo se escribe si no es 4. `signatureRuns` (pista de compás: tramos de compases del
   mismo tipo), `setSignature` y `warpBeat` (herramienta Warp) son las ediciones de la pista de compás; los compases
   van de 1 a `maxBeatsPerBar` (32) tiempos.
-- Arreglo: `clips`: `[{ "start", "end", "at", "muted"?, "color"? }]`, tramos del audio original (segundos) y
+- Arreglo: `clips`: `[{ "start", "end", "at", "muted"?, "color"?, "fadeIn"?, "fadeOut"?, "gain"? }]`, tramos del audio original (segundos) y
   dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. `muted` (herramienta Silenciar: no
   suena) y `color` (ARGB; herramienta Color) solo se escriben si no son los de siempre (`Clip::muted`, `colour`;
-  `Clip::part` los conserva al partir, copiar o pegar). `trackClips`:
+  `Clip::part` los conserva al partir, copiar o pegar); `fadeIn` / `fadeOut` (segundos del audio original) y `gain`
+  (dB) son las asas del tramo (`readClipLook` / `writeClipLook`, también en `trackClips`). `trackClips`:
   `[{ "stem" (archivo), "clips": [...] }]`, las pistas con su propio arreglo (`TrackClips`; una
   lista vacía = la pista no suena); se usan en vez de `clips` en esa pista. Al separar una pista en
   partes (batería) cada parte hereda su arreglo propio, y los de pistas que ya no están se quitan. Todo lo demás
@@ -654,14 +707,14 @@ Secuencias/
   la canción, no en la del audio original.
 - Triggers: por stem, `trigger`: `{ enabled, keepAudio (false = solo suena el trigger), sound
   ("banco:<nombre>" o "vst:<id>", el id estable del instrumento en el rack), note (MIDI, para instrumentos), thresholdDb,
-  sensitivity, minMs, gainDb, muted, outputPair }` (`TriggerSettings`), y `songTime` (la pista
+  sensitivity, minMs, gainDb, muted, outputPair, pan }` (`TriggerSettings`), y `songTime` (la pista
   ya está en la línea de tiempo del arreglo: `arrangement::render` la copia tal cual en vez de
   pasarla por los clips; lo llevan las grabaciones, `<nombre>.wav` en la carpeta de la
   canción, `Library::newRecordingFile`). Los
   bancos viven en `<raíz>/_bancos/<nombre>/*.wav` (`Library::listBanks`, `bankFolder`;
   `load()` no los toma como canción; `exportAll` los copia).
 - Pistas MIDI: `midiTracks`: `[{ "name", "source" (archivo del stem de origen), "muteSource", "muted",
-  "pads": [{ "name", "note", "sound", "gainDb", "muted", "outputPair" }], "hits": [[segundos, nota,
+  "pads": [{ "name", "note", "sound", "gainDb", "muted", "outputPair", "pan" }], "hits": [[segundos, nota,
   velocidad], ...] }]` en la línea de tiempo de la canción (`MidiTrack`, `MidiPad`, `MidiHit`; los
   golpes ordenados con `sortHits`; `shiftGrid` los mueve con los huecos del arreglo).
 - Notas: `notes`: `[{ "seconds", "duration", "text" }]` en la línea de tiempo de la canción
@@ -697,8 +750,10 @@ en macOS `~/Library/Application Support/Secuencias/`. Claves: `audioDevice` (XML
 versiones de antes guardaban en `levelTarget` el índice del selector, 1 = -12 ... 4 = -18, que se lee una vez
 para migrar), `playbackMode` (la app vuelve en el modo reproducción), `exportFormat` (0 WAV, 1 MP3),
 `exportClick` (0 sin click, 1 mezclado, 2 aparte), `exportStems`, `exportLevel` (0 como suena, 1 al objetivo),
-`exportFolder`, `tempoTrack` (mostrar la pista de tempo y de compás) y `tempoTrackStretches` (el tempo estira el
-audio o solo mueve el click); `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
+`exportFolder`, `tempoTrack` (mostrar la pista de tempo y de compás), `tempoTrackStretches` (el tempo estira el
+audio o solo mueve el click), `drumParts` (separar la batería en partes), `snapType` (2 rejilla, 3 transiente: el
+tipo de ajuste aunque esté apagado), `inspector` (el inspector desplegado) y `tempoEditorWindow` (posición del
+editor de tempo); `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
 
 Shows (modo reproducción): `<raíz>/shows.json` = `{ "active": 0, "shows": [{ "name", "songs": [carpetas] }] }`
 (`SongShow`, `Library::shows`, `activeShow`, `loadShows` desde `load()`, `saveShows`; sin archivo, un show "Show"
@@ -778,6 +833,9 @@ Pasos de `run()`:
   -70 LUFS y relativa de -10 LU; los tramos usan solo los bloques enteramente dentro. Pico real
   con un sinc enventanado de 4 fases y 12 coeficientes. Verificado con la señal de referencia:
   seno de 997 Hz a -23 dBFS = -23 LUFS.
+- `LiveLoudness` (`prepare`, `process`, `momentary`, `shortTerm`; `Biquad` y `makeKWeighting` quedan a la vista):
+  la misma ponderación K, potencia en bloques de 100 ms y un anillo de 30 bloques, sin memoria dinámica después de
+  `prepare`; momentánea = últimos 4 bloques, corto plazo = los 30 (sin puertas: es un medidor, no una medición).
 - `gainToTarget (medición, objetivo, picoMáximo = -1 dBTP)`: dB para llegar al objetivo sin
   superar el pico; 0 si no hay medición. La UI mide en `levelPool` (un hilo aparte del de carga):
   primero cada stem por tramo (`StemLevel`: ganancia = sonoridad del stem en la canción menos la
@@ -793,7 +851,18 @@ Pasos de `run()`:
   `playBpm` (`effectivePlayBpm`: el de la sección, si no el de la canción, si no el original),
   `ratio = origBpm / playBpm` y `transpose` (`effectiveTranspose`: el de la sección o el de la
   canción). `toPlayback`, `toOriginal`, `playbackLength`, `isIdentity` (tempo), `hasPitchShift`,
-  `isPlain` (nada que renderizar), `segmentAtPlayback`. Los marcadores no afectan al mapa.
+  `isPlain` (nada que renderizar), `segmentAtPlayback`, `segmentAtOriginal`, `playBpmAt`, `origBpmAt`. Los marcadores
+  no afectan al mapa.
+- Transiciones: un tramo con `curve` o `gridCurve` (y otro después) va de `origBpm` / `playBpm` a `origBpmEnd` /
+  `playBpmEnd` (los de la sección siguiente) con la forma `tempoCurveShape` (fracción del cambio hecha en u: lineal
+  u, lenta u², rápida 1-(1-u)², S u²(3-2u)). El tiempo de reproducción es la integral de O(u)/P(u) (razón de tempos
+  en cada punto), por Simpson en `lutSteps` = 512 partes (`lut`, `playLength`); `toPlayback` interpola la tabla y
+  `toOriginal` la busca en binario. Si el tramo y el siguiente suenan a su tempo original (`followsOriginal`), P = O y
+  el tramo no se estira aunque la grabación acelere (`gridCurve`): la identidad se conserva. El stretcher no cambia:
+  pide la entrada con `toOriginal` por bloque, así sigue la rampa. `rampGrid (analysis, desde, hasta, bpmDesde,
+  bpmHasta, curva, compás, figura)` rehace los tiempos de un tramo con esa curva ("Solo el click"), redondea la
+  cantidad de tiempos y ajusta la curva para que el último caiga justo en `hasta`. `sameStretch` y `playbackKey`
+  cuentan las curvas.
 - `detectTempoRegions (analysis, bpmRespaldo)`: tempo local entre tiempos consecutivos;
   compara la mediana de los 8 anteriores con la de los 8 siguientes y, donde la diferencia
   supera el 4 %, sitúa el cambio en el intervalo que mejor separa el tempo de antes del de
@@ -828,7 +897,8 @@ Pasos de `run()`:
 ### 5.4e Arrangement (arreglo, fase 4)
 - `arrangement::render (fuente, clips, sr, abort)`: por pista, un buffer del largo del
   arreglo; cada tramo copia sus muestras a su posición con fundidos lineales de 5 ms en los
-  bordes y se **suma** (los solapes son un crossfade, los huecos silencio). Identidad (un
+  bordes (más sus fundidos propios, seno, y su ganancia; los silenciados se saltan) y se **suma** (los solapes son
+  un crossfade, los huecos silencio). Identidad (un
   tramo con todo el audio en 0 o `clips` vacío) devuelve el mismo puntero.
 - Edición: `ensureClips`, `cutAt`, `moveClip` (uno o "este y los siguientes", nunca antes de
   0), `removeClip` (con `closeGap` los siguientes se adelantan e informa qué se quitó),
@@ -917,7 +987,7 @@ Pasos de `run()`:
 - `InstrumentRack (motor, carpetaDeAjustes)`: `formats.addDefaultFormats()` (VST3; AU en macOS),
   `known` (`KnownPluginList`, persistida en `plugins.xml`), `slots` (id estable, `PluginDescription`,
   `lane`, ventana del editor, ganancia/mute/salida, `savedState`). `restore()` lee
-  `instrumentos.xml` (`<INSTRUMENTO id gainDb muted outputPair estado=base64><PLUGIN/>`), aplica
+  `instrumentos.xml` (`<INSTRUMENTO id gainDb muted outputPair pan estado=base64><PLUGIN/>`), aplica
   el "dead man's pedal" (`plugin-en-prueba.txt`: el plugin que tumbó la app en una búsqueda
   queda vetado) y carga cada plugin con `createPluginInstanceAsync`; `makeLane` pone el estado,
   `prepareToPlay (sr, maxBlockSize)`, latencia, buffer y cola MIDI; `publish()` arma un
@@ -1175,8 +1245,9 @@ Pasos de `run()`:
 - `setPlaybackMode` (ajuste `playbackMode`): `TimelineView::setReadOnly` (regla: solo saltar a marcadores y
   al tiempo; carriles: solo saltar; sin menús, sin T, pistas MIDI sin clics) y `MixerPanel::setReadOnly`
   (sin "Niv" editable ni casilla del trigger; se vuelve a aplicar tras `setSong`, `setSamplers`,
-  `setMidiSamplers` e `setInstruments`). `resized` oculta la barra de importar/separar, Grabar, marcadores y
-  notas nuevas, modo de corte, filas del click y del tempo; `keyPressed` ignora M, N, Ctrl+Z y Supr;
+  `setMidiSamplers` e `setInstruments`; también el editor de tempo, con `syncTempoEditor`). `resized` oculta las
+  acciones de edición de la barra de arriba, Grabar, marcadores y notas nuevas, herramientas, ajuste e inspector;
+  `keyPressed` ignora M, N, Ctrl+Z y Supr;
   `markerMenu` solo salta; `filesDropped` avisa. Salir del modo con una canción que vino de la precarga
   (`currentFromPreload`: sin la fuente en RAM) la vuelve a cargar completa para editarla.
 - Lista: el `ListBox` del setlist muestra `showRows` (las filas del show en la biblioteca); `AllSongsModel`
@@ -1209,8 +1280,10 @@ Pasos de `run()`:
   `ui::ToolButton` (solo ícono si no tiene texto). `MainComponent::toolButtons` (ayuda emergente con `tooltips`),
   `toolInfo` (nombre, tecla y ayuda de cada una), `setEditTool`. `TimelineView` crea un cursor por herramienta
   (`toolCursors`).
-- Gestos en `TimelineView` (`toolMouseDown`, `toolMouseDrag`, `toolMouseUp`, `toolHover`; el carril solo los pasa):
-  estado `Gesture` (seek, move, trim, range, zoom, warp, play), `clipList` (los tramos del carril o de la canción; sin
+- Gestos en `TimelineView` (`toolMouseDown`, `toolMouseDrag`, `toolMouseUp`, `toolHover`; el carril solo los pasa con
+  la altura del clic, `yInLane`): estado `Gesture` (seek, move, trim, range, zoom, warp, play, fade, gain; `handleAt`
+  reconoce las asas en los 14 px de arriba de un tramo de al menos 24 px: 1 fundido de entrada, 2 de salida, 3
+  ganancia, y la capa de encima dibuja la vista previa; `onClipFade` / `onClipGain` → `clipLookEdited`), `clipList` (los tramos del carril o de la canción; sin
   cortes, uno con toda la canción), `edgeNear` (bordes a <= 5 px), `laneArea` / `laneIndexAtY`, `beatNear`. Selección
   `ClipPick` (carril o -1 = toda la canción; tiempo de reproducción) y `Range` (carriles firstLane..lastLane o
   todos); se conservan en un render nuevo y `songLoaded` las suelta. La capa de encima dibuja selección, arrastre,
@@ -1230,10 +1303,15 @@ Pasos de `run()`:
   golpes MIDI y, cerrando el hueco, la grilla con `shiftGrid`) e `insertBars` (`insertGap` + `insertOwnGap` +
   `shiftGrid` y los tiempos nuevos del hueco). `render` salta los tramos silenciados; `sameClips` y `playbackKey`
   cuentan el silencio (no el color).
-- Pista de tempo y de compás (`TimelineView::TempoLane`, `tempoLaneHeight`, `tempoToggle`): fila de compás arriba
+- Alto de los carriles: `laneHeights` (por nombre de pista, en memoria), `laneResizeBegin` / `Drag` / `End` / `Reset`
+  desde los 5 px de abajo de la cabecera; `waveZoom` (Alt + rueda) multiplica la escala de la onda en `renderImage`.
+- Pista de tempo y de compás (`TempoTrackView` en `TempoTrack.h`, que `TimelineView` tiene en `tempoLane` y el editor
+  aparte también; `TempoBandView` con `curve`, `gridCurve`, `playCurve` y `origCurve`, `tempoLaneHeight`,
+  `tempoToggle`; `setCompact` la pliega en una fila cuando no caben ella y dos carriles): fila de compás arriba
   (`signatureMarks` desde `Analysis::signatureRuns`; rejilla fija: un "4/4" con beat -1) y escalera de tempo abajo
   (`tempoBands`, el tempo de reproducción con "Estira el audio" o el original con "Solo el click", el otro punteado;
-  curva del tempo local de los tiempos, mediana de 5). Callbacks `onTempoSet`, `onTempoMoved`, `onTempoAdd`,
+  curva del tempo local de los tiempos, mediana de 5; una transición se dibuja como curva con `tempoCurveShape`).
+  Callbacks `onTempoSet`, `onTempoMoved`, `onTempoAdd`,
   `onTempoRemove`, `onSignatureClicked`, `onSignatureAdd`, `onSignatureMoved`, `onSignatureRemove`,
   `onTempoModeChanged`, `onTempoTrackToggled`; el clic derecho del tempo usa `onTempoBandClicked` (el menú de siempre).
   En `MainComponent`: `tempoTrackSet` (estira: `playBpm` de la sección o de la canción; solo el click: `origBpm`, la
@@ -1242,9 +1320,28 @@ Pasos de `run()`:
   `tempoRegionsEdited`; `signatureMenu`, `signatureDialog` (tiempos, figura y alcance), `moveSignature`,
   `removeSignature` (sigue el compás anterior contando desde su inicio), `insertBarsDialog` (`beatSecondsAt`: la
   mediana de los tiempos cercanos), `deleteBar`, `ensureExplicitBeats` (la rejilla fija pasa a tiempos).
+  Transiciones: `tempoTrackCurve (sección, curva)` (menú de la sección, ids 70 a 74, o el selector del editor) pone
+  `curve` (estira) o `gridCurve` y `regridSection` (`rampGrid` hasta la sección siguiente, con su compás y figura);
+  `mergeEqualTempoRegions` no une secciones con transición.
+- Editor de tempo (`TempoEditor`: barra con la sección, su tempo, "Transición", "+ Cambio en el cabezal", "Quitar el
+  cambio", "Dibujar", "Ajustar", "-" y "+"; regla de compases propia, `TempoTrackView` y barra de desplazamiento; su
+  propio `viewStart` / `pps`, Ctrl+rueda acerca; `onCurveSet`, `onKey`, `selectBandAt`). `TempoEditorWindow`
+  (`DocumentWindow`, 1180 x 520, mínimo 980 x 320) vive en `MainComponent::tempoEditor`: `openTempoEditor` conecta los
+  callbacks a los mismos métodos que la pista de la vista, `syncTempoEditor` le pasa bandas, análisis, largo,
+  rejilla fija, modo y solo lectura (tras cada render, edición o cambio de canción o de modo) y el Timer, el cabezal.
+- Interfaz: `ui::IconButton` (TextButton con `TransportIcon` dibujado y texto opcional), `snapBtn` + `cutModeBox` (ids
+  2 y 3), `inspectorBtn` / `inspectorOpen`, `statusTool` / `refreshStatusTool`, `shortcutsBtn` / `showShortcuts`,
+  `editModeBtn` / `playbackBtn` (Editar | Show), `liveBtn` ("Vista grande" / "Vista normal"), `redoStack` /
+  `redoLastEdit` / `restoreEdit` (deshacer y rehacer comparten cómo se restaura), `addSeparationOptions`.
+  `resized` arma: barra de arriba (34 px), barra de estado (24), panel izquierdo (setlist o show e inspector de 246 o
+  28 px), título (36 o 60), información (28 o 56), transporte (34 o 56), fila de marcadores, herramientas y ajuste
+  (30 px; los marcadores siguen en filas de ancho completo, hasta 4), la vista de arreglo y el mezclador
+  (`r.getHeight() < 520`: 170 a 230 px; si no, 230 a 300). Con menos de 1300 px de ancho se angostan los botones.
 - Captura: `--herramienta=objeto|rango|cortar|unir|borrar|zoom|silenciar|dibujar|reproducir|warp|color`,
   `--clic=seg` y `--arrastrar=desde:hasta` (en `--pista=N`; `--shift`), `--compas=N/D:compás`,
-  `--insertarcompases=K:N/D:compás`, `--tempopista=sección:bpm [--soloclick]`.
+  `--insertarcompases=K:N/D:compás`, `--tempopista=sección:bpm [--soloclick]`, `--curva=sección:curva` (sección desde
+  1, curva 0 a 4; con `--soloclick`, la de la grabación), `--editortempo=archivo.png` (abre el editor y lo captura) y
+  `--tamano=AnchoxAlto` (la ventana a ese tamaño, para revisar pantallas chicas).
 
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
@@ -1280,9 +1377,9 @@ Pasos de `run()`:
   derecho en la fila de notas), `onLaneMenu` (clic
   derecho sobre un carril), los gestos de las herramientas (5.4m), `onMute`,
   `onSolo`. `setClips` recibe los tramos en tiempo de reproducción; la capa `Overlay` dibuja
-  sus bordes, los huecos y el tramo que se está arrastrando. La regla (`Ruler`, 82 px) tiene filas de marcadores,
-  secciones de tempo (`setTempoBands`, en tiempo de reproducción), compases, tiempo y
-  acordes. El análisis que recibe (`mappedAnalysis`) ya viene en tiempo de reproducción y con
+  sus bordes, los huecos y el tramo que se está arrastrando. La regla (`Ruler`, 80 px) tiene filas de marcadores
+  (y 0), notas (16), compases (30), tiempo (45) y acordes (60); las secciones de tempo (`setTempoBands`, en tiempo de
+  reproducción) están en la pista de tempo. El análisis que recibe (`mappedAnalysis`) ya viene en tiempo de reproducción y con
   los acordes y la tonalidad reescritos según `useFlats()`; los índices de los tiempos
   coinciden con los de `analysis.beats` originales. `keyMenu` (clic en `keyLabel`, que tiene a
   MainComponent como MouseListener), `beatMenu`, `chordMenu` y el submenú de click de
@@ -1370,7 +1467,8 @@ Pasos de `run()`:
 - Todo el audio va a RAM: unos 23 MB por minuto por stem a 48 kHz (5 min × 8 stems ≈ 1 GB).
 - El cambio de tempo y tono se renderiza entero antes de sonar (no es en tiempo real): con la
   build de release tarda unos segundos por canción; con la de Debug, minutos.
-- Click en 4/4 fijo; sin cuenta regresiva (count-in).
+- La rejilla fija del click (sin análisis) es 4/4; la pista de compás la pasa a tiempos para editarla. Sin cuenta
+  regresiva (count-in).
 - Sin MIDI (solo teclas; los pedales que emulan teclado funcionan).
 - Al cambiar de canción se detiene la reproducción (con fundido); en el modo reproducción, al terminar
   una canción del show queda cargada la siguiente, pero no arranca sola. Un pedal mal pisado (AvPág) igual
@@ -1382,6 +1480,11 @@ Pasos de `run()`:
   las 2 siguientes aunque no quepan); la caché en disco puede llegar a 20 GB. Salir del modo con una canción
   precargada la vuelve a cargar (se detiene). Una canción ligada a un mix que hay que volver a armar se arma
   al elegirla (no en la precarga).
+- Transiciones de tempo: van de una sección a la siguiente (no hay puntos de curva sueltos como en Cubase: para una
+  rampa en medio de una sección, primero se divide); la curva de "Estira el audio" y la de "Solo el click" son
+  aparte. El balance es de pista estéreo (baja un lado), no un panorama de una fuente mono. El medidor de sonoridad
+  del maestro mide el par 1-2 y no lleva la integrada (para eso está "Nivelar"). El alto de los carriles no se guarda
+  al cerrar la app.
 - Herramientas: Silenciar calla el audio del tramo pero no los golpes de sus pistas MIDI; Unir solo une tramos
   seguidos del mismo audio (no arma una "parte" con huecos como Cubase); no hay Comp ni Línea. En la pista de compás,
   la figura (x/4, x/8) es notación: el click suena en cada tiempo de la rejilla, y el tempo se cuenta en esos tiempos.
@@ -1461,7 +1564,8 @@ Fases, en orden:
    (en ms, al tiempo más cercano o con Shift + arrastre), eliminar (con o sin cerrar el hueco),
    unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer, y lo mismo por pista
    (borrar un tramo de una pista lo silencia), la caja de herramientas de Cubase con recorte de bordes (v0.12.0) y las
-   pistas de tempo y de compás. Pendiente: rehacer, pegar insertando en una sola pista.
+   pistas de tempo y de compás, rehacer, fundidos y ganancia por tramo y transiciones de tempo (v0.13.0). Pendiente:
+   pegar insertando en una sola pista.
 
 **Plan de estudio en vivo** (acordado el 2026-09-27): 1) triggers de las pistas separadas con
 sampler interno y bancos grabados (hecho, v0.4.0), 2) grabación de entradas como pistas nuevas y
@@ -1480,6 +1584,20 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.13.0 (revisión de la interfaz, transiciones de tempo y editor de tempo)**: las 13 recomendaciones de la revisión de
+  UI/UX: acento solo para estado; sin duplicados (fila del click en su canal del mezclador, fila de tempo en el inspector,
+  banda de tempo de la regla en la pista de tempo; regla de 80 px); opciones de separación en el diálogo; vista grande
+  mínima; transporte con íconos (`ui::IconButton`); rehacer (`redoStack`) y "Ajuste" con su tecla J (`snapBtn`,
+  `snapType`); balance por canal (`pan` en pistas, triggers, filas MIDI e instrumentos; `PanRamp`), escala de dB en
+  cada canal, faders más largos, doble clic a 0 dB, "Niv" y trigger solo cuando aplican; fundidos y ganancia por tramo
+  con asas (`Clip::fadeIn`, `fadeOut`, `gainDb`, `Clip::part`); alto de los carriles y zoom de la onda (Alt + rueda);
+  barra de estado y ventana de atajos ("?"); inspector de la canción; Editar | Show en vez de Reproducción, En vivo y
+  Pantalla sueltos; tamaño mínimo 1000 x 640 con mezclador y pista de tempo que se achican. Además: transiciones de
+  tempo entre secciones con cinco curvas que las pistas siguen (`TempoRegion::curve`, `gridCurve`, rampas en
+  `TempoSegment` con tabla integrada, `tempoCurveShape`, `rampGrid`), `TempoTrackView` sacada de la vista a
+  `TempoTrack.h`, editor de tempo en ventana aparte (`TempoEditor`, Ctrl+T), sonoridad momentánea y de corto plazo en
+  el maestro (`loudness::LiveLoudness`), escala de los medidores sin etiquetas pisadas. Captura `--curva`,
+  `--editortempo`, `--tamano`.
 - **v0.12.0 (caja de herramientas de Cubase y pistas de tempo y de compás)**: 11 herramientas (`ui::EditTool`: Objeto
   con selección, arrastre y recorte de bordes, Rango con su menú y loop, Cortar, Unir, Borrar, Zoom, Silenciar, Dibujar,
   Reproducir, Warp y Color) con íconos, cursores, teclas y ayuda emergente; `Clip::muted` y `colour` (song.json,

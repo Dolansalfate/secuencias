@@ -1033,6 +1033,27 @@ int main()
     }
     song->tracks[0]->solo = false;
 
+    std::cout << "[AudioEngine] balance por canal: hacia un lado baja el otro, al centro los dos enteros\n";
+    {
+        // Solo la pista 0 suena, por 1-2
+        song->tracks[1]->muted = true;
+        song->tracks[0]->pan = 1.0f;   // toda a la derecha
+        render (engine, out, 4);       // rampa del balance
+        float panned[4] = {};
+        render (engine, out, 10, panned);
+        CHECK (panned[0] < 1.0e-4f && panned[1] > 0.1f);
+        song->tracks[0]->pan = -0.5f;  // algo a la izquierda: la derecha baja a cos (45°)
+        render (engine, out, 4);
+        float half[4] = {};
+        render (engine, out, 10, half);
+        CHECK (half[0] > 0.1f && std::abs (half[1] / half[0] - std::cos (juce::MathConstants<float>::pi * 0.25f)) < 0.03f);
+        song->tracks[0]->pan = 0.0f;
+        song->tracks[1]->muted = false;
+        render (engine, out, 4);
+        // Medidor de LUFS de la salida: con audio, un valor
+        CHECK (engine.getMomentaryLufs() > -70.0f && engine.getShortTermLufs() > -70.0f);
+    }
+
     std::cout << "[AudioEngine] un par de salida inválido cae a 1-2 sin salirse de rango\n";
     {
         int l = 9, r = 9;
@@ -1449,6 +1470,52 @@ int main()
         CHECK (rendercache::load (cacheRoot, "clave-3", mixInfo, 48000.0, formats) != nullptr);
     }
 
+    std::cout << "[TempoMap] transiciones de tempo (accelerando y ritardando con curva) y el audio que las sigue\n";
+    {
+        SongInfo ramped;
+        ramped.bpm = 120.0;
+        ramped.tempoRegions = { { 0.0, 120.0, 0.0 }, { 2.5, 120.0, 132.0 } };
+        ramped.tempoRegions[0].curve = TempoRegion::linear;   // de 120 a 132 a lo largo de los primeros 2,5 s
+        const auto map = TimeMap::build (ramped, 5.0);
+        const double expected = 120.0 * 2.5 / 12.0 * std::log (132.0 / 120.0);   // integral exacta de la rampa lineal
+        CHECK (! map.isIdentity() && std::abs (map.toPlayback (2.5) - expected) < 1.0e-5);
+        CHECK (std::abs (map.toOriginal (map.toPlayback (1.3)) - 1.3) < 1.0e-6 && std::abs (map.playBpmAt (1.25) - 126.0) < 1.0e-9);
+        CHECK (std::abs (map.playbackLength() - (expected + 2.5 * 120.0 / 132.0)) < 1.0e-5);
+        CHECK (map.toPlayback (0.6) < 0.6 && map.toPlayback (0.6) > 0.6 * 120.0 / 132.0);
+        // Formas: la lenta al inicio va por debajo de la lineal a mitad de camino, la rápida por encima, la S pasa por el medio
+        CHECK (tempoCurveShape (TempoRegion::slowStart, 0.5) < 0.5 && tempoCurveShape (TempoRegion::fastStart, 0.5) > 0.5
+               && std::abs (tempoCurveShape (TempoRegion::sCurve, 0.5) - 0.5) < 1.0e-9 && std::abs (tempoCurveShape (TempoRegion::jump, 0.7)) < 1.0e-12);
+        // Solo el click: la grabación acelera de 120 a 132 y suena a su tempo: nada que estirar, pero el tempo cambia
+        SongInfo gridOnly = ramped;
+        gridOnly.tempoRegions = { { 0.0, 120.0, 0.0 }, { 2.5, 132.0, 0.0 } };
+        gridOnly.tempoRegions[0].gridCurve = TempoRegion::linear;
+        const auto gridMap = TimeMap::build (gridOnly, 5.0);
+        CHECK (gridMap.isIdentity() && std::abs (gridMap.origBpmAt (1.25) - 126.0) < 1.0e-9 && std::abs (gridMap.playBpmAt (1.25) - 126.0) < 1.0e-9);
+        // ...y si se pide que toda la canción suene a 120, la aceleración de la grabación se aplana (la razón cambia)
+        gridOnly.playBpm = 120.0;
+        const auto flat = TimeMap::build (gridOnly, 5.0);
+        CHECK (! flat.isIdentity() && std::abs (flat.playBpmAt (1.25) - 120.0) < 1.0e-9 && flat.toPlayback (2.5) > 2.5);
+        // El audio sigue la rampa: el render dura lo que dice el mapa
+        auto rampTone = sine (48000.0, 5.0, 2);
+        const auto rampOut = stretcher::renderBuffer (rampTone, map, 48000.0);
+        CHECK (std::abs (rampOut.getNumSamples() - map.playbackLength() * 48000.0) < 2.0);
+        // Se guarda en song.json
+        Library curves (tmp.getChildFile ("curvas"));
+        CHECK (curves.importStemFolder (src, "Curvas") == 0);
+        curves.songs[0].tempoRegions = ramped.tempoRegions;
+        curves.songs[0].tempoRegions[1].curve = TempoRegion::sCurve;
+        curves.saveSong (curves.songs[0]);
+        Library curvesAgain (tmp.getChildFile ("curvas"));
+        curvesAgain.load();
+        CHECK (curvesAgain.songs.size() == 1 && curvesAgain.songs[0].tempoRegions.size() == 2
+               && curvesAgain.songs[0].tempoRegions[0].curve == TempoRegion::linear && curvesAgain.songs[0].tempoRegions[1].curve == TempoRegion::sCurve);
+        // Solo el click: tiempos que aceleran de 120 a 132 en 10 s (21 tiempos, cada vez más juntos)
+        Analysis accel;
+        rampGrid (accel, 0.0, 10.0, 120.0, 132.0, TempoRegion::linear, 4, 4);
+        CHECK (accel.beats.size() == 21 && std::abs (accel.beats[0].seconds) < 1.0e-9 && accel.beats[4].beatInBar == 1
+               && accel.beats[1].seconds - accel.beats[0].seconds > accel.beats[20].seconds - accel.beats[19].seconds);
+    }
+
     std::cout << "[Herramientas] compases de 17/4 y 7/8, warp, tramos silenciados y con color, recorte, rangos y compases insertados\n";
     {
         // Pista de compás: 4/4, desde el tiempo 8 un compás de 17/4, y vuelta a 4/4
@@ -1511,6 +1578,38 @@ int main()
         looksAgain.load();
         CHECK (looksAgain.songs.size() == 1 && looksAgain.songs[0].clips.size() == 4 && looksAgain.songs[0].clips[1].muted
                && looksAgain.songs[0].clips[3].colour == 0xffe57373u && ! looksAgain.songs[0].clips[0].muted);
+
+        // Fundidos y ganancia del tramo: en el render (seno), en song.json, y al partir cada pedazo se queda con el suyo
+        {
+            std::vector<Clip> faded { { 0.0, 2.0, 0.0 } };
+            faded[0].fadeIn = 0.5;
+            faded[0].fadeOut = 0.5;
+            faded[0].gainDb = -6.0f;
+            auto flat2 = std::make_shared<LoadedSong>();
+            flat2->sampleRate = 1000.0;
+            flat2->length = 2000;
+            auto t2 = std::make_unique<LoadedTrack>();
+            t2->buffer.setSize (2, 2000);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2000; ++i)
+                    t2->buffer.setSample (ch, i, 1.0f);
+            flat2->tracks.push_back (std::move (t2));
+            const auto fadedOut = arrangement::render (flat2, faded, 1000.0);
+            const float halfGain = juce::Decibels::decibelsToGain (-6.0f);
+            CHECK (fadedOut != nullptr && std::abs (fadedOut->tracks[0]->buffer.getSample (0, 1000) - halfGain) < 1.0e-4f
+                   && std::abs (fadedOut->tracks[0]->buffer.getSample (0, 250) - halfGain * std::sin (juce::MathConstants<float>::halfPi * 0.5f)) < 0.01f
+                   && fadedOut->tracks[0]->buffer.getSample (0, 1990) < 0.05f);
+            arrangement::cutAt (faded, 1.0, 2.0);
+            CHECK (faded.size() == 2 && faded[0].fadeIn > 0.4 && faded[0].fadeOut < 1.0e-9 && faded[1].fadeIn < 1.0e-9 && faded[1].fadeOut > 0.4
+                   && std::abs (faded[1].gainDb + 6.0f) < 1.0e-6f);
+            CHECK (! arrangement::canJoinWithPrevious (faded, 1) || (faded[0].fadeOut < 1.0e-9 && faded[1].fadeIn < 1.0e-9));
+            looks.songs[0].clips = faded;
+            looks.saveSong (looks.songs[0]);
+            Library fadedAgain (tmp.getChildFile ("looks"));
+            fadedAgain.load();
+            CHECK (fadedAgain.songs[0].clips.size() == 2 && std::abs (fadedAgain.songs[0].clips[0].fadeIn - 0.5) < 1.0e-9
+                   && std::abs (fadedAgain.songs[0].clips[1].gainDb + 6.0f) < 1.0e-6f);
+        }
 
         // Recorte de bordes: el inicio no pisa al tramo anterior; el final no pasa del audio original
         std::vector<Clip> tc { { 0.0, 1.0, 0.0 }, { 1.0, 2.0, 1.5 } };

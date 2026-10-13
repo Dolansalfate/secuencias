@@ -84,7 +84,8 @@ void StageView::paint (juce::Graphics& g)
     {
         const bool hasNext = state.nextChord.isNotEmpty();
         auto nowArea = hasNext ? centre.removeFromLeft ((int) (W * 0.58f)) : centre;
-        g.setColour (state.playing ? juce::Colours::white : juce::Colours::white.withAlpha (0.55f));
+        // El acorde actual es lo más visible (blanco, aunque esté detenido); el siguiente, más chico y tenue
+        g.setColour (state.playing ? juce::Colours::white : juce::Colours::white.withAlpha (0.85f));
         g.setFont (ui::font (unit * 3.6f, true));
         g.drawText (state.chord.isEmpty() ? "-" : state.chord, nowArea, juce::Justification::centred, true);
         if (hasNext)
@@ -94,7 +95,7 @@ void StageView::paint (juce::Graphics& g)
             g.setColour (dim);
             g.setFont (ui::font (unit * 0.6f));
             g.drawText (tr ("SIGUIENTE"), label, juce::Justification::centred);
-            g.setColour (ui::accent);
+            g.setColour (ui::accent.withAlpha (0.75f));
             g.setFont (ui::font (unit * 2.2f, true));
             g.drawText (state.nextChord, nextArea, juce::Justification::centred, true);
         }
@@ -154,7 +155,7 @@ void StageView::paint (juce::Graphics& g)
         {
             const bool current = i == state.beat;
             const auto colour = i == 1 ? ui::accent : juce::Colours::white;
-            g.setColour (current ? colour : colour.withAlpha (0.25f));
+            g.setColour (current ? colour : colour.withAlpha (i == 1 ? 0.6f : 0.3f));   // el 1 se distingue aunque no suene
             if (current)
                 g.fillEllipse (x, y, dot, dot);
             else

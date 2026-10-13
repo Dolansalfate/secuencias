@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Secuencias VERSION 0.12.0 LANGUAGES C CXX)
+project(Secuencias VERSION 0.13.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,6 +86,8 @@ target_sources(Secuencias PRIVATE
     Source/Meters.cpp
     Source/MixerPanel.cpp
     Source/TimelineView.cpp
+    Source/TempoTrack.cpp
+    Source/TempoEditor.cpp
     Source/FilePicker.cpp
     Source/StageView.cpp
     Source/Instruments.cpp

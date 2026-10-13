@@ -117,12 +117,16 @@ void LevelMeter::paint (juce::Graphics& g)
         auto scale = getLocalBounds().removeFromRight (22);
         scale.removeFromTop (ledH + 2);
         g.setFont (ui::font (9.0f));
+        float lastLabelY = -100.0f;   // en un medidor bajo se saltan las etiquetas que se pisarían (la raya queda)
         for (float db : { 0.0f, -6.0f, -12.0f, -24.0f, -48.0f })
         {
             const float y = (float) scale.getBottom() - dbToFraction (db) * (float) scale.getHeight();
             g.setColour (juce::Colours::grey);
             g.fillRect (juce::Rectangle<float> ((float) scale.getX(), y, 4.0f, 1.0f));
+            if (y - lastLabelY < 10.0f)
+                continue;
             g.drawText (juce::String ((int) db), scale.getX() + 5, (int) y - 6, 18, 12, juce::Justification::centredLeft);
+            lastLabelY = y;
         }
     }
 }

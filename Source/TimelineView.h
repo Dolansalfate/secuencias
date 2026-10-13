@@ -3,7 +3,9 @@
 #include "AudioEngine.h"
 #include "Library.h"
 #include "UiUtils.h"
+#include "TempoTrack.h"
 #include <array>
+#include <map>
 
 // Vista de arreglo: regla con marcadores, compases y tiempo; una pista horizontal con forma de
 // onda por stem (cabecera con nombre, mute y solo); cabezal; loop sombreado; zoom con
@@ -19,13 +21,8 @@ public:
     void setSong (std::shared_ptr<LoadedSong>, double sampleRate);   // nullptr = sin canción
     void setLoadingText (const juce::String&);                          // texto cuando no hay canción
     void setMarkers (const std::vector<SongMarker>&, double bpm, double clickOffset);
-    // Secciones de tempo en tiempo de reproducción, para la fila de tempo de la regla
-    struct TempoBand
-    {
-        double start = 0.0, end = 0.0;
-        double origBpm = 0.0, playBpm = 0.0;   // distintos = sección estirada
-        int transpose = 0;                     // semitonos efectivos de la sección
-    };
+    // Secciones de tempo en tiempo de reproducción, para la pista de tempo
+    using TempoBand = TempoBandView;
     void setTempoBands (const std::vector<TempoBand>&);
     // Notas de texto (en tiempo de reproducción), banderitas en su fila de la regla
     struct NoteView
@@ -40,6 +37,8 @@ public:
         double start = 0.0, end = 0.0;
         bool muted = false;            // silenciado (herramienta Silenciar): onda gris
         juce::uint32 colour = 0;       // color propio (herramienta Color); 0 = el de la pista
+        double fadeIn = 0.0, fadeOut = 0.0;   // fundidos (segundos de reproducción)
+        float gainDb = 0.0f;           // ganancia del tramo
     };
     void setClips (const std::vector<ClipView>&);
     // Pistas con su propio arreglo (cortadas o movidas solas), en el orden de los carriles, con sus tramos en tiempo de
@@ -134,8 +133,9 @@ public:
     void setRange (Range);
     Range getRange() const { return range; }
 
-    // Pista de compás y pista de tempo (las pistas globales de Cubase), sobre los carriles
-    void setTempoTrackVisible (bool);
+    // Pista de compás y pista de tempo (las pistas globales de Cubase), sobre los carriles: desplegada (el gráfico) o
+    // plegada en una fila (los compases y el tempo de cada sección en texto)
+    void setTempoTrackVisible (bool expanded);
     bool isTempoTrackVisible() const { return tempoTrackVisible; }
     void setTempoStretches (bool);   // arrastrar el tempo estira el audio (true) o solo mueve el click (false)
     bool tempoStretchesAudio() const { return tempoStretches; }
@@ -156,6 +156,9 @@ public:
     // de un tramo se llevó a `edge`
     std::function<void (std::vector<ClipPick> picks, int primary, double grabSeconds, double deltaSeconds)> onPicksMoved;
     std::function<void (ClipPick clip, bool startEdge, double edgeSeconds)> onClipTrimmed;
+    // Asas del tramo con Objeto: el largo de un fundido (segundos de reproducción) y la ganancia (dB)
+    std::function<void (ClipPick clip, bool fadeIn, double seconds)> onClipFade;
+    std::function<void (ClipPick clip, double gainDb)> onClipGain;
     // Unir, Borrar, Silenciar, Color y Dibujar (en un carril de audio): clic en ese instante del carril
     std::function<void (ui::EditTool, double seconds, int lane, bool allTracks)> onClipTool;
     std::function<void (double seconds, int lane)> onRangeMenu;         // clic derecho dentro del rango
@@ -164,6 +167,7 @@ public:
     std::function<void (int beat, double seconds)> onBeatWarped;        // Warp: el tiempo `beat` va a ese instante
     // Pista de tempo (índices de setTempoBands) y de compás (índices de los tiempos del análisis)
     std::function<void (bool visible)> onTempoTrackToggled;
+    std::function<void()> onOpenTempoEditor;                            // botón "Editor" de la pista de tempo
     std::function<void (bool stretches)> onTempoModeChanged;
     std::function<void (int band, double bpm)> onTempoSet;              // arrastre vertical de una sección
     std::function<void (int band, double seconds)> onTempoMoved;        // arrastre del cambio de tempo (inicio de la sección)
@@ -195,7 +199,7 @@ public:
     void resized() override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
-    static constexpr int headerWidth = 130, rulerHeight = 96, scrollHeight = 12, tempoLaneHeight = 78;
+    static constexpr int headerWidth = 130, rulerHeight = 80, scrollHeight = 12, tempoLaneHeight = 78;
     static constexpr int gutter = 10;              // reserva para la barra vertical de los carriles
     static constexpr int minLaneHeight = 44, maxLaneHeight = 120;
 
@@ -204,7 +208,6 @@ private:
     class Lane;
     class MidiLane;
     class Overlay;
-    class TempoLane;
 
     void layoutLanes();                                       // carriles de audio y pistas MIDI dentro de laneHolder
     void clearMidiSelectionExcept (const MidiLane* keep);     // la selección de golpes vive en una sola pista MIDI
@@ -243,24 +246,41 @@ private:
     int laneIndexAtY (int yInView) const;                                 // carril bajo esa altura (de la vista), o -1
     int beatNear (double seconds, int pixels) const;                      // tiempo del análisis a menos de esos px, o -1
     // Gestos de las herramientas sobre un carril (contentX: desde el borde del contenido)
-    void toolMouseDown (int lane, int contentX, juce::ModifierKeys);
+    void toolMouseDown (int lane, int contentX, juce::ModifierKeys, int yInLane = 100);
     void toolMouseDrag (int lane, juce::Point<int> inView, int dragDistanceX);
     void toolMouseUp (int contentX);
-    juce::MouseCursor toolHover (int lane, int contentX, juce::ModifierKeys);
+    juce::MouseCursor toolHover (int lane, int contentX, juce::ModifierKeys, int yInLane = 100);
+    // Asa bajo el mouse (arriba en el tramo): 1 fundido de entrada, 2 de salida, 3 ganancia; 0 ninguna
+    int handleAt (const std::vector<ClipView>&, int contentX, int yInLane, int& clipIndex) const;
     void toolHoverExit();
     int edgeNear (const std::vector<ClipView>&, int contentX, bool& startEdge) const;   // tramo con un borde a <= 5 px
     std::vector<ClipPick> clipSelection;
     Range range;
     // Gesto en curso con una herramienta sobre un carril
-    enum class Gesture { none, seek, move, trim, range, zoom, warp, play };
+    enum class Gesture { none, seek, move, trim, range, zoom, warp, play, fade, gain };
     Gesture gesture = Gesture::none;
     int gestureLane = -1, gesturePrimary = -1, gestureBeat = -1;
     double gestureFrom = 0.0, gestureNow = 0.0;
     bool gestureMoved = false, gestureAll = false, trimStartEdge = false;
     ClipPick trimTarget;
+    ClipView handleClip;                           // el tramo cuya asa se arrastra
+    bool fadeIsIn = true;
+    int gainGrabY = 0;
+    double previewValue = 0.0;                     // largo del fundido o dB mientras se arrastra
     int hoverBeat = -1;                            // Warp: la línea de la rejilla bajo el mouse
+    // Alto propio de cada carril (arrastrando el borde de abajo de su cabecera), por nombre de pista; 0 = automático.
+    // Zoom vertical de la onda (Alt + rueda), para todos.
+    std::map<juce::String, int> laneHeights;
+    float waveZoom = 1.0f;
+    int resizingLane = -1, resizeGrabY = 0, resizeStartH = 0;
+public:
+    void laneResizeBegin (int lane, int yInView);
+    void laneResizeDrag (int yInView);
+    void laneResizeEnd();
+    void laneResizeReset (int lane);
+private:
     // Pista de compás y de tempo
-    std::unique_ptr<TempoLane> tempoLane;
+    std::unique_ptr<TempoTrackView> tempoLane;
     juce::TextButton tempoToggle;
     bool tempoTrackVisible = true, tempoStretches = true;
     Analysis analysis;

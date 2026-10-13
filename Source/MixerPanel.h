@@ -39,22 +39,25 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    static constexpr int width = 106;
+    static constexpr int width = 118;
 
 private:
     void changed() { if (onChanged) onChanged(); }
+    void showPan();
 
     std::shared_ptr<void> keepAlive;    // mantiene viva la pista (la canción o el conjunto de samplers)
     LoadedTrack& track;
     juce::Colour colour;
     ClickLabel nameLabel;
-    LevelMeter meter { 2 };
+    LevelMeter meter { 2, true };      // con escala en dB
     juce::Slider fader;
-    juce::Label levelBox;              // nivelado del tramo (editable con un clic)
+    juce::Slider panKnob;              // balance (doble clic = al centro)
+    juce::Label panLabel;
+    juce::Label levelBox;              // nivelado del tramo (editable con un clic); solo con nivelado
     double shownLevelDb = 0.0;
     bool levelEnabled = false;
-    ClickLabel trigBox;                // trigger: "Audio", "Trig: banco", "Trig+Audio: banco"
-    bool trigBoxVisible = true;
+    ClickLabel trigBox;                // trigger: "Trig: banco", "Trig+Audio: banco" (sin trigger no se ve)
+    bool trigBoxVisible = true, trigActive = false;
     juce::TextButton muteBtn, soloBtn;
     juce::ComboBox outBox;
 };
@@ -76,7 +79,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    static constexpr int width = 106;
+    static constexpr int width = 118;
 
 private:
     void changed();
@@ -98,6 +101,7 @@ public:
     std::function<void (float gainDb)> onGainChanged;
     void setGainDb (float db);
     void setLevels (float peakL, float peakR, float rmsL, float rmsR);
+    void setLoudness (float momentaryLufs, float shortTermLufs);   // la sonoridad de la salida (EBU R128)
     void tick() { meter.tick(); }
 
     void paint (juce::Graphics&) override;
@@ -106,7 +110,7 @@ public:
     static constexpr int width = 120;
 
 private:
-    juce::Label label;
+    juce::Label label, loudnessLabel;
     LevelMeter meter { 2, true };
     juce::Slider fader;
 };

@@ -94,6 +94,18 @@ public:
                 captureTempoBpm = v.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
                 captureTempoStretches = ! hasFlag ("--soloclick");
             }
+            // --editortempo=archivo.png (captura del editor de tempo) y --curva=sección:curva (0 salto ... 4 en S; con
+            // --soloclick, la de la grabación)
+            if (commandLine.contains ("--editortempo="))
+                captureTempoEditorFile = juce::File (commandLine.fromFirstOccurrenceOf ("--editortempo=", false, false)
+                                                         .upToFirstOccurrenceOf (" ", false, false).unquoted());
+            if (commandLine.contains ("--curva="))
+            {
+                const auto v = commandLine.fromFirstOccurrenceOf ("--curva=", false, false).upToFirstOccurrenceOf (" ", false, false);
+                captureCurveBand = v.upToFirstOccurrenceOf (":", false, false).getIntValue();
+                captureCurve = v.fromFirstOccurrenceOf (":", false, false).getIntValue();
+                captureTempoStretches = ! hasFlag ("--soloclick");
+            }
             if (commandLine.contains ("--clic="))
                 captureClick = commandLine.fromFirstOccurrenceOf ("--clic=", false, false).getDoubleValue();
             // --compas=N/D:compás (cambio de compás) e --insertarcompases=K:N/D:compás
@@ -128,6 +140,14 @@ public:
                                                        : juce::String());
             if (commandLine.contains ("--exportar="))
                 captureExport = juce::File (commandLine.fromFirstOccurrenceOf ("--exportar=", false, false).upToFirstOccurrenceOf (" ", false, false).unquoted());
+            // --tamano=1000x640: la ventana a ese tamaño (para revisar el diseño en pantallas chicas)
+            if (commandLine.contains ("--tamano="))
+            {
+                const auto v = commandLine.fromFirstOccurrenceOf ("--tamano=", false, false).upToFirstOccurrenceOf (" ", false, false);
+                const int w = v.upToFirstOccurrenceOf ("x", false, false).getIntValue(), h = v.fromFirstOccurrenceOf ("x", false, false).getIntValue();
+                if (w >= 1000 && h >= 640 && mainWindow != nullptr)
+                    mainWindow->setSize (w, h + mainWindow->getTitleBarHeight());
+            }
             if (commandLine.contains ("--cancion="))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->selectSong (commandLine.fromFirstOccurrenceOf ("--cancion=", false, false).getIntValue() - 1);
@@ -169,6 +189,10 @@ public:
             if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
             if (captureTempoBand > 0 && captureTempoBpm > 0.0)
                 mc->tempoTrackForCapture (captureTempoBand - 1, captureTempoBpm, captureTempoStretches);
+            if (captureCurveBand > 0)
+                mc->tempoCurveForCapture (captureCurveBand - 1, captureCurve, captureTempoStretches);
+            if (captureTempoEditorFile != juce::File())
+                mc->openTempoEditorForCapture();
             if (captureSigNum > 0 && captureSigBar > 0)
                 mc->signatureForCapture (captureSigBar, captureSigNum, juce::jmax (1, captureSigUnit), captureInsertBars);
             if (captureTool > 0 || captureScissors >= 0.0)
@@ -189,6 +213,14 @@ public:
             if (mainWindow != nullptr)
             {
                 mainWindow->saveSnapshot (captureFile, captureLive);
+                if (captureTempoEditorFile != juce::File())
+                    if (auto* mc3 = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    {
+                        const auto image = mc3->tempoEditorSnapshot();
+                        captureTempoEditorFile.deleteFile();
+                        if (auto stream = captureTempoEditorFile.createOutputStream())
+                            juce::PNGImageFormat().writeImageToStream (image, *stream);
+                    }
                 if (captureStageFile != juce::File())
                     if (auto* mc2 = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     {
@@ -257,7 +289,8 @@ private:
 
     std::unique_ptr<MainWindow> mainWindow;
     CaptureTimer captureTimer { *this };
-    juce::File captureFile, captureStageFile;
+    juce::File captureFile, captureStageFile, captureTempoEditorFile;
+    int captureCurveBand = 0, captureCurve = 0;
     juce::String captureTriggerBank, captureInstrument, captureMix;
     juce::StringArray captureMixSources;
     bool captureMixSegments = false, captureMidiTrack = false, captureMixStems = false, captureMixSeparate = false;

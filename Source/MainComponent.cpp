@@ -123,8 +123,7 @@ MainComponent::MainComponent()
     // --- Barra superior ---
     importBtn.setButtonText ("Importar stems");
     importBtn.onClick = [this] { chooseStems(); };
-    separateBtn.setButtonText (tr ("Separar canción (IA)"));
-    separateBtn.setColour (juce::TextButton::buttonColourId, accent.darker (0.6f));
+    separateBtn.setButtonText (tr ("Separar canción (IA)"));   // las acciones van neutras: el acento es para lo encendido
     separateBtn.onClick = [this] { chooseSongToSeparate(); };
     stemsBox.addItem ("4 pistas", 1);
     stemsBox.addItem ("6 pistas: + guitarra y piano", 2);
@@ -143,7 +142,6 @@ MainComponent::MainComponent()
     drumPartsBtn.setButtonText (tr ("Batería en partes"));
     drumPartsBtn.setToggleState (props.getUserSettings()->getBoolValue ("drumParts", false), juce::dontSendNotification);
     drumPartsBtn.onClick = [this] { props.getUserSettings()->setValue ("drumParts", drumPartsBtn.getToggleState()); };
-    addAndMakeVisible (drumPartsBtn);
     audioBtn.setButtonText ("Audio");
     audioBtn.onClick = [this] { showAudioSettings(); };
     mixBtn.setButtonText ("Armar mix");
@@ -156,14 +154,28 @@ MainComponent::MainComponent()
     cancelSepBtn.onClick = [this] { separator.cancel(); analyzer.cancel(); };
     sepLabel.setFont (font (13.0f));
 
-    playbackBtn.setButtonText (tr ("Reproducción"));
-    playbackBtn.setClickingTogglesState (false);
-    playbackBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
-    playbackBtn.onClick = [this] { setPlaybackMode (! playbackMode); };
+    // Los dos modos, como un selector: Editar (la vista de pistas con todo) y Show (precargado, sin edición)
+    editModeBtn.setButtonText ("Editar");
+    playbackBtn.setButtonText ("Show");
+    for (auto* b : { &editModeBtn, &playbackBtn })
+    {
+        b->setClickingTogglesState (false);
+        b->setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
+    }
+    editModeBtn.setConnectedEdges (juce::Button::ConnectedOnRight);
+    playbackBtn.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    editModeBtn.setToggleState (true, juce::dontSendNotification);
+    editModeBtn.onClick = [this] { setPlaybackMode (false); };
+    playbackBtn.onClick = [this] { setPlaybackMode (true); };
+    editModeBtn.setTooltip (tr ("Editar: pistas, tramos, tempo y compases"));
+    playbackBtn.setTooltip (tr ("Show: las canciones del show precargadas, sin edición; solo volumen y salidas"));
 
-    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &stemsBox, &qualityBox, &audioBtn, &aiBtn, &instrumentsBtn,
-                     &sepBar, &sepLabel, &cancelSepBtn, &playbackBtn })
+    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &audioBtn, &aiBtn, &instrumentsBtn,
+                     &sepBar, &sepLabel, &cancelSepBtn, &editModeBtn, &playbackBtn })
         addAndMakeVisible (c);
+    // Las opciones de separación ya no van en la barra: en el diálogo de separar y en Ajustes IA
+    for (auto* c : std::initializer_list<juce::Component*> { &stemsBox, &qualityBox, &drumPartsBtn })
+        addChildComponent (c);
     sepBar.setVisible (false);
     cancelSepBtn.setVisible (false);
 
@@ -211,15 +223,16 @@ MainComponent::MainComponent()
     keyLabel.setMouseCursor (juce::MouseCursor::PointingHandCursor);
     keyLabel.addMouseListener (this, false);   // clic = menú de tonalidad y enarmonía
 
-    prevBtn.setButtonText ("<<");
+    // Transporte con íconos (los textos se agregan en la vista grande, ver resized)
+    prevBtn.setTooltip (tr ("Canción anterior (flecha izquierda o RePág)"));
     prevBtn.onClick = [this] { nextSong (-1); };
-    playBtn.setButtonText ("Play");
+    playBtn.setTooltip (tr ("Play / pausa (Espacio)"));
     playBtn.onClick = [this] { engine.togglePlay(); };
-    stopBtn.setButtonText ("Stop");
+    stopBtn.setTooltip (tr ("Stop y volver al inicio (Esc)"));
     stopBtn.onClick = [this] { engine.stop(); updateLoopRegion(); };
-    nextBtn.setButtonText (">>");
+    nextBtn.setTooltip (tr ("Canción siguiente (flecha derecha o AvPág)"));
     nextBtn.onClick = [this] { nextSong (1); };
-    recordBtn.setButtonText ("Grabar");
+    recordBtn.setTooltip (tr ("Grabar una entrada como pista nueva o como banco de muestras"));
     recordBtn.onClick = [this]
     {
         if (recording.active)
@@ -227,7 +240,10 @@ MainComponent::MainComponent()
         else
             recordDialog (false, -1);
     };
-    loopBtn.setButtonText (tr ("Loop de sección"));
+    loopBtn.setButtonText ("Loop");
+    loopBtn.setTooltip (tr ("Loop de la sección (L); o de un rango marcado con la herramienta Rango"));
+    loopBtn.setClickingTogglesState (true);
+    loopBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
     loopBtn.onClick = [this] { updateLoopRegion(); };
 
     positionSlider.setSliderStyle (juce::Slider::LinearBar);
@@ -245,11 +261,29 @@ MainComponent::MainComponent()
     addNoteBtn.setButtonText ("+ Nota");
     addNoteBtn.onClick = [this] { addNoteHere(); };
     addAndMakeVisible (addNoteBtn);
-    cutModeBox.addItem ("Corte libre", 1);
-    cutModeBox.addItem ("Corte a la rejilla", 2);
-    cutModeBox.addItem ("Corte a la transiente", 3);
-    cutModeBox.setSelectedId (juce::jlimit (1, 3, props.getUserSettings()->getIntValue ("cutMode", 1)), juce::dontSendNotification);
-    cutModeBox.onChange = [this] { props.getUserSettings()->setValue ("cutMode", cutModeBox.getSelectedId()); };
+    // Ajuste (snap): encendido o no (J) y a qué: la rejilla (tiempos) o la transiente (golpes). cutMode guarda los dos
+    // como antes: 1 = libre (apagado), 2 = a la rejilla, 3 = a la transiente; snapType recuerda el tipo con el ajuste apagado
+    cutModeBox.addItem ("Rejilla", 2);
+    cutModeBox.addItem ("Transiente", 3);
+    {
+        const int saved = juce::jlimit (1, 3, props.getUserSettings()->getIntValue ("cutMode", 1));
+        cutModeBox.setSelectedId (saved > 1 ? saved : juce::jlimit (2, 3, props.getUserSettings()->getIntValue ("snapType", 2)), juce::dontSendNotification);
+        snapBtn.setToggleState (saved > 1, juce::dontSendNotification);
+    }
+    cutModeBox.setTooltip (tr ("A qué se ajustan los cortes, el rango y los arrastres: a los tiempos de la rejilla o al golpe más cercano"));
+    snapBtn.setButtonText ("Ajuste");
+    snapBtn.setTooltip (tr ("Ajuste encendido (J): los cortes y arrastres caen en la rejilla o en la transiente"));
+    snapBtn.setClickingTogglesState (true);
+    snapBtn.setColour (juce::TextButton::buttonOnColourId, accent.darker (0.3f));
+    auto saveSnap = [this]
+    {
+        props.getUserSettings()->setValue ("cutMode", cutMode());
+        props.getUserSettings()->setValue ("snapType", cutModeBox.getSelectedId());
+        refreshStatusTool();
+    };
+    cutModeBox.onChange = saveSnap;
+    snapBtn.onClick = saveSnap;
+    addAndMakeVisible (snapBtn);
     // Caja de herramientas (como en Cubase): un botón con su ícono por herramienta; la app parte con Objeto
     for (int i = 0; i < ui::numEditTools; ++i)
     {
@@ -268,11 +302,33 @@ MainComponent::MainComponent()
                      &prevBtn, &playBtn, &stopBtn, &nextBtn, &recordBtn, &loopBtn, &positionSlider, &addMarkerBtn, &cutModeBox })
         addAndMakeVisible (c);
 
+    // Inspector de la canción (bajo el setlist): click, tempo y tono, análisis y nivelado; se pliega con su cabecera
+    inspectorOpen = props.getUserSettings()->getBoolValue ("inspector", true);
+    inspectorBtn.setClickingTogglesState (true);
+    inspectorBtn.setToggleState (inspectorOpen, juce::dontSendNotification);
+    inspectorBtn.setColour (juce::TextButton::buttonOnColourId, panelAlt);
+    inspectorBtn.onClick = [this]
+    {
+        inspectorOpen = inspectorBtn.getToggleState();
+        props.getUserSettings()->setValue ("inspector", inspectorOpen);
+        resized();
+    };
+    addAndMakeVisible (inspectorBtn);
+
+    // Barra de estado
+    statusTool.setFont (font (12.0f, true));
+    statusTool.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.8f));
+    addAndMakeVisible (statusTool);
+    shortcutsBtn.setButtonText ("? Atajos");
+    shortcutsBtn.setTooltip (tr ("Todas las teclas (también con la tecla ?)"));
+    shortcutsBtn.onClick = [this] { showShortcuts(); };
+    addAndMakeVisible (shortcutsBtn);
+
     // --- Click ---
     clickBtn.setButtonText ("Click");
     clickBtn.onClick = [this] { if (auto* s = currentInfo()) { s->clickEnabled = clickBtn.getToggleState(); pushClick(); } };
-    bpmLabel.setText ("BPM", juce::dontSendNotification);
-    offsetLabel.setText ("Inicio (s)", juce::dontSendNotification);
+    bpmLabel.setText ("Click BPM", juce::dontSendNotification);
+    offsetLabel.setText ("Click desde", juce::dontSendNotification);
     clickVolLabel.setText ("Vol", juce::dontSendNotification);
 
     bpmSlider.setSliderStyle (juce::Slider::IncDecButtons);
@@ -307,8 +363,7 @@ MainComponent::MainComponent()
 
     clickOutBox.onChange = [this] { if (auto* s = currentInfo()) { s->clickOutputPair = juce::jmax (0, clickOutBox.getSelectedId() - 1); pushClick(); } };
 
-    analyzeBtn.setButtonText ("Analizar (IA)");
-    analyzeBtn.setColour (juce::TextButton::buttonColourId, accent.darker (0.6f));
+    analyzeBtn.setButtonText ("Analizar tempo y acordes (IA)");
     analyzeBtn.onClick = [this] { startAnalysis(); };
 
     levelBtn.setButtonText ("Nivelar");
@@ -370,7 +425,7 @@ MainComponent::MainComponent()
 
     // --- Tempo y tono ---
     tempoLabel.setText ("Tempo", juce::dontSendNotification);
-    transposeLabel.setText ("Tono (semitonos)", juce::dontSendNotification);
+    transposeLabel.setText ("Tono (st)", juce::dontSendNotification);
     tempoInfoLabel.setFont (font (13.0f));
     tempoInfoLabel.setColour (juce::Label::textColourId, juce::Colours::grey);
     tempoSlider.setSliderStyle (juce::Slider::IncDecButtons);
@@ -441,6 +496,8 @@ MainComponent::MainComponent()
         moveClipPicks (std::move (picks), primary, grab, delta);
     };
     timeline.onClipTrimmed = [this] (TimelineView::ClipPick pick, bool startEdge, double edge) { trimClipEdge (pick, startEdge, edge); };
+    timeline.onClipFade = [this] (TimelineView::ClipPick pick, bool fadeIn, double seconds) { clipLookEdited (pick, fadeIn ? 1 : 2, seconds); };
+    timeline.onClipGain = [this] (TimelineView::ClipPick pick, double db) { clipLookEdited (pick, 3, db); };
     timeline.onClipTool = [this] (ui::EditTool tool, double t, int lane, bool all) { clipToolClicked (tool, t, lane, all); };
     timeline.onRangeMenu = [this] (double t, int lane) { rangeMenu (t, lane); };
     timeline.onPlayToolDown = [this] (double t) { playToolDown (t); };
@@ -455,9 +512,11 @@ MainComponent::MainComponent()
     timeline.onSignatureMoved = [this] (int from, int to) { moveSignature (from, to); };
     timeline.onSignatureRemove = [this] (int beat) { removeSignature (beat); };
     timeline.onTempoTrackToggled = [this] (bool visible) { props.getUserSettings()->setValue ("tempoTrack", visible); };
+    timeline.onOpenTempoEditor = [this] { openTempoEditor (true); };
     timeline.onTempoModeChanged = [this] (bool stretches)
     {
         timeline.setTempoStretches (stretches);
+        syncTempoEditor();
         props.getUserSettings()->setValue ("tempoTrackStretches", stretches);
         sepLabel.setText (stretches ? tr ("Pista de tempo: arrastrar un tempo estira el audio (la canción suena más rápida o más lenta)")
                                     : tr ("Pista de tempo: arrastrar un tempo solo mueve el click y los compases (el audio no cambia)"),
@@ -607,6 +666,7 @@ MainComponent::MainComponent()
     startTimerHz (30);
 
     showHelpText();
+    refreshStatusTool();
     if (props.getUserSettings()->getBoolValue ("playbackMode", false))
         setPlaybackMode (true);   // vuelve como se cerró (carga la primera del show)
     if (! library.songs.empty() && currentIndex < 0)
@@ -698,54 +758,103 @@ void MainComponent::resized()
     if (picker != nullptr)
         picker->setBounds (getLocalBounds());
     auto r = getLocalBounds().reduced (10);
+    const bool editing = ! playbackMode;
+    const bool big = liveMode;                      // vista grande (F11): solo lo que se usa en escenario
+    const bool editActions = editing && ! big;
+    const bool narrow = getWidth() < 1300;
 
+    // --- Barra superior: a la izquierda lo que se hace al editar; a la derecha el modo y lo global ---
     auto top = r.removeFromTop (34);
-    // En reproducción no hay nada que importar, separar ni armar: solo el modo y el audio
-    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &stemsBox, &qualityBox, &drumPartsBtn, &aiBtn, &instrumentsBtn })
-        c->setVisible (! playbackMode);
-    importBtn.setBounds (top.removeFromLeft (130));
-    top.removeFromLeft (6);
-    separateBtn.setBounds (top.removeFromLeft (160));
-    top.removeFromLeft (6);
-    mixBtn.setBounds (top.removeFromLeft (95));
-    top.removeFromLeft (6);
-    stemsBox.setBounds (top.removeFromLeft (180));
-    top.removeFromLeft (6);
-    qualityBox.setBounds (top.removeFromLeft (170));
-    top.removeFromLeft (6);
-    drumPartsBtn.setBounds (top.removeFromLeft (145));
-    aiBtn.setBounds (top.removeFromRight (95));
-    top.removeFromRight (6);
+    for (auto* c : std::initializer_list<juce::Component*> { &importBtn, &separateBtn, &mixBtn, &instrumentsBtn, &aiBtn })
+        c->setVisible (editActions);
+    if (editActions)
+    {
+        importBtn.setBounds (top.removeFromLeft (narrow ? 118 : 130));
+        top.removeFromLeft (6);
+        separateBtn.setBounds (top.removeFromLeft (narrow ? 152 : 170));
+        top.removeFromLeft (6);
+        mixBtn.setBounds (top.removeFromLeft (95));
+    }
     audioBtn.setBounds (top.removeFromRight (80));
     top.removeFromRight (6);
-    if (playbackMode)
-        playbackBtn.setBounds (top.removeFromRight (140));
-    else
+    if (editActions)
     {
-        instrumentsBtn.setBounds (top.removeFromRight (105));
+        aiBtn.setBounds (top.removeFromRight (95));
         top.removeFromRight (6);
-        playbackBtn.setBounds (top.removeFromRight (juce::jmin (125, top.getWidth())));
+        instrumentsBtn.setBounds (top.removeFromRight (105));
+        top.removeFromRight (16);
     }
+    playbackBtn.setBounds (top.removeFromRight (72));
+    editModeBtn.setBounds (top.removeFromRight (72));
 
+    // --- Barra de estado (abajo): herramienta y ajuste, mensajes, progreso, atajos ---
+    auto status = r.removeFromBottom (24);
+    shortcutsBtn.setBounds (status.removeFromRight (84).reduced (0, 1));
+    status.removeFromRight (8);
+    cancelSepBtn.setBounds (status.removeFromRight (90).reduced (0, 1));
+    status.removeFromRight (6);
+    sepBar.setBounds (status.removeFromRight (220).reduced (0, 3));
+    status.removeFromRight (8);
+    statusTool.setVisible (editActions);
+    if (editActions)
+        statusTool.setBounds (status.removeFromLeft (250));
+    sepLabel.setBounds (status);
+    helpLabel.setVisible (false);   // los atajos están en "? Atajos"
+    r.removeFromBottom (6);
     r.removeFromTop (6);
-    auto sepRow = r.removeFromTop (22);
-    sepBar.setBounds (sepRow.removeFromLeft (260));
-    cancelSepBtn.setBounds (sepRow.removeFromRight (90));
-    sepRow.removeFromLeft (8);
-    sepLabel.setBounds (sepRow);
 
-    helpLabel.setBounds (r.removeFromBottom (20));
-    r.removeFromTop (6);
-
-    auto left = r.removeFromLeft (270);
+    // --- Panel izquierdo: setlist (o el show) y el inspector de la canción ---
+    auto left = r.removeFromLeft (narrow ? 244 : 270);
     for (auto* c : std::initializer_list<juce::Component*> { &setlistTitle, &levelSetlistBtn })
         c->setVisible (! playbackMode);
     for (auto* c : std::initializer_list<juce::Component*> { &showBox, &showInfoLabel, &allSongsTitle, &allSongsList })
         c->setVisible (playbackMode);
+    const bool inspector = editActions;
+    const std::initializer_list<juce::Component*> inspectorItems { &bpmLabel, &bpmSlider, &offsetLabel, &offsetSlider, &tempoLabel, &tempoSlider,
+                                                                     &tempoOrigBtn, &transposeLabel, &transposeSlider, &analyzeBtn, &levelBtn,
+                                                                     &targetBox, &tempoInfoLabel };
+    inspectorBtn.setVisible (inspector);
+    for (auto* c : inspectorItems)
+        c->setVisible (inspector && inspectorOpen);
+    // El click (encendido, volumen y salida) está en su canal del mezclador
+    for (auto* c : std::initializer_list<juce::Component*> { &clickBtn, &clickVolLabel, &clickGainSlider, &clickOutBox })
+        c->setVisible (false);
     if (playbackMode)
         layoutPlaybackPanel (left);
     else
     {
+        if (inspector)
+        {
+            auto insp = left.removeFromBottom (inspectorOpen ? 246 : 28);
+            inspectorBtn.setButtonText (inspectorOpen ? tr ("Ajustes de la canción  (ocultar)") : tr ("Ajustes de la canción  (mostrar)"));
+            inspectorBtn.setBounds (insp.removeFromTop (26));
+            if (inspectorOpen)
+            {
+                insp.removeFromTop (6);
+                auto row = [&insp] { auto x = insp.removeFromTop (26); insp.removeFromTop (5); return x; };
+                const int labelW = 86;
+                auto a = row();
+                bpmLabel.setBounds (a.removeFromLeft (labelW));
+                bpmSlider.setBounds (a.removeFromLeft (150));
+                a = row();
+                offsetLabel.setBounds (a.removeFromLeft (labelW));
+                offsetSlider.setBounds (a.removeFromLeft (150));
+                a = row();
+                tempoLabel.setBounds (a.removeFromLeft (labelW));
+                tempoOrigBtn.setBounds (a.removeFromRight (juce::jmin (70, a.getWidth() / 3)));
+                a.removeFromRight (4);
+                tempoSlider.setBounds (a);
+                a = row();
+                transposeLabel.setBounds (a.removeFromLeft (labelW));
+                transposeSlider.setBounds (a.removeFromLeft (130));
+                tempoInfoLabel.setBounds (row());
+                analyzeBtn.setBounds (row());
+                a = row();
+                levelBtn.setBounds (a.removeFromLeft (labelW));
+                targetBox.setBounds (a);
+            }
+            left.removeFromBottom (6);
+        }
         auto setlistHeader = left.removeFromTop (24);
         levelSetlistBtn.setBounds (setlistHeader.removeFromRight (120).reduced (0, 1));
         setlistTitle.setBounds (setlistHeader);
@@ -762,79 +871,91 @@ void MainComponent::resized()
             picker->toFront (false);
     }
 
-    auto titleRow = r.removeFromTop (liveMode ? 60 : 40);
-    timeLabel.setBounds (titleRow.removeFromRight (liveMode ? 300 : 220));
+    // --- Título e información ---
+    auto titleRow = r.removeFromTop (big ? 60 : 36);
+    timeLabel.setBounds (titleRow.removeFromRight (big ? 300 : 220));
     keyLabel.setBounds (titleRow.removeFromRight (220));
     songTitle.setBounds (titleRow);
-    auto infoRow = r.removeFromTop (liveMode ? 56 : 30);
+    auto infoRow = r.removeFromTop (big ? 56 : 28);
     nextLabel.setBounds (infoRow.removeFromRight (300));
-    chordLabel.setBounds (infoRow.removeFromRight (liveMode ? 360 : 240));
+    chordLabel.setBounds (infoRow.removeFromRight (big ? 360 : 240));
     sectionLabel.setBounds (infoRow);
-    r.removeFromTop (6);
+    r.removeFromTop (4);
 
-    auto transport = r.removeFromTop (48);
-    prevBtn.setBounds (transport.removeFromLeft (70));
-    transport.removeFromLeft (6);
-    playBtn.setBounds (transport.removeFromLeft (140));
-    transport.removeFromLeft (6);
-    stopBtn.setBounds (transport.removeFromLeft (110));
-    transport.removeFromLeft (6);
-    nextBtn.setBounds (transport.removeFromLeft (70));
-    transport.removeFromLeft (6);
-    recordBtn.setVisible (! playbackMode);
-    if (! playbackMode)
+    // --- Transporte: íconos al editar; grande y con texto en la vista grande ---
+    auto transport = r.removeFromTop (big ? 56 : 34);
+    prevBtn.setButtonText (big ? "Anterior" : "");
+    stopBtn.setButtonText (big ? "Stop" : "");
+    nextBtn.setButtonText (big ? "Siguiente" : "");
+    playBtn.setButtonText (big ? (engine.isPlaying() ? "Pausa" : "Play") : "");
+    prevBtn.setBounds (transport.removeFromLeft (big ? 130 : 46));
+    transport.removeFromLeft (4);
+    playBtn.setBounds (transport.removeFromLeft (big ? 170 : 64));
+    transport.removeFromLeft (4);
+    stopBtn.setBounds (transport.removeFromLeft (big ? 120 : 46));
+    transport.removeFromLeft (4);
+    nextBtn.setBounds (transport.removeFromLeft (big ? 140 : 46));
+    transport.removeFromLeft (big ? 12 : 4);
+    recordBtn.setVisible (editActions);
+    if (editActions)
     {
-        recordBtn.setBounds (transport.removeFromLeft (96));
-        transport.removeFromLeft (16);
+        recordBtn.setBounds (transport.removeFromLeft (46));
+        transport.removeFromLeft (12);
     }
-    else
-        transport.removeFromLeft (10);
-    loopBtn.setBounds (transport.removeFromLeft (170));
-    liveBtn.setBounds (transport.removeFromRight (100));
-    transport.removeFromRight (6);
+    loopBtn.setBounds (transport.removeFromLeft (big ? 120 : 92));
+    // A la derecha: la vista grande (en el Show, o para salir de ella), la pantalla de escenario y "Ajustar"
+    liveBtn.setButtonText (big ? tr ("Vista normal") : tr ("Vista grande"));
+    liveBtn.setVisible (playbackMode || big);
+    if (playbackMode || big)
+    {
+        liveBtn.setBounds (transport.removeFromRight (big ? 140 : 120));
+        transport.removeFromRight (6);
+    }
     stageBtn.setBounds (transport.removeFromRight (90));
     transport.removeFromRight (6);
+    zoomFitBtn.setVisible (! big);
     zoomFitBtn.setBounds (transport.removeFromRight (80));
 
-    r.removeFromTop (8);
-    positionSlider.setVisible (liveMode);   // en edición la regla de la vista de arreglo la reemplaza
-    if (liveMode)
+    r.removeFromTop (6);
+    positionSlider.setVisible (big);   // en edición la regla de la vista de arreglo la reemplaza
+    if (big)
     {
         positionSlider.setBounds (r.removeFromTop (26));
         r.removeFromTop (8);
     }
 
-    // Marcadores: fluyen en varias filas (hasta 4) en vez de salirse de la ventana
+    // --- Marcadores, herramientas y ajuste: fluyen en varias filas (hasta 4) en vez de salirse de la ventana ---
     constexpr int markerH = 30, markerGap = 4, maxMarkerRows = 4;
     auto markerRow = r.removeFromTop (markerH);
-    addMarkerBtn.setVisible (! playbackMode);
-    addNoteBtn.setVisible (! playbackMode);
-    if (! playbackMode)
-    {
-        addMarkerBtn.setBounds (markerRow.removeFromLeft (110));
-        markerRow.removeFromLeft (8);
-        addNoteBtn.setBounds (markerRow.removeFromLeft (80));
-        markerRow.removeFromLeft (8);
-    }
-    const bool editing = ! liveMode && ! playbackMode;
-    cutModeBox.setVisible (editing);
+    addMarkerBtn.setVisible (editActions);
+    addNoteBtn.setVisible (editActions);
+    cutModeBox.setVisible (editActions);
+    snapBtn.setVisible (editActions);
     for (auto* b : toolButtons)
-        b->setVisible (editing);
-    if (editing)
+        b->setVisible (editActions);
+    if (editActions)
     {
+        addMarkerBtn.setBounds (markerRow.removeFromLeft (narrow ? 96 : 106));
+        markerRow.removeFromLeft (6);
+        addNoteBtn.setBounds (markerRow.removeFromLeft (narrow ? 64 : 72));
+        markerRow.removeFromLeft (10);
         for (auto* b : toolButtons)
-            b->setBounds (markerRow.removeFromLeft (30));
-        markerRow.removeFromLeft (8);
-        cutModeBox.setBounds (markerRow.removeFromLeft (180));
-        markerRow.removeFromLeft (8);
+            b->setBounds (markerRow.removeFromLeft (narrow ? 27 : 30));
+        markerRow.removeFromLeft (10);
+        snapBtn.setBounds (markerRow.removeFromLeft (66));
+        markerRow.removeFromLeft (2);
+        cutModeBox.setBounds (markerRow.removeFromLeft (narrow ? 108 : 118));
+        markerRow.removeFromLeft (10);
     }
+    // La primera fila sigue a las herramientas; las demás usan todo el ancho
+    const int fullLeft = r.getX();
     int x = markerRow.getX(), y = markerRow.getY(), rows = 1;
     for (auto* b : markerButtons)
     {
         const int w = juce::jmin (140, juce::jmax (60, b->getBestWidthForHeight (markerH) + 10));
-        if (x + w > markerRow.getRight() && x > markerRow.getX() && rows < maxMarkerRows)
+        if (x + w > markerRow.getRight() && rows < maxMarkerRows && (x > fullLeft || x > markerRow.getX()))
         {
-            x = markerRow.getX();
+            x = fullLeft;
             y += markerH + markerGap;
             ++rows;
         }
@@ -842,55 +963,18 @@ void MainComponent::resized()
         x += w + markerGap;
     }
     r.removeFromTop ((rows - 1) * (markerH + markerGap));
-
-    // En reproducción no se edita el click, el tempo ni el tono (ni se analiza o nivela): sin esas filas
-    for (auto* c : std::initializer_list<juce::Component*> { &clickBtn, &bpmLabel, &bpmSlider, &offsetLabel, &offsetSlider, &clickVolLabel,
-                                                              &clickGainSlider, &clickOutBox, &analyzeBtn, &levelBtn, &targetBox,
-                                                              &tempoLabel, &tempoSlider, &tempoOrigBtn, &transposeLabel, &transposeSlider,
-                                                              &tempoInfoLabel })
-        c->setVisible (! playbackMode);
     r.removeFromTop (8);
-    auto clickRow = playbackMode ? juce::Rectangle<int>() : r.removeFromTop (28);
-    clickBtn.setBounds (clickRow.removeFromLeft (80));
-    bpmLabel.setBounds (clickRow.removeFromLeft (40));
-    bpmSlider.setBounds (clickRow.removeFromLeft (130));
-    clickRow.removeFromLeft (10);
-    offsetLabel.setBounds (clickRow.removeFromLeft (70));
-    offsetSlider.setBounds (clickRow.removeFromLeft (130));
-    clickRow.removeFromLeft (10);
-    clickVolLabel.setBounds (clickRow.removeFromLeft (30));
-    clickGainSlider.setBounds (clickRow.removeFromLeft (100));
-    clickRow.removeFromLeft (10);
-    clickOutBox.setBounds (clickRow.removeFromLeft (120));
-    clickRow.removeFromLeft (10);
-    analyzeBtn.setBounds (clickRow.removeFromLeft (110));
-    clickRow.removeFromLeft (10);
-    levelBtn.setBounds (clickRow.removeFromLeft (80));
-    targetBox.setBounds (clickRow.removeFromLeft (112));
 
-    if (! playbackMode)
-        r.removeFromTop (6);
-    auto tempoRow = playbackMode ? juce::Rectangle<int>() : r.removeFromTop (28);
-    tempoLabel.setBounds (tempoRow.removeFromLeft (55));
-    tempoSlider.setBounds (tempoRow.removeFromLeft (130));
-    tempoRow.removeFromLeft (6);
-    tempoOrigBtn.setBounds (tempoRow.removeFromLeft (80));
-    tempoRow.removeFromLeft (16);
-    transposeLabel.setBounds (tempoRow.removeFromLeft (120));
-    transposeSlider.setBounds (tempoRow.removeFromLeft (110));
-    tempoRow.removeFromLeft (12);
-    tempoInfoLabel.setBounds (tempoRow);
-
-    r.removeFromTop (10);
-    // En vivo: solo el mezclador; en edición: vista de arreglo arriba y mezclador abajo
-    timeline.setVisible (! liveMode);
-    zoomFitBtn.setVisible (! liveMode);
-    if (liveMode)
+    // En la vista grande: solo el mezclador; si no: la vista de arreglo arriba y el mezclador abajo
+    timeline.setVisible (! big);
+    if (big)
     {
         mixer.setBounds (r);
         return;
     }
-    const int mixerH = juce::jlimit (190, 230, r.getHeight() / 3);
+    // Faders con recorrido; en pantallas bajas el mezclador cede espacio a las pistas
+    const int mixerH = r.getHeight() < 520 ? juce::jlimit (170, 230, (int) (r.getHeight() * 0.38))
+                                           : juce::jlimit (230, 300, (int) (r.getHeight() * 0.42));
     mixer.setBounds (r.removeFromBottom (mixerH));
     r.removeFromBottom (8);
     timeline.setBounds (r);
@@ -914,9 +998,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
             stopMixPreview();
             used = true;
         }
-        if (! used && key.getModifiers().isCtrlDown() && (code == 'Z' || code == 'z'))
+        if (! used && key.getModifiers().isCtrlDown() && ! key.getModifiers().isShiftDown() && (code == 'Z' || code == 'z'))
         {
-            undoMixEdit();
+            undoMixEdit();   // el armado de mix no tiene rehacer: Ctrl+Shift+Z no deshace
             used = true;
         }
         if (used)
@@ -939,6 +1023,11 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         jumpToMarker (code - juce::KeyPress::numberPad1);
     else if (code == juce::KeyPress::F11Key)
         setLiveMode (! liveMode);
+    else if (key.getModifiers().isCtrlDown() && ((key.getModifiers().isShiftDown() && (code == 'Z' || code == 'z')) || code == 'Y' || code == 'y'))
+    {
+        if (! playbackMode)
+            redoLastEdit();
+    }
     else if (key.getModifiers().isCtrlDown() && (code == 'Z' || code == 'z'))
     {
         if (! playbackMode)
@@ -961,12 +1050,21 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         showStage (stageWindow == nullptr || ! stageWindow->isVisible());
     else if (key.getModifiers().isCtrlDown() && (code == 'E' || code == 'e'))
         exportMixDialog();
+    else if (key.getModifiers().isCtrlDown() && (code == 'T' || code == 't'))
+        openTempoEditor (tempoEditor == nullptr || ! tempoEditor->isVisible());
     else
     {
         const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
         if (c == 'm' && ! playbackMode)      addMarkerHere();
         else if (c == 'n' && ! playbackMode) addNoteHere();
         else if (c == 'm' || c == 'n')       {}   // en reproducción no se edita
+        else if (c == '?')                   showShortcuts();
+        else if (c == 'j' && ! playbackMode && ! key.getModifiers().isCtrlDown())
+        {
+            snapBtn.setToggleState (! snapBtn.getToggleState(), juce::sendNotification);
+            sepLabel.setText (snapBtn.getToggleState() ? tr ("Ajuste encendido: ") + cutModeBox.getText().toLowerCase() : tr ("Ajuste apagado: libre"),
+                              juce::dontSendNotification);
+        }
         else if (! playbackMode && ! key.getModifiers().isCtrlDown() && ! key.getModifiers().isCommandDown() && ! key.getModifiers().isAltDown()
                  && [&] { for (int i = 0; i < ui::numEditTools; ++i)
                           {
@@ -1320,6 +1418,7 @@ void MainComponent::unloadSong()
         sourceSong.reset();
         arrangedSong.reset();
         undoStack.clear();
+        redoStack.clear();
         timeMap = TimeMap();
         loadedFolder = juce::File();
         mixer.setSong (nullptr);
@@ -1372,6 +1471,7 @@ void MainComponent::loadSongAt (int index)
         sourceSong.reset();
         arrangedSong.reset();
         undoStack.clear();
+        redoStack.clear();
         timeMap = TimeMap();
         loadedFolder = juce::File();
         mixer.setSong (nullptr);
@@ -1537,6 +1637,7 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     renderedTrackClips = info != nullptr ? info->trackClips : std::vector<TrackClips>();
     renderedTriggers = info != nullptr ? triggersOf (*info) : std::vector<TriggerSettings>();
     undoStack.clear();
+    redoStack.clear();
     loadedFolder = info != nullptr ? info->folder : juce::File();
     renderedTranspose = info != nullptr ? info->transpose : 0;
     rendering = false;
@@ -1589,6 +1690,7 @@ void MainComponent::saveCurrentMix()
             st.gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
             st.muted = t->muted.load();
             st.outputPair = t->outputPair.load();
+            st.pan = t->pan.load();
         }
         pullMidiControls();
         if (samplers != nullptr)
@@ -1600,6 +1702,7 @@ void MainComponent::saveCurrentMix()
                     tg.gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
                     tg.muted = lane->control.muted.load();
                     tg.outputPair = lane->control.outputPair.load();
+                    tg.pan = lane->control.pan.load();
                 }
     }
     library.saveSong (*info);
@@ -1676,6 +1779,7 @@ void MainComponent::syncTimelineMarkers()
             notes.push_back ({ timeMap.toPlayback (n.seconds), n.text });
         timeline.setNotes (notes);
         syncTriggerMarks();
+        syncTempoEditor();
     }
     else
     {
@@ -1739,14 +1843,31 @@ std::vector<TimelineView::TempoBand> MainComponent::mappedTempoBands() const
     auto regions = info.tempoRegions;
     if (regions.empty())
         regions.push_back ({ 0.0, originalBpm(), 0.0 });
+    // Las curvas con el mapa de lo que se pidió (aunque todavía se esté renderizando); las posiciones, con el que suena
+    const auto wanted = TimeMap::build (info, length);
     for (size_t i = 0; i < regions.size(); ++i)
     {
         TimelineView::TempoBand b;
-        b.start = timeMap.toPlayback (regions[i].start);
-        b.end = timeMap.toPlayback (i + 1 < regions.size() ? juce::jmin (length, regions[i + 1].start) : length);
+        const double s0 = regions[i].start, s1 = i + 1 < regions.size() ? juce::jmin (length, regions[i + 1].start) : length;
+        b.start = timeMap.toPlayback (s0);
+        b.end = timeMap.toPlayback (s1);
         b.origBpm = regions[i].origBpm;
         b.playBpm = effectivePlayBpm (info, regions[i]);
         b.transpose = effectiveTranspose (info, regions[i]);
+        b.curve = regions[i].curve;
+        b.gridCurve = regions[i].gridCurve;
+        if (const auto* seg = wanted.segmentAtOriginal (s0 + 1.0e-6);
+            seg != nullptr && i + 1 < regions.size() && s1 > s0
+            && (std::abs (seg->playBpmEnd - seg->playBpm) > 1.0e-6 || std::abs (seg->origBpmEnd - seg->origBpm) > 1.0e-6))
+        {
+            for (int k = 0; k <= 48; ++k)
+            {
+                const double t = s0 + (s1 - s0) * k / 48.0;
+                const double x = timeMap.toPlayback (t);
+                b.playCurve.push_back ({ x, seg->playBpmAt (t) });
+                b.origCurve.push_back ({ x, seg->origBpmAt (t) });
+            }
+        }
         out.push_back (b);
     }
     return out;
@@ -1763,6 +1884,12 @@ void MainComponent::tempoAt (double originalSeconds, double& origBpm, double& pl
     {
         origBpm = info.tempoRegions[(size_t) i].origBpm;
         playBpm = effectivePlayBpm (info, info.tempoRegions[(size_t) i]);
+        // En una transición, el tempo de ese instante
+        if (info.tempoRegions[(size_t) i].curve != TempoRegion::jump || info.tempoRegions[(size_t) i].gridCurve != TempoRegion::jump)
+        {
+            origBpm = timeMap.origBpmAt (originalSeconds);
+            playBpm = timeMap.playBpmAt (originalSeconds);
+        }
     }
     else if (info.playBpm > 0.0)
         playBpm = info.playBpm;
@@ -1832,8 +1959,9 @@ static bool sameStretch (const TimeMap& a, const TimeMap& b)
         const auto& x = a.segments()[i];
         const auto& y = b.segments()[i];
         if (std::abs (x.origStart - y.origStart) > 1.0e-6 || std::abs (x.origEnd - y.origEnd) > 1.0e-6 || std::abs (x.ratio - y.ratio) > 1.0e-6
-            || x.transpose != y.transpose)
-            return false;
+            || x.transpose != y.transpose || x.ramps() != y.ramps() || std::abs (x.playLength - y.playLength) > 1.0e-6
+            || (x.ramps() && (x.curve != y.curve || std::abs (x.origBpmEnd - y.origBpmEnd) > 1.0e-6 || std::abs (x.playBpmEnd - y.playBpmEnd) > 1.0e-6)))
+            return false;   // con una transición, también su curva y sus tempos de llegada
     }
     return true;
 }
@@ -1844,7 +1972,9 @@ static bool sameClips (const std::vector<Clip>& a, const std::vector<Clip>& b)
         return false;
     for (size_t i = 0; i < a.size(); ++i)
         if (std::abs (a[i].srcStart - b[i].srcStart) > 1.0e-9 || std::abs (a[i].srcEnd - b[i].srcEnd) > 1.0e-9
-            || std::abs (a[i].position - b[i].position) > 1.0e-9 || a[i].muted != b[i].muted)
+            || std::abs (a[i].position - b[i].position) > 1.0e-9 || a[i].muted != b[i].muted
+            || std::abs (a[i].fadeIn - b[i].fadeIn) > 1.0e-9 || std::abs (a[i].fadeOut - b[i].fadeOut) > 1.0e-9
+            || std::abs (a[i].gainDb - b[i].gainDb) > 1.0e-6f)
             return false;   // el color no cambia el audio: no hace falta volver a renderizar
     return true;
 }
@@ -2382,6 +2512,20 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
     m.addItem (20, tr ("Tono de la sección... (") + juce::String::formatted ("%+d st", tr_) + (r.transpose == TempoRegion::followSong ? tr (", el de la canción)") : tr (", propio)")));
     m.addItem (21, tr ("Tono de la canción para esta sección"), r.transpose != TempoRegion::followSong);
     m.addSeparator();
+    {
+        // Transición hacia la siguiente sección: la de reproducción (estira el audio) o la de la grabación (solo el click)
+        const bool stretching = timeline.tempoStretchesAudio();
+        const int current = stretching ? r.curve : r.gridCurve;
+        juce::PopupMenu curves;
+        for (int c = 0; c <= TempoRegion::sCurve; ++c)
+            curves.addItem (70 + c, tempoCurveName (c), true, c == current);
+        curves.addSeparator();
+        curves.addItem (79, stretching ? tr ("Modo \"Estira el audio\": la canción acelera o frena al tocarla")
+                                       : tr ("Modo \"Solo el click\": la grabación ya acelera o frena y el click la sigue"), false);
+        m.addSubMenu (tr ("Transición hacia la siguiente sección") + (current != TempoRegion::jump ? " (" + tempoCurveName (current) + ")" : juce::String()),
+                      curves, several && index + 1 < (int) info->tempoRegions.size());
+    }
+    m.addSeparator();
     juce::PopupMenu click;
     click.addItem (40, tr ("Tiempos a la mitad (suena en corcheas)"), hasBeats);
     click.addItem (41, tr ("Tiempos al doble (suena en blancas)"), hasBeats);
@@ -2407,6 +2551,11 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
             return;
         auto& reg = inf->tempoRegions[(size_t) index];
         const bool single = inf->tempoRegions.size() == 1;
+        if (result >= 70 && result <= 74)
+        {
+            tempoTrackCurve (index, result - 70);
+            return;
+        }
         if (result != 1 && result != 6 && result != 20)
             pushUndo();   // los diálogos (1, 6 y 20) lo hacen al aceptar
 
@@ -2712,7 +2861,7 @@ std::vector<TimelineView::LaneClips> MainComponent::mappedLaneClips() const
             {
                 lane.own = true;
                 for (auto& c : *own)
-                    lane.clips.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()), c.muted, c.colour });
+                    lane.clips.push_back (clipView (c));
             }
         out.push_back (lane);
     }
@@ -2744,9 +2893,9 @@ std::vector<TimelineView::ClipView> MainComponent::mappedClips() const
         return out;
     const auto& info = library.songs[(size_t) currentIndex];
     if (arrangement::isIdentity (info.clips, (double) sourceSong->length / engine.getSampleRate()) && (info.clips.empty() || info.clips[0].colour == 0))
-        return out;   // el audio original entero: sin bordes que mostrar
+        return out;   // el audio original entero, sin nada propio: sin bordes que mostrar
     for (auto& c : info.clips)
-        out.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()), c.muted, c.colour });
+        out.push_back (clipView (c));
     return out;
 }
 
@@ -2758,6 +2907,7 @@ void MainComponent::pushUndo()
         undoStack.push_back (*info);
         if (undoStack.size() > 30)
             undoStack.erase (undoStack.begin());
+        redoStack.clear();   // una edición nueva: lo deshecho ya no se rehace
     }
 }
 
@@ -2771,8 +2921,38 @@ void MainComponent::undoLastEdit()
     if (restored.folder != info->folder)
     {
         undoStack.clear();
+        redoStack.clear();
         return;
     }
+    pullMidiControls();
+    redoStack.push_back (*info);   // lo de ahora, para rehacerlo
+    restoreEdit (std::move (restored));
+    sepLabel.setText (tr ("Edición deshecha (Ctrl+Shift+Z la rehace)"), juce::dontSendNotification);
+}
+
+void MainComponent::redoLastEdit()
+{
+    auto* info = currentInfo();
+    if (info == nullptr || redoStack.empty())
+        return;
+    auto restored = redoStack.back();
+    redoStack.pop_back();
+    if (restored.folder != info->folder)
+    {
+        redoStack.clear();
+        return;
+    }
+    pullMidiControls();
+    undoStack.push_back (*info);
+    restoreEdit (std::move (restored));
+    sepLabel.setText (tr ("Edición rehecha"), juce::dontSendNotification);
+}
+
+void MainComponent::restoreEdit (SongInfo restored)
+{
+    auto* info = currentInfo();
+    if (info == nullptr)
+        return;
     restored.stems = info->stems;   // la mezcla (faders, mute, salidas) no se deshace
     restored.name = info->name;
     restored.mixLink = info->mixLink;   // tampoco el enlace con su mix (desligarla no se deshace)
@@ -2807,11 +2987,11 @@ void MainComponent::undoLastEdit()
                     pad.gainDb = nowPad.gainDb;
                     pad.muted = nowPad.muted;
                     pad.outputPair = nowPad.outputPair;
+                    pad.pan = nowPad.pan;
                 }
     }
     *info = restored;
     refreshFromInfo();
-    sepLabel.setText (tr ("Edición deshecha"), juce::dontSendNotification);
 }
 
 void MainComponent::refreshFromInfo()
@@ -2923,6 +3103,8 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
         lane->control.smoothedGain = lane->control.gain.load();
         lane->control.muted = tg.muted;
         lane->control.outputPair = tg.outputPair;
+        lane->control.pan = tg.pan;
+        lane->control.smoothedPan = tg.pan;
         // La pista deja de sonar solo si su trigger tiene un sonido que dar (si no, se oiría nada sin aviso);
         // con un instrumento se confirma en refreshReplaced (el rack vive en la UI)
         t->replaced = ! tg.keepAudio && (bank != nullptr || isInstrument);
@@ -3505,7 +3687,7 @@ void MainComponent::startRecording (int inputL, int inputR, bool toBank, int ban
     engine.setRecorder (setup);
     if (! toBank && ! engine.isPlaying())
         engine.play();
-    recordBtn.setButtonText (tr ("Detener REC"));
+    recordBtn.setButtonText ("REC");
     recordBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::red.darker (0.3f));
     sepLabel.setText (tr ("GRABANDO"), juce::dontSendNotification);
 }
@@ -3525,7 +3707,7 @@ void MainComponent::stopRecording (bool discard)
     if (recording.thread != nullptr)
         recording.thread->stopThread (3000);
     recording.thread.reset();
-    recordBtn.setButtonText ("Grabar");
+    recordBtn.setButtonText ({});
     recordBtn.removeColour (juce::TextButton::buttonColourId);
 
     const auto temp = recording.tempFile;
@@ -3850,6 +4032,7 @@ void MainComponent::pullMidiControls()
             pad->gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
             pad->muted = lane->control.muted.load();
             pad->outputPair = lane->control.outputPair.load();
+            pad->pan = lane->control.pan.load();
         }
 }
 
@@ -3917,6 +4100,8 @@ void MainComponent::applyMidiTracks()
             lane->control.smoothedGain = lane->control.gain.load();
             lane->control.muted = pad.muted;
             lane->control.outputPair = pad.outputPair;
+            lane->control.pan = pad.pan;
+            lane->control.smoothedPan = pad.pan;
             for (auto& s : soloed)
                 if (s.first == mt.name && s.second == pad.note)
                     lane->control.solo = true;
@@ -6368,6 +6553,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     }
     m.addSeparator();
     m.addItem (8, tr ("Deshacer la última edición (Ctrl+Z)"), ! undoStack.empty());
+    m.addItem (15, tr ("Rehacer (Ctrl+Shift+Z)"), ! redoStack.empty());
     m.addItem (9, anyOwn ? tr ("Restaurar el audio original (sin cortes en ninguna pista)") : tr ("Restaurar el audio original (sin cortes)"),
                ! info->clips.empty() || anyOwn);
     m.addSeparator();
@@ -6389,6 +6575,11 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         if (result == 8)
         {
             undoLastEdit();
+            return;
+        }
+        if (result == 15)
+        {
+            redoLastEdit();
             return;
         }
         if (result == 11) { copyClip (idx); return; }
@@ -6553,11 +6744,46 @@ void MainComponent::setEditTool (ui::EditTool tool)
         b->setToggleState (b->getTool() == tool, juce::dontSendNotification);
     const bool changed = timeline.getTool() != tool;
     timeline.setTool (tool);
+    refreshStatusTool();
     if (! changed)
         return;
     juce::String name, key, hint;
     toolInfo (tool, name, key, hint);
     sepLabel.setText (hint, juce::dontSendNotification);
+}
+
+void MainComponent::refreshStatusTool()
+{
+    juce::String name, key, hint;
+    toolInfo (timeline.getTool(), name, key, hint);
+    const auto snap = cutMode() == 1 ? tr ("libre") : cutMode() == 2 ? tr ("a la rejilla") : tr ("a la transiente");
+    statusTool.setText (name + " (" + key + ")  ·  " + tr ("Ajuste: ") + snap, juce::dontSendNotification);
+}
+
+void MainComponent::showShortcuts()
+{
+    const juce::String text = tr (
+        "TRANSPORTE\n"
+        "Espacio: play / pausa   ·   Esc: stop y al inicio   ·   L: loop\n"
+        "Flechas izquierda/derecha o RePág/AvPág: canción anterior / siguiente (los pedales)\n"
+        "1 a 9 (también el teclado numérico): ir al marcador\n\n"
+        "EDICIÓN\n"
+        "M: marcador en el cabezal   ·   N: nota   ·   Supr: borrar lo elegido\n"
+        "Ctrl+Z: deshacer   ·   Ctrl+Shift+Z o Ctrl+Y: rehacer\n"
+        "J: ajuste encendido o apagado (rejilla o transiente)\n"
+        "Herramientas: V Objeto · R Rango · C Cortar · U Unir · B Borrar · Z Zoom · S Silenciar · D Dibujar · "
+        "P Reproducir · W Warp · K Color\n"
+        "Con cualquier herramienta: Shift = en todas las pistas; clic derecho = menú del tramo\n\n"
+        "VISTA\n"
+        "Ctrl+rueda: zoom   ·   rueda: desplazar   ·   Alt+rueda: alto de la onda\n"
+        "Ctrl+T: editor de la pista de tempo   ·   F11: vista grande   ·   F12: pantalla de escenario\n"
+        "Ctrl+E: exportar la mezcla   ·   ?: esta ayuda\n\n"
+        "ARCHIVOS\n"
+        "Arrastra 1 archivo a la ventana para separarlo con IA; varios archivos o una carpeta, para importarlos como pistas");
+    auto* w = new juce::AlertWindow (tr ("Atajos de teclado"), text, juce::MessageBoxIconType::NoIcon, this);
+    w->addButton ("Cerrar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->addButton ("OK", 0, juce::KeyPress (juce::KeyPress::returnKey));
+    w->enterModalState (true, nullptr, true);
 }
 
 void MainComponent::cutWithTool (double playbackSeconds, int lane, bool allTracks)
@@ -6686,6 +6912,81 @@ void MainComponent::moveClipPicks (std::vector<TimelineView::ClipPick> picks, in
 }
 
 // Objeto: arrastrar el borde de un tramo lo recorta (o lo alarga, hasta su audio original y sin pisar al vecino)
+TimelineView::ClipView MainComponent::clipView (const Clip& c) const
+{
+    TimelineView::ClipView v;
+    v.start = timeMap.toPlayback (c.position);
+    v.end = timeMap.toPlayback (c.end());
+    v.muted = c.muted;
+    v.colour = c.colour;
+    v.fadeIn = c.fadeIn > 0.0 ? timeMap.toPlayback (c.position + c.fadeIn) - v.start : 0.0;
+    v.fadeOut = c.fadeOut > 0.0 ? v.end - timeMap.toPlayback (c.end() - c.fadeOut) : 0.0;
+    v.gainDb = c.gainDb;
+    return v;
+}
+
+// Asas del tramo (Objeto): fundido de entrada o de salida y ganancia. En la pista del carril (su arreglo propio) o, con
+// Shift, en el tramo de la canción (las pistas con arreglo propio no cambian)
+void MainComponent::clipLookEdited (TimelineView::ClipPick pick, int what, double value)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || playbackMode)
+        return;
+    if (linkedSongMenu (*info, [this] { sepLabel.setText (tr ("Desligada: ya puedes editar los tramos aquí"), juce::dontSendNotification); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    const double at = timeMap.toOriginal (pick.start) + 1.0e-4;
+    std::vector<Clip>* list = nullptr;
+    juce::String file;
+    bool hadOwn = true;
+    if (pick.lane >= 0)
+    {
+        const auto* st = stemForLane (pick.lane);
+        if (st == nullptr)
+            return;
+        file = st->fileName;
+        hadOwn = info->ownClips (file) != nullptr;
+        pushUndo();
+        list = &arrangement::ownClips (*info, *st, sourceLength);
+    }
+    else
+    {
+        pushUndo();
+        arrangement::ensureClips (info->clips, sourceLength);
+        list = &info->clips;
+    }
+    const int idx = arrangement::clipAt (*list, at);
+    if (idx < 0)
+    {
+        if (! hadOwn)
+            arrangement::dropOwnClips (*info, file);
+        undoStack.pop_back();
+        return;
+    }
+    auto& c = (*list)[(size_t) idx];
+    juce::String done;
+    if (what == 3)
+    {
+        c.gainDb = (float) juce::jlimit (-24.0, 12.0, value);
+        done = tr ("Ganancia del tramo: ") + juce::String::formatted ("%+.1f dB", c.gainDb).replaceCharacter ('.', ',');
+    }
+    else
+    {
+        // El largo del fundido viene en tiempo de reproducción: al del audio
+        const double playStart = timeMap.toPlayback (c.position), playEnd = timeMap.toPlayback (c.end());
+        const double length = what == 1 ? timeMap.toOriginal (playStart + value) - c.position
+                                        : c.end() - timeMap.toOriginal (playEnd - value);
+        if (what == 1)
+            c.fadeIn = juce::jlimit (0.0, juce::jmax (0.0, c.length() - c.fadeOut), length);
+        else
+            c.fadeOut = juce::jlimit (0.0, juce::jmax (0.0, c.length() - c.fadeIn), length);
+        done = (what == 1 ? tr ("Fundido de entrada: ") : tr ("Fundido de salida: "))
+               + juce::String (what == 1 ? c.fadeIn : c.fadeOut, 2).replaceCharacter ('.', ',') + " s";
+    }
+    arrangementEdited();
+    sepLabel.setText (done + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+}
+
 void MainComponent::trimClipEdge (TimelineView::ClipPick pick, bool startEdge, double edge)
 {
     auto* info = currentInfo();
@@ -6982,7 +7283,7 @@ void MainComponent::rangeMenu (double playbackSeconds, int lane)
         who = names.joinIntoString (", ");
     }
     juce::PopupMenu m;
-    m.addSectionHeader (tr ("Rango ") + formatTime (r.start) + " - " + formatTime (r.end) + " · " + who);
+    m.addSectionHeader (tr ("Rango ") + formatTime (r.start) + " - " + formatTime (r.end) + tr (" · ") + who);
     m.addItem (1, tr ("Silenciar el rango (Supr)"));
     m.addItem (2, tr ("Quitar el rango y cerrar el hueco (la grilla y lo que sigue se adelantan)"), r.allLanes());
     m.addItem (3, tr ("Cortar en los bordes del rango"));
@@ -7165,22 +7466,15 @@ void MainComponent::tempoTrackSet (int band, double bpm)
             info->playBpm = std::abs (newPlay - bpm) < 0.05 ? 0.0 : newPlay;
         else
             r.playBpm = (info->playBpm <= 0.0 && std::abs (newPlay - bpm) < 0.05) ? 0.0 : newPlay;
-        auto& an = info->analysis;
-        if (an.beats.empty())
+        juce::ignoreUnused (tStart, tEnd);
+        if (info->analysis.beats.empty())
             info->bpm = bpm;   // rejilla fija del click
         else
         {
-            const int first = an.firstBeatAtOrAfter (tStart);
-            int meter = juce::jlimit (1, maxBeatsPerBar, an.meter), unit = 4;
-            for (auto& run : an.signatureRuns())
-                if (run.firstBeat <= juce::jmax (0, first))
-                {
-                    meter = run.numerator;
-                    unit = run.unit;
-                }
-            an.replaceBeatsWithGrid (tStart, tEnd, bpm, meter);
-            for (int i = an.firstBeatAtOrAfter (tStart); i < an.firstBeatAtOrAfter (tEnd); ++i)
-                an.beats[(size_t) i].unit = unit;
+            // La rejilla de la sección (y la de la anterior, si llega a esta con una transición)
+            if (band > 0 && info->tempoRegions[(size_t) band - 1].gridCurve != TempoRegion::jump)
+                regridSection (*info, band - 1);
+            regridSection (*info, band);
         }
         sepLabel.setText (tr ("Click de la sección a ") + juce::String (bpm, 1) + tr (" BPM (el audio no cambia; Ctrl+Z deshace)"), juce::dontSendNotification);
     }
@@ -7266,6 +7560,122 @@ void MainComponent::tempoTrackRemove (int band)
     info->tempoRegions.erase (info->tempoRegions.begin() + band);
     tempoRegionsEdited (*info);
     sepLabel.setText (tr ("Cambio de tempo quitado: la sección sigue a la anterior"), juce::dontSendNotification);
+}
+
+void MainComponent::regridSection (SongInfo& info, int band)
+{
+    auto& a = info.analysis;
+    if (a.beats.empty() || ! juce::isPositiveAndBelow (band, (int) info.tempoRegions.size()))
+        return;
+    double tStart = 0.0, tEnd = 0.0;
+    sectionRange (info, band, tStart, tEnd);
+    const int first = a.firstBeatAtOrAfter (tStart);
+    int meter = juce::jlimit (1, maxBeatsPerBar, a.meter), unit = 4;
+    for (auto& run : a.signatureRuns())
+        if (run.firstBeat <= juce::jmax (0, first))
+        {
+            meter = run.numerator;
+            unit = run.unit;
+        }
+    const auto& r = info.tempoRegions[(size_t) band];
+    if (r.gridCurve != TempoRegion::jump && band + 1 < (int) info.tempoRegions.size())
+        rampGrid (a, tStart, tEnd, r.origBpm, info.tempoRegions[(size_t) band + 1].origBpm, r.gridCurve, meter, unit);
+    else
+    {
+        a.replaceBeatsWithGrid (tStart, tEnd, r.origBpm, meter);
+        for (int i = a.firstBeatAtOrAfter (tStart); i < a.firstBeatAtOrAfter (tEnd); ++i)
+            a.beats[(size_t) i].unit = unit;
+    }
+}
+
+void MainComponent::tempoTrackCurve (int band, int curve)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode || band < 0 || band + 1 >= (int) info->tempoRegions.size())
+        return;
+    curve = juce::jlimit (0, (int) TempoRegion::sCurve, curve);
+    pushUndo();
+    auto& r = info->tempoRegions[(size_t) band];
+    if (timeline.tempoStretchesAudio())
+    {
+        r.curve = curve;
+        sepLabel.setText (curve == TempoRegion::jump ? tr ("Sin transición: el tempo cambia de golpe en la sección siguiente")
+                                                     : tempoCurveName (curve) + tr (" hacia la sección siguiente: la canción acelera o frena siguiéndola"),
+                          juce::dontSendNotification);
+    }
+    else
+    {
+        r.gridCurve = curve;
+        regridSection (*info, band);
+        sepLabel.setText (curve == TempoRegion::jump ? tr ("Sin transición: el click cambia de golpe en la sección siguiente")
+                                                     : tempoCurveName (curve) + tr (" hacia la sección siguiente: el click sigue a la grabación"),
+                          juce::dontSendNotification);
+    }
+    tempoRegionsEdited (*info);
+}
+
+void MainComponent::openTempoEditor (bool show)
+{
+    if (! show)
+    {
+        if (tempoEditor != nullptr)
+            tempoEditor->setVisible (false);
+        return;
+    }
+    if (tempoEditor == nullptr)
+    {
+        juce::Component::SafePointer<MainComponent> safe (this);
+        tempoEditor = std::make_unique<TempoEditorWindow> ([safe]
+        {
+            if (auto* self = safe.getComponent())
+                if (self->tempoEditor != nullptr)
+                    self->props.getUserSettings()->setValue ("tempoEditorWindow", self->tempoEditor->getWindowStateAsString());
+        });
+        auto& ed = tempoEditor->editor();
+        auto& tv = ed.track();
+        tv.onSeek = [this] (double t) { engine.seekSeconds (t); updateLoopRegion(); };
+        tv.onTempoSet = [this] (int band, double bpm) { tempoTrackSet (band, bpm); };
+        tv.onTempoMoved = [this] (int band, double t) { tempoTrackMoved (band, t); };
+        tv.onTempoAdd = [this] (double t, double bpm) { tempoTrackAdd (t, bpm); };
+        tv.onTempoRemove = [this] (int band) { tempoTrackRemove (band); };
+        tv.onTempoMenu = [this] (int band, double t) { tempoBandMenu (band, t); };
+        tv.onSignatureClicked = [this] (int beat, bool popup, double t) { signatureMenu (beat, popup, t); };
+        tv.onSignatureAdd = [this] (int beat) { signatureDialog (beat, true); };
+        tv.onSignatureMoved = [this] (int from, int to) { moveSignature (from, to); };
+        tv.onSignatureRemove = [this] (int beat) { removeSignature (beat); };
+        tv.onModeChanged = [this] (bool stretches) { if (timeline.onTempoModeChanged) timeline.onTempoModeChanged (stretches); };
+        ed.onCurveSet = [this] (int band, int curve) { tempoTrackCurve (band, curve); };
+        ed.onKey = [this] (const juce::KeyPress& key) { return keyPressed (key); };
+        const auto saved = props.getUserSettings()->getValue ("tempoEditorWindow");
+        if (saved.isNotEmpty())
+            tempoEditor->restoreWindowStateFromString (saved);
+    }
+    syncTempoEditor();
+    tempoEditor->editor().selectBandAt (engine.getPositionSeconds());
+    tempoEditor->setVisible (true);
+    tempoEditor->toFront (true);
+}
+
+void MainComponent::syncTempoEditor()
+{
+    if (tempoEditor == nullptr)
+        return;
+    auto& ed = tempoEditor->editor();
+    auto* info = currentInfo();
+    tempoEditor->setName (tr ("Pista de tempo: ") + (info != nullptr ? info->name : juce::String()));
+    ed.setStretches (timeline.tempoStretchesAudio());
+    ed.setReadOnly (playbackMode || info == nullptr);
+    if (info == nullptr || currentSong == nullptr)
+    {
+        ed.setBands ({});
+        ed.setAnalysis ({});
+        ed.setLength (0.0);
+        return;
+    }
+    ed.setLength ((double) currentSong->length / engine.getSampleRate());
+    ed.setFixedGrid (info->bpm, timeMap.toPlayback (info->clickOffset));
+    ed.setAnalysis (mappedAnalysis());
+    ed.setBands (mappedTempoBands());
 }
 
 //==============================================================================
@@ -8153,7 +8563,9 @@ void MainComponent::timerCallback()
     if (! positionSlider.isMouseButtonDown())
         positionSlider.setValue (pos, juce::dontSendNotification);
 
-    playBtn.setButtonText (engine.isPlaying() ? "Pausa" : "Play");
+    playBtn.setIcon (engine.isPlaying() ? ui::TransportIcon::pause : ui::TransportIcon::play);
+    if (liveMode)
+        playBtn.setButtonText (engine.isPlaying() ? "Pausa" : "Play");
     playBtn.setColour (juce::TextButton::buttonColourId,
                        engine.isPlaying() ? juce::Colours::green.darker (0.4f) : panelAlt);
 
@@ -8198,6 +8610,8 @@ void MainComponent::timerCallback()
 
     timeline.setPlaying (engine.isPlaying());
     timeline.setPosition (pos);
+    if (tempoEditor != nullptr && tempoEditor->isVisible())
+        tempoEditor->editor().setPosition (pos);
     timeline.refreshTrackStates();
     mixer.tick (engine);
     if (auto* info = currentInfo(); info != nullptr && currentSong != nullptr)
@@ -8490,6 +8904,27 @@ void MainComponent::importStems (const juce::Array<juce::File>& selection)
     });
 }
 
+void MainComponent::addSeparationOptions (juce::AlertWindow& w)
+{
+    w.addComboBox ("sepStems", { "4 pistas (voces, bajo, batería, otros)", "6 pistas: + guitarra y piano" }, "Pistas");
+    w.getComboBoxComponent ("sepStems")->setSelectedId (stemsBox.getSelectedId(), juce::dontSendNotification);
+    w.addComboBox ("sepQuality", { "Normal", "Alta", tr ("Máxima (lenta)") }, "Calidad");
+    w.getComboBoxComponent ("sepQuality")->setSelectedId (qualityBox.getSelectedId(), juce::dontSendNotification);
+    w.addComboBox ("sepDrums", { tr ("Batería entera"), tr ("Batería en partes (bombo, caja, toms, platos)") }, tr ("Batería"));
+    w.getComboBoxComponent ("sepDrums")->setSelectedItemIndex (drumPartsBtn.getToggleState() ? 1 : 0, juce::dontSendNotification);
+}
+
+void MainComponent::takeSeparationOptions (juce::AlertWindow& w)
+{
+    // Se guardan como siempre (en los controles ocultos, que escriben los ajustes)
+    if (auto* c = w.getComboBoxComponent ("sepStems"))
+        stemsBox.setSelectedId (juce::jlimit (1, 2, c->getSelectedId()), juce::sendNotification);
+    if (auto* c = w.getComboBoxComponent ("sepQuality"))
+        qualityBox.setSelectedId (juce::jlimit (1, 3, c->getSelectedId()), juce::sendNotification);
+    if (auto* c = w.getComboBoxComponent ("sepDrums"))
+        drumPartsBtn.setToggleState (c->getSelectedItemIndex() == 1, juce::sendNotification);
+}
+
 void MainComponent::chooseSongToSeparate()
 {
     auto pickFile = [this]
@@ -8502,7 +8937,20 @@ void MainComponent::chooseSongToSeparate()
     auto* info = currentInfo();
     if (info == nullptr || currentSong == nullptr || arrangedSong == nullptr)
     {
-        pickFile();
+        // Sin canción cargada: las opciones y después el archivo
+        auto* o = new juce::AlertWindow (tr ("Separar canción (IA)"), tr ("Elige cómo separar y después el archivo de la canción completa."),
+                                         juce::MessageBoxIconType::QuestionIcon, this);
+        addSeparationOptions (*o);
+        o->addButton (tr ("Elegir el archivo..."), 1, juce::KeyPress (juce::KeyPress::returnKey));
+        o->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<juce::AlertWindow> ow (o);
+        o->enterModalState (true, juce::ModalCallbackFunction::create ([this, pickFile, ow] (int result)
+        {
+            if (result != 1 || ow == nullptr)
+                return;
+            takeSeparationOptions (*ow);
+            pickFile();
+        }), true);
         return;
     }
     if (info->mixLink.isLinked())
@@ -8534,6 +8982,7 @@ void MainComponent::chooseSongToSeparate()
                                          + tr (". Separar la canción seleccionada reemplaza sus pistas por los stems (el audio actual queda guardado en la subcarpeta «original») "
                                                "y conserva marcadores, análisis, tempo y cortes.\n\nTambién puedes elegir otro archivo, que se agrega como canción nueva."),
                                      juce::MessageBoxIconType::QuestionIcon, this);
+    addSeparationOptions (*w);
     w->addButton (tr ("Separar «") + info->name + tr ("»"), 1, juce::KeyPress (juce::KeyPress::returnKey));
     bool hasDrums = false;
     for (auto& st : info->stems)
@@ -8542,8 +8991,11 @@ void MainComponent::chooseSongToSeparate()
         w->addButton (tr ("Solo la batería en partes"), 3);
     w->addButton (tr ("Elegir un archivo..."), 2);
     w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, pickFile] (int result)
+    juce::Component::SafePointer<juce::AlertWindow> ww (w);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, pickFile, ww] (int result)
     {
+        if (result != 0 && ww != nullptr)
+            takeSeparationOptions (*ww);
         if (result == 1)
             separateCurrentSong();
         else if (result == 3)
@@ -8707,13 +9159,18 @@ void MainComponent::showAiSettings()
                         + tr ("«Instalar» abre una terminal que crea los entornos de Python en tu usuario (tarda unos minutos y descarga varios GB). Se puede repetir sin problema.");
     const bool separatorOk = Separator::isRoformerAvailable (pythonPath());
     estado += tr ("\n\nRoformer y DrumSep (voces de mejor calidad y batería en partes, con audio-separator y ffmpeg): ") + (separatorOk ? tr ("instalados") : tr ("no encontrados"));
+    estado += tr ("\n\nOpciones de separación (las usan «Separar canción», arrastrar un archivo y el armado de mix):");
     auto* w = new juce::AlertWindow (tr ("Ajustes IA"), estado, juce::MessageBoxIconType::NoIcon, this);
+    addSeparationOptions (*w);
     w->addButton (tr ("Instalar motores de IA"), 1);
     w->addButton (tr ("Instalar también Roformer y DrumSep"), 3);
     w->addButton (tr ("Rutas de Python..."), 2);
     w->addButton ("Cerrar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int result)
+    juce::Component::SafePointer<juce::AlertWindow> ww (w);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([this, ww] (int result)
     {
+        if (ww != nullptr)
+            takeSeparationOptions (*ww);
         if (result == 1 || result == 3)
         {
             launchInstaller (result == 3);
@@ -8831,10 +9288,11 @@ void MainComponent::setPlaybackMode (bool on)
     playbackMode = on;
     props.getUserSettings()->setValue ("playbackMode", on);
     playbackBtn.setToggleState (on, juce::dontSendNotification);
-    playbackBtn.setButtonText (on ? juce::String ("Volver a editar") : tr ("Reproducción"));
+    editModeBtn.setToggleState (! on, juce::dontSendNotification);
     showHelpText();
     timeline.setReadOnly (on);
     mixer.setReadOnly (on);
+    syncTempoEditor();   // la ventana de la pista de tempo también queda de solo lectura en el Show
     if (on)
         setEditTool (ui::EditTool::select);
     ++preloadGeneration;   // los trabajos de antes ya no valen (ni avisan: nada queda esperándolos)
@@ -9076,7 +9534,7 @@ juce::String MainComponent::playbackKey (const SongInfo& info, double sr)
     {
         juce::Array<juce::var> list;
         for (auto& c : clips)
-            list.add (juce::Array<juce::var> { c.srcStart, c.srcEnd, c.position, c.muted });
+            list.add (juce::Array<juce::var> { c.srcStart, c.srcEnd, c.position, c.muted, c.fadeIn, c.fadeOut, (double) c.gainDb });
         return list;
     };
     o->setProperty ("clips", clipsVar (info.clips));
@@ -9086,7 +9544,7 @@ juce::String MainComponent::playbackKey (const SongInfo& info, double sr)
     o->setProperty ("trackClips", own);
     juce::Array<juce::var> regions;
     for (auto& r : info.tempoRegions)
-        regions.add (juce::Array<juce::var> { r.start, r.origBpm, r.playBpm, r.transpose });
+        regions.add (juce::Array<juce::var> { r.start, r.origBpm, r.playBpm, r.transpose, r.curve });
     o->setProperty ("tempo", regions);
     o->setProperty ("playBpm", info.playBpm);
     o->setProperty ("transpose", info.transpose);
@@ -9344,7 +9802,7 @@ juce::String MainComponent::showSummary() const
     const int n = (int) rows.size();
     auto text = juce::String (n) + (n == 1 ? tr (" canción · ") : tr (" canciones · ")) + (unknown > 0 ? juce::String ("~") : juce::String())
               + formatTime (total) + tr (" de música");
-    text += "\n" + tr ("En memoria: ") + juce::String (inMemory) + tr (" de ") + juce::String (n) + " · "
+    text += "\n" + tr ("En memoria: ") + juce::String (inMemory) + tr (" de ") + juce::String (n) + tr (" · ")
           + juce::String ((double) bytes / (1024.0 * 1024.0 * 1024.0), 1).replaceCharacter ('.', ',') + " GB"
           + (preloadingFolder.isNotEmpty() ? tr (" · cargando...") : (inMemory == n ? tr (" · todo listo") : juce::String()));
     return text;
@@ -10107,6 +10565,15 @@ void MainComponent::showStage (bool show)
     updateStage (engine.getPositionSeconds());
 }
 
+juce::Image MainComponent::tempoEditorSnapshot()
+{
+    if (tempoEditor == nullptr)
+        return {};
+    syncTempoEditor();
+    auto& ed = tempoEditor->editor();
+    return ed.createComponentSnapshot (ed.getLocalBounds());
+}
+
 juce::Image MainComponent::stageSnapshot()
 {
     if (stageWindow == nullptr)
@@ -10284,6 +10751,7 @@ void MainComponent::analysisEdited()
     timeline.setAnalysis (mappedAnalysis());
     updateBeatGrid();
     showChordAndKey (engine.getPositionSeconds());
+    syncTempoEditor();
 }
 
 void MainComponent::updateBeatGrid()

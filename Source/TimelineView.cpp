@@ -6,13 +6,12 @@
 #include <cmath>
 
 //==============================================================================
-// Regla: fila de marcadores, fila de secciones de tempo, fila de compases, fila de tiempo y
-// fila de acordes. Clic = saltar, arrastre = recorrer; sobre un marcador, clic = ir, arrastre =
-// moverlo, clic derecho = menú; sobre una sección de tempo, clic = menú de la sección.
+// Regla: fila de marcadores, fila de notas, fila de compases, fila de tiempo y fila de acordes (el tempo está en su
+// pista). Clic = saltar, arrastre = recorrer; sobre un marcador, clic = ir, arrastre = moverlo, clic derecho = menú.
 class TimelineView::Ruler : public juce::Component
 {
 public:
-    static constexpr int rowMarkers = 0, rowTempo = 16, rowNotes = 32, rowBars = 46, rowTime = 61, rowChords = 76;
+    static constexpr int rowMarkers = 0, rowNotes = 16, rowBars = 30, rowTime = 45, rowChords = 60;
 
     explicit Ruler (TimelineView& o) : owner (o)
     {
@@ -20,29 +19,12 @@ public:
         setMouseClickGrabsKeyboardFocus (false);
     }
 
-    int tempoBandAt (int x) const
-    {
-        const double t = owner.xToTime (x - headerWidth);
-        for (int i = (int) owner.tempoBands.size(); --i >= 0;)
-            if (t >= owner.tempoBands[(size_t) i].start)
-                return i;
-        return owner.tempoBands.empty() ? -1 : 0;
-    }
-
-    static bool inTempoRow (int y) { return y >= rowTempo && y < rowNotes; }
-
     int noteAt (int x) const
     {
         for (int i = (int) owner.notes.size(); --i >= 0;)
             if (std::abs (x - (headerWidth + owner.timeToX (owner.notes[(size_t) i].seconds))) <= 8)
                 return i;
         return -1;
-    }
-
-    void mouseMove (const juce::MouseEvent& e) override
-    {
-        const bool hand = owner.song != nullptr && e.x >= headerWidth && inTempoRow (e.y) && tempoBandAt (e.x) >= 0;
-        setMouseCursor (hand ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
 
     int markerAt (int x) const
@@ -67,20 +49,13 @@ public:
             // Solo saltar: a un marcador o a donde se hizo clic
             if (e.mods.isPopupMenu())
                 return;
-            if (const int m = markerAt (e.x); m >= 0 && ! inTempoRow (e.y))
+            if (const int m = markerAt (e.x); m >= 0)
             {
                 if (owner.onMarkerClicked)
                     owner.onMarkerClicked (m, false);
                 return;
             }
             owner.seekAt (e.x - headerWidth, false);
-            return;
-        }
-        if (inTempoRow (e.y))
-        {
-            const int band = tempoBandAt (e.x);
-            if (band >= 0 && owner.onTempoBandClicked)
-                owner.onTempoBandClicked (band, juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (e.x - headerWidth)));
             return;
         }
         if (e.mods.isPopupMenu() && e.y >= rowNotes && e.y < rowBars)
@@ -163,30 +138,6 @@ public:
         auto x = [&] (double t) { return (float) (headerWidth + owner.timeToX (t)); };
 
         const auto& an = owner.analysis;
-
-        // Secciones de tempo: una banda por sección con su BPM ("orig -> reproducción" si está estirada)
-        for (size_t i = 0; i < owner.tempoBands.size(); ++i)
-        {
-            const auto& band = owner.tempoBands[i];
-            if (band.end < t0 || band.start > t1) continue;
-            const float a = juce::jmax ((float) headerWidth, x (band.start)), b = juce::jmin ((float) getWidth(), x (band.end));
-            if (b - a < 1.0f) continue;
-            const bool stretched = std::abs (band.playBpm - band.origBpm) >= 0.05 || band.transpose != 0;
-            g.setColour (stretched ? ui::accent.withAlpha (0.35f) : (i % 2 == 0 ? juce::Colour (0xff2f3b47) : juce::Colour (0xff28333e)));
-            g.fillRect (a, (float) rowTempo + 1.0f, b - a, (float) (rowBars - rowTempo - 2));
-            g.setColour (juce::Colours::white.withAlpha (0.5f));
-            g.fillRect (x (band.start), (float) rowTempo, 1.0f, (float) (rowBars - rowTempo));
-            if (b - a >= 40.0f)
-            {
-                g.setColour (juce::Colours::white.withAlpha (stretched ? 1.0f : 0.85f));
-                g.setFont (ui::font (11.0f, true));
-                auto text = std::abs (band.playBpm - band.origBpm) >= 0.05 ? juce::String::formatted ("%.1f -> %.1f BPM", band.origBpm, band.playBpm)
-                                                                          : juce::String::formatted ("%.1f BPM", band.origBpm);
-                if (band.transpose != 0)
-                    text += juce::String::formatted ("  %+d st", band.transpose);
-                g.drawText (text, (int) a + 5, rowTempo, (int) (b - a) - 8, rowBars - rowTempo, juce::Justification::centredLeft, true);
-            }
-        }
 
         // Notas de texto: banderita amarilla y texto hasta la siguiente nota
         for (size_t i = 0; i < owner.notes.size(); ++i)
@@ -280,7 +231,7 @@ public:
                 if (t < 0.0) continue;
                 g.setColour (juce::Colours::grey);
                 g.fillRect (x (t), (float) rowTime, 1.0f, (float) (getHeight() - rowTime));
-                g.drawText (ui::formatTime (t), (int) x (t) + 3, rowTime, 60, getHeight() - rowTime, juce::Justification::centredLeft);
+                g.drawText (ui::formatTime (t), (int) x (t) + 3, rowTime, 60, rowChords - rowTime, juce::Justification::centredLeft);
             }
         }
 
@@ -423,6 +374,15 @@ public:
     {
         if (e.x < headerWidth)
         {
+            if (e.y >= getHeight() - 5 && ! e.mods.isPopupMenu())
+            {
+                // Borde de abajo de la cabecera: alto del carril (doble clic: automático)
+                if (e.getNumberOfClicks() == 2)
+                    owner.laneResizeReset (index);
+                else
+                    owner.laneResizeBegin (index, e.getEventRelativeTo (&owner).y);
+                return;
+            }
             if (e.mods.isPopupMenu() && owner.onLaneHeaderMenu && ! owner.readOnly)
                 owner.onLaneHeaderMenu (index);   // menú del trigger de la pista
             return;
@@ -435,11 +395,16 @@ public:
                 owner.seekAt (e.x - headerWidth, false);
             return;
         }
-        owner.toolMouseDown (index, e.x - headerWidth, e.mods);
+        owner.toolMouseDown (index, e.x - headerWidth, e.mods, e.y);
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (owner.resizingLane == index)
+        {
+            owner.laneResizeDrag (e.getEventRelativeTo (&owner).y);
+            return;
+        }
         if (owner.song == nullptr)
             return;
         if (owner.readOnly)
@@ -453,28 +418,38 @@ public:
 
     void mouseUp (const juce::MouseEvent& e) override
     {
+        if (owner.resizingLane == index)
+        {
+            owner.laneResizeEnd();
+            return;
+        }
         if (owner.song != nullptr && ! owner.readOnly)
             owner.toolMouseUp (e.x - headerWidth);
     }
 
-    void mouseMove (const juce::MouseEvent& e) override        { hover (e.x, e.mods); }
+    void mouseMove (const juce::MouseEvent& e) override        { hover (e.x, e.mods, e.y); }
     void mouseExit (const juce::MouseEvent&) override          { owner.toolHoverExit(); }
     void modifierKeysChanged (const juce::ModifierKeys& mods) override
     {
         if (isMouseOver (false))
-            hover (getMouseXYRelative().x, mods);   // Shift o Alt cambian la guía sin mover el mouse
+            hover (getMouseXYRelative().x, mods, getMouseXYRelative().y);   // Shift o Alt cambian la guía sin mover el mouse
     }
 
     // Cursor de la herramienta (y la guía de la tijera o la línea del warp) según la posición del mouse
-    void hover (int x, juce::ModifierKeys mods)
+    void hover (int x, juce::ModifierKeys mods, int y = 100)
     {
+        if (x < headerWidth && y >= getHeight() - 5)
+        {
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);   // alto del carril
+            return;
+        }
         if (x < headerWidth || owner.song == nullptr || owner.readOnly)
         {
             setMouseCursor (juce::MouseCursor::NormalCursor);
             owner.toolHoverExit();
             return;
         }
-        setMouseCursor (owner.toolHover (index, x - headerWidth, mods));
+        setMouseCursor (owner.toolHover (index, x - headerWidth, mods, y));
     }
 
     void paint (juce::Graphics& g) override
@@ -511,6 +486,7 @@ public:
         }
         drawClips (g);
         drawMuted (g);
+        drawFadesAndGain (g);
     }
 
     LoadedTrack& getTrack() { return track; }
@@ -550,6 +526,63 @@ private:
         }
         if (own && owner.lengthSeconds() > lastEnd + 1.0e-6)
             shade (lastEnd, owner.lengthSeconds());   // después de su último tramo la pista no suena
+    }
+
+    // Fundidos (curva y zona oscurecida), ganancia del tramo y, con Objeto, sus asas arriba
+    void drawFadesAndGain (juce::Graphics& g)
+    {
+        const auto list = owner.clipList (index, false);
+        const bool handles = owner.tool == ui::EditTool::select && ! owner.readOnly;
+        juce::Graphics::ScopedSaveState state (g);
+        g.reduceClipRegion (headerWidth, 0, getWidth() - headerWidth, getHeight());
+        const float top = 1.0f, bottom = (float) getHeight() - 1.0f;
+        for (auto& c : list)
+        {
+            const float a = (float) (headerWidth + owner.timeToX (c.start)), b = (float) (headerWidth + owner.timeToX (c.end));
+            if (b < (float) headerWidth || a > (float) getWidth())
+                continue;
+            auto fadeShape = [&] (float x0, float x1, bool rising)
+            {
+                juce::Path curve, shade;
+                constexpr int steps = 24;
+                for (int k = 0; k <= steps; ++k)
+                {
+                    const float u = (float) k / steps;
+                    const float level = rising ? std::sin (juce::MathConstants<float>::halfPi * u) : std::cos (juce::MathConstants<float>::halfPi * u);
+                    const float x = x0 + (x1 - x0) * u, y = bottom - (bottom - top) * level;
+                    if (k == 0) curve.startNewSubPath (x, y); else curve.lineTo (x, y);
+                }
+                shade = curve;
+                shade.lineTo (rising ? x0 : x1, top);
+                shade.lineTo (rising ? x0 : x0, top);
+                shade.closeSubPath();
+                g.setColour (juce::Colours::black.withAlpha (0.35f));
+                g.fillPath (shade);
+                g.setColour (juce::Colours::white.withAlpha (0.75f));
+                g.strokePath (curve, juce::PathStrokeType (1.2f));
+            };
+            if (c.fadeIn > 1.0e-6)
+                fadeShape (a, (float) (headerWidth + owner.timeToX (c.start + c.fadeIn)), true);
+            if (c.fadeOut > 1.0e-6)
+                fadeShape ((float) (headerWidth + owner.timeToX (c.end - c.fadeOut)), b, false);
+            if (std::abs (c.gainDb) >= 0.05f && b - a > 60.0f)
+            {
+                g.setFont (ui::font (11.0f, true));
+                g.setColour (juce::Colours::white.withAlpha (0.85f));
+                g.drawText (juce::String::formatted ("%+.1f dB", c.gainDb).replaceCharacter ('.', ','),
+                            juce::Rectangle<float> (a, top + 1.0f, b - a, 14.0f), juce::Justification::centred, false);
+            }
+            if (handles && b - a >= 24.0f)
+            {
+                // Asas: fundido de entrada, ganancia (al centro) y fundido de salida
+                const float fi = (float) (headerWidth + owner.timeToX (c.start + c.fadeIn));
+                const float fo = (float) (headerWidth + owner.timeToX (c.end - c.fadeOut));
+                g.setColour (juce::Colours::white.withAlpha (0.8f));
+                g.fillRect (juce::Rectangle<float> (fi, top + 1.0f, 6.0f, 6.0f));
+                g.fillRect (juce::Rectangle<float> (fo - 6.0f, top + 1.0f, 6.0f, 6.0f));
+                g.fillRect (juce::Rectangle<float> ((a + b) * 0.5f - 7.0f, top + 2.0f, 14.0f, 3.0f));
+            }
+        }
     }
 
     // Los tramos silenciados no suenan (su onda queda vacía): una franja gris rayada con su nombre
@@ -598,7 +631,7 @@ private:
         const double sr = owner.sampleRate;
         const float midL = h * 0.25f, midR = h * 0.75f;
         // Escalado visual al pico de la pista (hasta 8x): el nivel real se ve en los medidores
-        const float half = juce::jmax (1.0f, h * 0.25f - 2.0f) * juce::jlimit (1.0f, 8.0f, 1.0f / juce::jmax (0.001f, wf.peak));
+        const float half = juce::jmax (1.0f, h * 0.25f - 2.0f) * juce::jlimit (1.0f, 8.0f, 1.0f / juce::jmax (0.001f, wf.peak)) * owner.waveZoom;
         g.setColour (juce::Colours::white.withAlpha (0.06f));
         g.fillRect (0, (int) midL, w, 1);
         g.fillRect (0, (int) midR, w, 1);
@@ -1582,6 +1615,23 @@ private:
             g.fillRect (xOf (edge) - 1, area.getY(), 3, area.getHeight());
             label (ui::formatTime (edge), xOf (edge) + 5, area.getY() + 3);
         }
+        // Asas: el fundido o la ganancia mientras se arrastran
+        if ((owner.gesture == Gesture::fade || owner.gesture == Gesture::gain) && owner.gestureMoved)
+        {
+            const auto& c = owner.handleClip;
+            const auto area = owner.trimTarget.lane < 0 ? all : owner.laneArea (owner.trimTarget.lane, owner.trimTarget.lane);
+            if (owner.gesture == Gesture::fade)
+            {
+                const double edge = owner.fadeIsIn ? c.start + owner.previewValue : c.end - owner.previewValue;
+                g.setColour (ui::accent);
+                g.fillRect (xOf (edge) - 1, area.getY(), 3, area.getHeight());
+                label ((owner.fadeIsIn ? tr ("Fundido de entrada ") : tr ("Fundido de salida "))
+                           + juce::String (owner.previewValue, 2).replaceCharacter ('.', ',') + " s", xOf (edge) + 5, area.getY() + 3);
+            }
+            else
+                label (juce::String::formatted ("%+.1f dB", owner.previewValue).replaceCharacter ('.', ','),
+                       (xOf (c.start) + xOf (c.end)) / 2 - 30, area.getY() + 16);
+        }
         // Zoom: la banda que se va a mostrar
         if (owner.gesture == Gesture::zoom && owner.gestureMoved)
         {
@@ -1634,7 +1684,7 @@ private:
         g.fillRect (x - 1, area.getY(), 3, area.getHeight());
         g.setColour (juce::Colours::white);
         g.fillRect (x, area.getY(), 1, area.getHeight());
-        const auto text = tr ("Cortar en ") + ui::formatTime (owner.cutGuide) + " · " + who;
+        const auto text = tr ("Cortar en ") + ui::formatTime (owner.cutGuide) + tr (" · ") + who;
         const auto f = ui::font (12.0f, true);
         const int w = juce::GlyphArrangement::getStringWidthInt (f, text) + 12;
         int bx = x + 6;
@@ -1649,458 +1699,6 @@ private:
     }
 
     TimelineView& owner;
-};
-
-//==============================================================================
-// Pista de compás (arriba: los cambios de compás, 4/4, 17/4, 7/8...) y pista de tempo (abajo: el tempo de cada sección
-// como una escalera, con el tempo que se detecta tiempo a tiempo de fondo), como las pistas globales de Cubase.
-// Arrastrar un escalón cambia el tempo de la sección; arrastrar un cambio lo corre; doble clic (o Dibujar) agrega uno;
-// Borrar lo quita; clic derecho abre su menú. En la de compás: clic edita el cambio, arrastrarlo lo lleva a otro tiempo.
-class TimelineView::TempoLane : public juce::Component
-{
-public:
-    static constexpr int sigHeight = 20;
-
-    explicit TempoLane (TimelineView& o) : owner (o)
-    {
-        mode.onClick = [this] { if (owner.onTempoModeChanged) owner.onTempoModeChanged (! owner.tempoStretches); };
-        mode.setColour (juce::TextButton::buttonColourId, ui::panelAlt);
-        addAndMakeVisible (mode);
-        refreshMode();
-        ui::disableFocus (*this);
-        setWantsKeyboardFocus (false);
-        setMouseClickGrabsKeyboardFocus (false);
-    }
-
-    void refreshMode()
-    {
-        mode.setButtonText (owner.tempoStretches ? tr ("Estira el audio") : tr ("Solo el click"));
-        mode.setEnabled (! owner.readOnly);
-        repaint();
-    }
-
-    void resized() override
-    {
-        mode.setBounds (6, getHeight() - 24, headerWidth - 12, 20);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (ui::panel);
-        // Cabecera
-        g.setColour (ui::background);
-        g.fillRect (0, 0, headerWidth, getHeight());
-        g.setColour (juce::Colours::white.withAlpha (0.75f));
-        g.setFont (ui::font (11.0f, true));
-        g.drawText (tr ("Compás"), 8, 0, headerWidth - 12, sigHeight, juce::Justification::centredLeft);
-        g.drawText ("Tempo", 8, sigHeight, headerWidth - 12, 18, juce::Justification::centredLeft);
-        g.setColour (juce::Colours::black.withAlpha (0.4f));
-        g.fillRect (0, sigHeight, getWidth(), 1);
-        g.fillRect (0, getHeight() - 1, getWidth(), 1);
-        if (owner.song == nullptr)
-            return;
-        if (! dragging())
-            computeRange();
-
-        const auto content = getLocalBounds().withTrimmedLeft (headerWidth);
-        juce::Graphics::ScopedSaveState state (g);
-        g.reduceClipRegion (content);
-        const double t0 = owner.viewStart, t1 = owner.xToTime (content.getWidth());
-        g.setColour (juce::Colour (0xff1a1f24));
-        g.fillRect (content.withTrimmedTop (sigHeight + 1));
-
-        // Líneas guía de BPM
-        const double span = hi - lo;
-        double step = 5.0;
-        for (double c : { 5.0, 10.0, 20.0, 50.0, 100.0 })
-        {
-            step = c;
-            if (span / c <= 4.0) break;
-        }
-        g.setFont (ui::font (9.0f));
-        for (double v = std::ceil (lo / step) * step; v <= hi; v += step)
-        {
-            const float y = yOf (v);
-            g.setColour (juce::Colours::white.withAlpha (0.06f));
-            g.fillRect ((float) headerWidth, y, (float) content.getWidth(), 1.0f);
-            g.setColour (juce::Colours::white.withAlpha (0.3f));
-            g.drawText (juce::String ((int) v), headerWidth + 3, (int) y - 10, 30, 10, juce::Justification::bottomLeft);
-        }
-
-        // El tempo que se detecta tiempo a tiempo (de fondo, para ver dónde se acelera o se frena la grabación)
-        const auto& beats = owner.analysis.beats;
-        if (beats.size() > 6)
-        {
-            juce::Path curve;
-            bool started = false;
-            for (size_t i = 2; i + 3 < beats.size(); ++i)
-            {
-                if (beats[i].seconds < t0 - 2.0) continue;
-                if (beats[i].seconds > t1 + 2.0) break;
-                std::array<double, 5> local {};
-                for (size_t k = 0; k < 5; ++k)
-                    local[k] = beats[i - 2 + k + 1].seconds - beats[i - 2 + k].seconds;
-                std::sort (local.begin(), local.end());
-                if (local[2] <= 0.0) continue;
-                const float x = (float) (headerWidth + owner.timeToX (beats[i].seconds));
-                const float y = juce::jlimit ((float) graphTop(), (float) graphBottom(), yOf (60.0 / local[2]));
-                if (! started) curve.startNewSubPath (x, y); else curve.lineTo (x, y);
-                started = true;
-            }
-            g.setColour (juce::Colours::white.withAlpha (0.22f));
-            g.strokePath (curve, juce::PathStrokeType (1.0f));
-        }
-
-        // La escalera del tempo de cada sección (el que se edita, según el modo; el otro, tenue)
-        const auto& bands = owner.tempoBands;
-        float lastY = -1.0f;
-        for (int i = 0; i < (int) bands.size(); ++i)
-        {
-            const auto& b = bands[(size_t) i];
-            const double main = (i == bpmDrag) ? previewBpm : mainBpm (b);
-            const double start = (i == edgeDrag) ? previewTime : b.start;
-            const double end = (i + 1 == edgeDrag) ? previewTime : b.end;
-            const float xa = (float) (headerWidth + owner.timeToX (start)), xb = (float) (headerWidth + owner.timeToX (end));
-            const float y = yOf (main);
-            if (std::abs (otherBpm (b) - mainBpm (b)) >= 0.05)
-            {
-                g.setColour (juce::Colours::white.withAlpha (0.3f));
-                const float yo = yOf (otherBpm (b));
-                for (float x = xa; x < xb; x += 8.0f)
-                    g.fillRect (x, yo, juce::jmin (4.0f, xb - x), 1.0f);
-            }
-            if (lastY >= 0.0f)
-            {
-                g.setColour (juce::Colours::white.withAlpha (i == edgeDrag ? 1.0f : 0.5f));
-                g.fillRect (xa, juce::jmin (lastY, y), i == edgeDrag ? 2.0f : 1.0f, std::abs (lastY - y) + 1.0f);
-            }
-            g.setColour (i == bpmDrag || i == hoverBand ? juce::Colours::white : ui::accent);
-            g.fillRect (xa, y - 1.0f, juce::jmax (1.0f, xb - xa), 2.5f);
-            lastY = y;
-            if (xb - xa >= 46.0f || i == bpmDrag)
-            {
-                const bool stretched = std::abs (b.playBpm - b.origBpm) >= 0.05;
-                juce::String text = juce::String (main, 1);
-                if (stretched && i != bpmDrag)
-                    text = owner.tempoStretches ? juce::String (b.origBpm, 1) + " -> " + juce::String (b.playBpm, 1)
-                                                : juce::String (b.origBpm, 1) + tr (" (suena a ") + juce::String (b.playBpm, 1) + ")";
-                g.setFont (ui::font (11.0f, true));
-                g.setColour (juce::Colours::white);
-                const float ty = y - 15.0f < (float) graphTop() ? y + 3.0f : y - 15.0f;
-                g.drawText (text, (int) xa + 4, (int) ty, juce::jmax (40, (int) (xb - xa) - 6), 13, juce::Justification::centredLeft, true);
-            }
-        }
-
-        // Pista de compás
-        g.setColour (juce::Colour (0xff20262c));
-        g.fillRect (content.getX(), 0, content.getWidth(), sigHeight);
-        const auto marks = signatureMarks();
-        for (size_t k = 0; k < marks.size(); ++k)
-        {
-            const auto& m = marks[k];
-            const double at = (sigDrag >= 0 && m.beat == sigDrag) ? previewTime : m.seconds;
-            if (at > t1) break;
-            const double next = k + 1 < marks.size() ? marks[k + 1].seconds : t1 + 10.0;
-            if (next < t0) continue;
-            const float x = (float) (headerWidth + owner.timeToX (at));
-            const bool hot = m.beat == hoverSig || m.beat == sigDrag;
-            g.setColour (hot ? juce::Colours::white : juce::Colour (0xffffb74d));
-            juce::Path flag;
-            flag.addTriangle (x, 2.0f, x + 6.0f, 6.0f, x, 10.0f);
-            g.fillPath (flag);
-            g.fillRect (x, 0.0f, 1.0f, (float) sigHeight);
-            g.setFont (ui::font (12.0f, true));
-            g.drawText (m.text, (int) x + 8, 0, 60, sigHeight, juce::Justification::centredLeft, false);
-        }
-    }
-
-    void mouseMove (const juce::MouseEvent& e) override
-    {
-        int band = -1, sig = -1;
-        setMouseCursor (cursorAt (e.position.toInt(), band, sig));
-        if (band != hoverBand || sig != hoverSig)
-        {
-            hoverBand = band;
-            hoverSig = sig;
-            repaint();
-        }
-    }
-
-    void mouseExit (const juce::MouseEvent&) override
-    {
-        if (hoverBand >= 0 || hoverSig >= 0)
-        {
-            hoverBand = hoverSig = -1;
-            repaint();
-        }
-    }
-
-    void mouseDown (const juce::MouseEvent& e) override
-    {
-        bpmDrag = edgeDrag = sigDrag = -1;
-        moved = false;
-        if (owner.song == nullptr || e.x < headerWidth)
-            return;
-        const double t = timeAt (e.x);
-        if (owner.readOnly)
-        {
-            if (! e.mods.isPopupMenu())
-                owner.seekAt (e.x - headerWidth, false);
-            return;
-        }
-        const bool erase = owner.tool == ui::EditTool::erase;
-        const bool draw = owner.tool == ui::EditTool::draw || e.getNumberOfClicks() == 2;
-        if (e.y < sigHeight)
-        {
-            if (owner.analysis.beats.empty())
-            {
-                // Rejilla fija (sin tiempos): el dueño ofrece pasarla a tiempos para poder cambiar el compás
-                if (owner.onSignatureClicked) owner.onSignatureClicked (-1, e.mods.isPopupMenu(), t);
-                return;
-            }
-            const int sig = signatureAt (e.x);
-            if (e.mods.isPopupMenu())
-            {
-                if (owner.onSignatureClicked) owner.onSignatureClicked (sig, true, t);
-                return;
-            }
-            if (erase)
-            {
-                if (sig >= 0 && owner.onSignatureRemove) owner.onSignatureRemove (sig);
-                return;
-            }
-            if (sig >= 0 && ! draw)
-            {
-                sigDrag = sig;
-                previewTime = owner.analysis.beats.empty() ? t : owner.analysis.beats[(size_t) sig].seconds;
-                return;
-            }
-            if (owner.onSignatureAdd)
-                if (const int down = nearestDownbeat (t); down >= 0)
-                    owner.onSignatureAdd (down);
-            return;
-        }
-        const int band = bandAt (t);
-        if (e.mods.isPopupMenu())
-        {
-            if (band >= 0 && owner.onTempoBandClicked) owner.onTempoBandClicked (band, t);
-            return;
-        }
-        if (const int edge = edgeAt (e.x); edge > 0)
-        {
-            if (erase)
-            {
-                if (owner.onTempoRemove) owner.onTempoRemove (edge);
-                return;
-            }
-            edgeDrag = edge;
-            previewTime = owner.tempoBands[(size_t) edge].start;
-            repaint();
-            return;
-        }
-        if (draw)
-        {
-            if (owner.onTempoAdd) owner.onTempoAdd (t, roundBpm (bpmAt (e.y)));
-            return;
-        }
-        if (band >= 0 && std::abs (e.y - yOf (mainBpm (owner.tempoBands[(size_t) band]))) <= 6.0f)
-        {
-            if (erase)
-            {
-                if (band > 0 && owner.onTempoRemove) owner.onTempoRemove (band);
-                return;
-            }
-            bpmDrag = band;
-            previewBpm = mainBpm (owner.tempoBands[(size_t) band]);
-            grabBpm = previewBpm;
-            grabY = e.y;
-            repaint();
-        }
-    }
-
-    void mouseDrag (const juce::MouseEvent& e) override
-    {
-        moved = moved || e.getDistanceFromDragStart() > 3;
-        if (! moved)
-            return;
-        const double t = timeAt (e.x);
-        if (bpmDrag >= 0)
-        {
-            // Hacia arriba, más rápido; con Shift, en pasos finos
-            const double perPixel = (hi - lo) / juce::jmax (1.0f, (float) (graphBottom() - graphTop()));
-            const double raw = grabBpm + (grabY - e.y) * perPixel * (e.mods.isShiftDown() ? 0.2 : 1.0);
-            previewBpm = juce::jlimit (20.0, 400.0, e.mods.isShiftDown() ? std::round (raw * 10.0) / 10.0 : roundBpm (raw));
-            repaint();
-        }
-        else if (edgeDrag > 0)
-        {
-            const double lo2 = owner.tempoBands[(size_t) edgeDrag - 1].start + 0.25;
-            const double hi2 = owner.tempoBands[(size_t) edgeDrag].end - 0.25;
-            const int down = nearestDownbeat (t);
-            const double snapped = down >= 0 ? owner.analysis.beats[(size_t) down].seconds : t;
-            previewTime = juce::jlimit (lo2, juce::jmax (lo2, hi2), snapped);
-            repaint();
-        }
-        else if (sigDrag >= 0 && ! owner.analysis.beats.empty())
-        {
-            const int beat = owner.analysis.nearestBeat (t, 1.0e9);
-            if (beat >= 0)
-                previewTime = owner.analysis.beats[(size_t) beat].seconds;
-            repaint();
-        }
-    }
-
-    void mouseUp (const juce::MouseEvent& e) override
-    {
-        const int b = bpmDrag, edge = edgeDrag, sig = sigDrag;
-        bpmDrag = edgeDrag = sigDrag = -1;
-        repaint();
-        if (b >= 0 && moved && owner.onTempoSet)
-            owner.onTempoSet (b, previewBpm);
-        else if (edge > 0 && moved && owner.onTempoMoved)
-            owner.onTempoMoved (edge, previewTime);
-        else if (sig >= 0)
-        {
-            if (moved && owner.onSignatureMoved)
-            {
-                const int to = owner.analysis.nearestBeat (previewTime, 0.001);
-                if (to >= 0 && to != sig)
-                    owner.onSignatureMoved (sig, to);
-            }
-            else if (! moved && owner.onSignatureClicked)
-                owner.onSignatureClicked (sig, false, timeAt (e.x));
-        }
-    }
-
-private:
-    struct SigMark
-    {
-        int beat = -1;      // primer tiempo del cambio (-1: rejilla fija, sin tiempos)
-        double seconds = 0.0;
-        juce::String text;
-    };
-
-    std::vector<SigMark> signatureMarks() const
-    {
-        std::vector<SigMark> marks;
-        const auto& an = owner.analysis;
-        if (an.beats.empty())
-        {
-            if (owner.bpm > 0.0)
-                marks.push_back ({ -1, owner.clickOffset, "4/4" });   // rejilla fija del click
-            return marks;
-        }
-        for (auto& run : an.signatureRuns())
-            marks.push_back ({ run.firstBeat, an.beats[(size_t) run.firstBeat].seconds, juce::String (run.numerator) + "/" + juce::String (run.unit) });
-        return marks;
-    }
-
-    int signatureAt (int x) const
-    {
-        for (auto& m : signatureMarks())
-        {
-            const int mx = headerWidth + owner.timeToX (m.seconds);
-            if (x >= mx - 4 && x <= mx + 42)
-                return m.beat;
-        }
-        return -1;
-    }
-
-    int nearestDownbeat (double t) const
-    {
-        const auto& beats = owner.analysis.beats;
-        int best = -1;
-        for (int i = 0; i < (int) beats.size(); ++i)
-            if (beats[(size_t) i].beatInBar == 1 && (best < 0 || std::abs (beats[(size_t) i].seconds - t) < std::abs (beats[(size_t) best].seconds - t)))
-                best = i;
-        return best;
-    }
-
-    juce::MouseCursor cursorAt (juce::Point<int> p, int& band, int& sig) const
-    {
-        band = sig = -1;
-        if (owner.song == nullptr || p.x < headerWidth || owner.readOnly)
-            return juce::MouseCursor::NormalCursor;
-        const auto tool = owner.tool;
-        const bool special = tool == ui::EditTool::draw || tool == ui::EditTool::erase;
-        if (p.y < sigHeight)
-        {
-            sig = signatureAt (p.x);
-            if (special)
-                return owner.toolCursors[(size_t) tool];
-            return sig >= 0 ? juce::MouseCursor (juce::MouseCursor::LeftRightResizeCursor) : juce::MouseCursor (juce::MouseCursor::NormalCursor);
-        }
-        if (edgeAt (p.x) > 0)
-            return tool == ui::EditTool::erase ? owner.toolCursors[(size_t) tool] : juce::MouseCursor (juce::MouseCursor::LeftRightResizeCursor);
-        const int b = bandAt (timeAt (p.x));
-        if (b >= 0 && std::abs (p.y - yOf (mainBpm (owner.tempoBands[(size_t) b]))) <= 6.0f)
-        {
-            band = b;
-            return special ? owner.toolCursors[(size_t) tool] : juce::MouseCursor (juce::MouseCursor::UpDownResizeCursor);
-        }
-        return special ? owner.toolCursors[(size_t) tool] : juce::MouseCursor (juce::MouseCursor::NormalCursor);
-    }
-
-    int edgeAt (int x) const
-    {
-        for (int i = 1; i < (int) owner.tempoBands.size(); ++i)
-            if (std::abs (x - (headerWidth + owner.timeToX (owner.tempoBands[(size_t) i].start))) <= 4)
-                return i;
-        return -1;
-    }
-
-    int bandAt (double t) const
-    {
-        for (int i = (int) owner.tempoBands.size(); --i >= 0;)
-            if (t >= owner.tempoBands[(size_t) i].start)
-                return i;
-        return owner.tempoBands.empty() ? -1 : 0;
-    }
-
-    double mainBpm (const TempoBand& b) const  { return owner.tempoStretches ? b.playBpm : b.origBpm; }
-    double otherBpm (const TempoBand& b) const { return owner.tempoStretches ? b.origBpm : b.playBpm; }
-    static double roundBpm (double v)          { return std::round (v * 2.0) / 2.0; }   // de medio en medio BPM
-    double timeAt (int x) const                { return juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (x - headerWidth)); }
-    int graphTop() const                       { return sigHeight + 6; }
-    int graphBottom() const                    { return getHeight() - 6; }
-    bool dragging() const                      { return bpmDrag >= 0 || edgeDrag >= 0 || sigDrag >= 0; }
-
-    void computeRange()
-    {
-        lo = 1.0e9;
-        hi = -1.0e9;
-        for (auto& b : owner.tempoBands)
-        {
-            lo = juce::jmin (lo, juce::jmin (b.origBpm, b.playBpm));
-            hi = juce::jmax (hi, juce::jmax (b.origBpm, b.playBpm));
-        }
-        if (lo > hi)
-        {
-            lo = owner.bpm > 0.0 ? owner.bpm : 120.0;
-            hi = lo;
-        }
-        const double pad = juce::jmax (8.0, (hi - lo) * 0.3);
-        lo = juce::jmax (10.0, lo - pad);
-        hi += pad;
-    }
-
-    float yOf (double v) const
-    {
-        return (float) graphBottom() - (float) ((v - lo) / juce::jmax (1.0, hi - lo)) * (float) (graphBottom() - graphTop());
-    }
-
-    double bpmAt (int y) const
-    {
-        return lo + (double) (graphBottom() - y) / juce::jmax (1.0, (double) (graphBottom() - graphTop())) * (hi - lo);
-    }
-
-    TimelineView& owner;
-    juce::TextButton mode;
-    double lo = 100.0, hi = 140.0;
-    int bpmDrag = -1, edgeDrag = -1, sigDrag = -1, hoverBand = -1, hoverSig = -1;
-    double previewBpm = 0.0, grabBpm = 0.0, previewTime = 0.0;
-    int grabY = 0;
-    bool moved = false;
 };
 
 //==============================================================================
@@ -2124,7 +1722,19 @@ TimelineView::TimelineView()
         toolCursors[(size_t) i] = juce::MouseCursor (img, hot.x, hot.y);
     }
     addAndMakeVisible (*ruler);
-    tempoLane = std::make_unique<TempoLane> (*this);
+    tempoLane = std::make_unique<TempoTrackView> (headerWidth);
+    tempoLane->onSeek = [this] (double t) { if (onSeek) onSeek (t); };
+    tempoLane->onTempoSet = [this] (int band, double value) { if (onTempoSet) onTempoSet (band, value); };
+    tempoLane->onTempoMoved = [this] (int band, double t) { if (onTempoMoved) onTempoMoved (band, t); };
+    tempoLane->onTempoAdd = [this] (double t, double value) { if (onTempoAdd) onTempoAdd (t, value); };
+    tempoLane->onTempoRemove = [this] (int band) { if (onTempoRemove) onTempoRemove (band); };
+    tempoLane->onTempoMenu = [this] (int band, double t) { if (onTempoBandClicked) onTempoBandClicked (band, t); };
+    tempoLane->onSignatureClicked = [this] (int beat, bool popup, double t) { if (onSignatureClicked) onSignatureClicked (beat, popup, t); };
+    tempoLane->onSignatureAdd = [this] (int beat) { if (onSignatureAdd) onSignatureAdd (beat); };
+    tempoLane->onSignatureMoved = [this] (int from, int to) { if (onSignatureMoved) onSignatureMoved (from, to); };
+    tempoLane->onSignatureRemove = [this] (int beat) { if (onSignatureRemove) onSignatureRemove (beat); };
+    tempoLane->onModeChanged = [this] (bool stretches) { if (onTempoModeChanged) onTempoModeChanged (stretches); };
+    tempoLane->onOpenEditor = [this] { if (onOpenTempoEditor) onOpenTempoEditor(); };
     addAndMakeVisible (*tempoLane);
     tempoToggle.setButtonText (tr ("Pista de tempo"));
     tempoToggle.setClickingTogglesState (true);
@@ -2188,6 +1798,7 @@ void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr)
     position = 0.0;
     loopStart = loopEnd = 0.0;
     gesture = Gesture::none;   // lo elegido y el rango se conservan en un render nuevo (MainComponent los suelta al cambiar de canción)
+    tempoLane->setLength (lengthSeconds());
     resized();
     zoomToFit();
 }
@@ -2202,13 +1813,13 @@ void TimelineView::setTempoTrackVisible (bool visible)
 void TimelineView::setTempoStretches (bool stretches)
 {
     tempoStretches = stretches;
-    tempoLane->refreshMode();
+    tempoLane->setStretches (stretches);
 }
 
 void TimelineView::setReadOnly (bool ro)
 {
     readOnly = ro;
-    tempoLane->refreshMode();
+    tempoLane->setReadOnly (ro);
     if (ro)
         setTool (ui::EditTool::select);
     for (auto* lane : lanes)
@@ -2227,11 +1838,11 @@ void TimelineView::setTool (ui::EditTool t)
         range = {};
     overlay->repaint();
     if (tempoLane != nullptr)
-        tempoLane->repaint();
+        tempoLane->setTool (tool);
     // El carril bajo el mouse cambia de cursor (y de guía) al instante, sin esperar a que se mueva
     for (auto* lane : lanes)
         if (lane->isMouseOver (false))
-            lane->hover (lane->getMouseXYRelative().x, juce::ModifierKeys::getCurrentModifiers());
+            lane->hover (lane->getMouseXYRelative().x, juce::ModifierKeys::getCurrentModifiers(), lane->getMouseXYRelative().y);
         else
             lane->setMouseCursor (juce::MouseCursor::NormalCursor);
 }
@@ -2298,6 +1909,24 @@ int TimelineView::beatNear (double t, int pixels) const
     return analysis.nearestBeat (t, pixels / juce::jmax (1.0, pixelsPerSecond));
 }
 
+int TimelineView::handleAt (const std::vector<ClipView>& list, int cx, int y, int& clipIndex) const
+{
+    clipIndex = -1;
+    if (y > 14 || y < 0)
+        return 0;
+    for (int i = (int) list.size(); --i >= 0;)
+    {
+        const auto& c = list[(size_t) i];
+        const int a = timeToX (c.start), b = timeToX (c.end);
+        if (cx < a - 6 || cx > b + 6 || b - a < 24)
+            continue;
+        if (std::abs (cx - timeToX (c.start + c.fadeIn) - 3) <= 6)  { clipIndex = i; return 1; }
+        if (std::abs (cx - timeToX (c.end - c.fadeOut) + 3) <= 6)   { clipIndex = i; return 2; }
+        if (std::abs (cx - (a + b) / 2) <= 10)                      { clipIndex = i; return 3; }
+    }
+    return 0;
+}
+
 int TimelineView::edgeNear (const std::vector<ClipView>& list, int cx, bool& startEdge) const
 {
     int best = -1, bestDistance = 6;
@@ -2310,7 +1939,7 @@ int TimelineView::edgeNear (const std::vector<ClipView>& list, int cx, bool& sta
     return best;
 }
 
-void TimelineView::toolMouseDown (int lane, int cx, juce::ModifierKeys mods)
+void TimelineView::toolMouseDown (int lane, int cx, juce::ModifierKeys mods, int yInLane)
 {
     const double t = juce::jlimit (0.0, lengthSeconds(), xToTime (cx));
     gesture = Gesture::none;
@@ -2338,6 +1967,26 @@ void TimelineView::toolMouseDown (int lane, int cx, juce::ModifierKeys mods)
                 return;
             }
             const auto list = clipList (lane, gestureAll);
+            // Asas arriba en el tramo: fundidos y ganancia
+            int handleIndex = -1;
+            if (const int h = handleAt (list, cx, yInLane, handleIndex); h > 0)
+            {
+                handleClip = list[(size_t) handleIndex];
+                trimTarget = { gestureAll ? -1 : lane, handleClip.start, handleClip.end };
+                if (h == 3)
+                {
+                    gesture = Gesture::gain;
+                    previewValue = handleClip.gainDb;
+                    gainGrabY = (juce::isPositiveAndBelow (lane, lanes.size()) ? getLocalArea (lanes[lane], lanes[lane]->getLocalBounds()).getY() : 0) + yInLane;
+                }
+                else
+                {
+                    gesture = Gesture::fade;
+                    fadeIsIn = h == 1;
+                    previewValue = fadeIsIn ? handleClip.fadeIn : handleClip.fadeOut;
+                }
+                return;
+            }
             bool startEdge = true;
             if (const int edge = edgeNear (list, cx, startEdge); edge >= 0)
             {
@@ -2447,6 +2096,22 @@ void TimelineView::toolMouseDrag (int lane, juce::Point<int> inView, int dragDis
             setRange (r);
             return;
         }
+        case Gesture::fade:
+        {
+            const double length = handleClip.end - handleClip.start;
+            previewValue = fadeIsIn ? juce::jlimit (0.0, length - handleClip.fadeOut, t - handleClip.start)
+                                    : juce::jlimit (0.0, length - handleClip.fadeIn, handleClip.end - t);
+            overlay->repaint();
+            return;
+        }
+        case Gesture::gain:
+        {
+            const double raw = handleClip.gainDb + (gainGrabY - inView.y) * (juce::ModifierKeys::getCurrentModifiers().isShiftDown() ? 0.02 : 0.1);
+            previewValue = juce::jlimit (-24.0, 12.0, std::round (raw * 10.0) / 10.0);
+            gestureMoved = gestureMoved || std::abs (gainGrabY - inView.y) > 2;
+            overlay->repaint();
+            return;
+        }
         case Gesture::none:
         case Gesture::play:
             return;
@@ -2497,13 +2162,23 @@ void TimelineView::toolMouseUp (int cx)
         case Gesture::play:
             if (onPlayToolUp) onPlayToolUp();
             return;
+        case Gesture::fade:
+            overlay->repaint();
+            if (gestureMoved && onClipFade)
+                onClipFade (trimTarget, fadeIsIn, previewValue);
+            return;
+        case Gesture::gain:
+            overlay->repaint();
+            if (gestureMoved && onClipGain)
+                onClipGain (trimTarget, previewValue);
+            return;
         case Gesture::seek:
         case Gesture::none:
             return;
     }
 }
 
-juce::MouseCursor TimelineView::toolHover (int lane, int cx, juce::ModifierKeys mods)
+juce::MouseCursor TimelineView::toolHover (int lane, int cx, juce::ModifierKeys mods, int yInLane)
 {
     const double t = juce::jlimit (0.0, lengthSeconds(), xToTime (cx));
     const bool cutting = tool == ui::EditTool::cut || (tool == ui::EditTool::select && mods.isAltDown());
@@ -2521,6 +2196,9 @@ juce::MouseCursor TimelineView::toolHover (int lane, int cx, juce::ModifierKeys 
         return toolCursors[(size_t) ui::EditTool::cut];
     if (tool == ui::EditTool::select)
     {
+        int handleIndex = -1;
+        if (const int h = handleAt (clipList (lane, mods.isShiftDown()), cx, yInLane, handleIndex); h > 0)
+            return h == 3 ? juce::MouseCursor (juce::MouseCursor::UpDownResizeCursor) : juce::MouseCursor (juce::MouseCursor::LeftRightResizeCursor);
         bool startEdge = true;
         return edgeNear (clipList (lane, mods.isShiftDown()), cx, startEdge) >= 0 ? juce::MouseCursor (juce::MouseCursor::LeftRightResizeCursor)
                                                                                : juce::MouseCursor (juce::MouseCursor::NormalCursor);
@@ -2592,7 +2270,7 @@ void TimelineView::setMarkers (const std::vector<SongMarker>& m, double newBpm, 
     bpm = newBpm;
     clickOffset = newOffset;
     ruler->repaint();
-    tempoLane->repaint();
+    tempoLane->setFixedGrid (bpm, clickOffset);
     if (gridChanged && analysis.beats.empty())
         for (auto* lane : midiLanes)
             lane->repaintContent();   // rejilla fija de fondo
@@ -2602,7 +2280,7 @@ void TimelineView::setAnalysis (const Analysis& a)
 {
     analysis = a;
     ruler->repaint();
-    tempoLane->repaint();
+    tempoLane->setAnalysis (a);
     for (auto* lane : midiLanes)
         lane->repaintContent();   // tiempos detectados de fondo
 }
@@ -2673,7 +2351,7 @@ void TimelineView::setTempoBands (const std::vector<TempoBand>& bands)
 {
     tempoBands = bands;
     ruler->repaint();
-    tempoLane->repaint();
+    tempoLane->setBands (bands);
 }
 
 void TimelineView::refreshWaveforms()
@@ -2801,7 +2479,7 @@ void TimelineView::setView (double start, double pps)
     pixelsPerSecond = pps;
     invalidateLanes();
     ruler->repaint();
-    tempoLane->repaint();
+    tempoLane->setView (viewStart, pixelsPerSecond);
     overlay->repaint();
     updateScrollBar();
 }
@@ -2836,10 +2514,49 @@ void TimelineView::seekAt (int contentX, bool scrubbing)
         onSeek (t);
 }
 
+void TimelineView::laneResizeBegin (int lane, int yInView)
+{
+    if (! juce::isPositiveAndBelow (lane, lanes.size()))
+        return;
+    resizingLane = lane;
+    resizeGrabY = yInView;
+    resizeStartH = lanes[lane]->getHeight();
+}
+
+void TimelineView::laneResizeDrag (int yInView)
+{
+    if (! juce::isPositiveAndBelow (resizingLane, lanes.size()))
+        return;
+    laneHeights[lanes[resizingLane]->getTrack().name] = juce::jlimit (minLaneHeight, 400, resizeStartH + (yInView - resizeGrabY));
+    layoutLanes();
+    overlay->repaint();
+}
+
+void TimelineView::laneResizeEnd()
+{
+    resizingLane = -1;
+}
+
+void TimelineView::laneResizeReset (int lane)
+{
+    if (juce::isPositiveAndBelow (lane, lanes.size()))
+        laneHeights.erase (lanes[lane]->getTrack().name);
+    layoutLanes();
+    overlay->repaint();
+}
+
 void TimelineView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
     if (song == nullptr)
         return;
+    if (e.mods.isAltDown())
+    {
+        // Alto de la onda (zoom vertical), para ver detalles de pistas suaves
+        const float factor = std::pow (1.25f, juce::jlimit (-1.0f, 1.0f, (std::abs (w.deltaY) > 0.0f ? w.deltaY : w.deltaX) * 6.0f));
+        waveZoom = juce::jlimit (1.0f, 16.0f, waveZoom * factor);
+        invalidateLanes();
+        return;
+    }
     if (e.mods.isCtrlDown() || e.mods.isCommandDown())
     {
         const int cx = juce::jmax (0, e.x - headerWidth);
@@ -2867,9 +2584,12 @@ void TimelineView::resized()
     ruler->setBounds (r.removeFromTop (rulerHeight).withWidth (laneWidth));
     tempoToggle.setBounds (6, rulerHeight - 24, headerWidth - 12, 20);
     tempoToggle.toFront (false);
-    tempoLane->setVisible (tempoTrackVisible && song != nullptr);
-    if (tempoTrackVisible && song != nullptr)
-        tempoLane->setBounds (r.removeFromTop (tempoLaneHeight).withWidth (laneWidth));
+    // Desplegada si hay lugar para ella y al menos dos carriles; si no, plegada en una fila (sin cambiar el ajuste)
+    const bool expanded = tempoTrackVisible && r.getHeight() - scrollHeight >= tempoLaneHeight + 2 * minLaneHeight;
+    tempoLane->setVisible (song != nullptr);
+    tempoLane->setCompact (! expanded);
+    if (song != nullptr)
+        tempoLane->setBounds (r.removeFromTop (expanded ? tempoLaneHeight : TempoTrackView::compactHeight).withWidth (laneWidth));
     auto scroll = r.removeFromBottom (scrollHeight);
     scrollBar.setBounds (scroll.withTrimmedLeft (headerWidth).withWidth (contentWidth()));
     emptyLabel.setBounds (r);
@@ -2898,7 +2618,17 @@ void TimelineView::layoutLanes()
         if (showMidi)
             midiHeight += lane->preferredHeight();
     }
-    const int laneH = n > 0 ? juce::jlimit (minLaneHeight, maxLaneHeight, (laneView.getHeight() - midiHeight) / n) : 0;
+    // Los carriles con alto propio ocupan el suyo; los demás se reparten lo que queda
+    int fixedHeight = 0, autoLanes = 0;
+    for (auto* lane : lanes)
+    {
+        const auto it = laneHeights.find (lane->getTrack().name);
+        if (it != laneHeights.end() && it->second > 0)
+            fixedHeight += it->second;
+        else
+            ++autoLanes;
+    }
+    const int laneH = autoLanes > 0 ? juce::jlimit (minLaneHeight, maxLaneHeight, (laneView.getHeight() - midiHeight - fixedHeight) / autoLanes) : 0;
 
     int y = 0;
     auto placeMidiAfter = [&] (int track)
@@ -2917,8 +2647,10 @@ void TimelineView::layoutLanes()
     };
     for (int i = 0; i < n; ++i)
     {
-        lanes[i]->setBounds (0, y, laneWidth, laneH);
-        y += laneH;
+        const auto it = laneHeights.find (lanes[i]->getTrack().name);
+        const int h = it != laneHeights.end() && it->second > 0 ? it->second : laneH;
+        lanes[i]->setBounds (0, y, laneWidth, h);
+        y += h;
         placeMidiAfter (i);
     }
     placeMidiAfter (-1);

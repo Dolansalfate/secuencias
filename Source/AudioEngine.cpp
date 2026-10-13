@@ -6,6 +6,41 @@
 
 static constexpr int maxChunk = 2048;
 
+namespace
+{
+    // Balance de un canal estéreo: al centro los dos lados a 1; hacia un lado, el otro baja con un coseno. Rampa lineal
+    // a lo largo del trozo desde el balance anterior (sin saltos al mover la perilla).
+    struct PanRamp
+    {
+        float l = 1.0f, r = 1.0f, dl = 0.0f, dr = 0.0f;
+
+        static void gains (float pan, float& gl, float& gr)
+        {
+            gl = pan > 0.0f ? std::cos (pan * juce::MathConstants<float>::halfPi) : 1.0f;
+            gr = pan < 0.0f ? std::cos (-pan * juce::MathConstants<float>::halfPi) : 1.0f;
+        }
+
+        PanRamp (LoadedTrack& t, int n)
+        {
+            const float target = juce::jlimit (-1.0f, 1.0f, t.pan.load());
+            float l1 = 1.0f, r1 = 1.0f;
+            gains (t.smoothedPan, l, r);
+            gains (target, l1, r1);
+            dl = (l1 - l) / (float) juce::jmax (1, n);
+            dr = (r1 - r) / (float) juce::jmax (1, n);
+            t.smoothedPan = target;
+        }
+
+        inline void apply (float& left, float& right)
+        {
+            l += dl;
+            r += dr;
+            left *= l;
+            right *= r;
+        }
+    };
+}
+
 //==============================================================================
 WaveformCache WaveformCache::build (const juce::AudioBuffer<float>& b)
 {
@@ -130,6 +165,8 @@ void AudioEngine::applyStemMix (LoadedTrack& track, const StemInfo& stem)
     track.muted = stem.muted;
     track.solo = false;
     track.outputPair = juce::jmax (0, stem.outputPair);
+    track.pan = juce::jlimit (-1.0f, 1.0f, stem.pan);
+    track.smoothedPan = track.pan.load();
 }
 
 void AudioEngine::setInstruments (std::shared_ptr<InstrumentSet> set)
@@ -401,6 +438,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     numInputs = device->getActiveInputChannels().countNumberOfSetBits();
     inputLatency = device->getInputLatencyInSamples();
     outputLatency = device->getOutputLatencyInSamples();
+    masterLoudness.prepare (sr);   // antes de que corra el callback
 
     const juce::SpinLock::ScopedLockType sl (songLock);
     if (song != nullptr && std::abs (song->sampleRate - sr) > 1.0)
@@ -607,6 +645,7 @@ void AudioEngine::applyMasterAndMeter (float* const* outputs, int numOuts, int n
         }
     }
     smoothedMaster = target;
+    masterLoudness.process (numOuts > 0 ? outputs[0] : nullptr, numOuts > 1 ? outputs[1] : nullptr, numSamples);
 }
 
 void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts, int offset, int n)
@@ -741,6 +780,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             && ! curve->trackGains[(size_t) t->stemIndex].empty())
             trackCurve = &curve->trackGains[(size_t) t->stemIndex];
         float tl = t->levelSmooth;
+        PanRamp pan (*t, n);
 
         for (int i = 0; i < n; ++i)
         {
@@ -770,6 +810,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             }
             sl *= e;
             sr *= e;
+            pan.apply (sl, sr);
             if (outL == outR)
                 outL[offset + i] += 0.5f * (sl + sr);
             else
@@ -993,6 +1034,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;
             if (outL != nullptr && outR != nullptr && (g > 0.0f || target > 0.0f))
             {
+                PanRamp pan (c, n);
                 for (int i = 0; i < n; ++i)
                 {
                     g += gStep;
@@ -1004,6 +1046,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                         sl += auditionL[(size_t) i] * a;
                         sr2 += auditionR[(size_t) i] * a;
                     }
+                    pan.apply (sl, sr2);
                     if (outL == outR)
                         outL[offset + i] += 0.5f * (sl + sr2);
                     else
@@ -1080,6 +1123,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             int hold = lane.auditionHold;
             if (outL != nullptr && outR != nullptr && (g > 0.0f || target > 0.0f))
             {
+                PanRamp pan (c, n);
                 for (int i = 0; i < n; ++i)
                 {
                     g += gStep;
@@ -1091,7 +1135,8 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                     else
                         gate = juce::jmax (0.0f, gate - gateDown);
                     const float e = juce::jmax (envelope[(size_t) i], gate * (audFrom + audStep * (float) (i + 1))) * g;
-                    const float sl = srcL[i] * e, sr2 = srcR[i] * e;
+                    float sl = srcL[i] * e, sr2 = srcR[i] * e;
+                    pan.apply (sl, sr2);
                     if (outL == outR)
                         outL[offset + i] += 0.5f * (sl + sr2);
                     else

@@ -141,6 +141,8 @@ std::shared_ptr<InstrumentLane> InstrumentRack::makeLane (Slot& s, std::unique_p
     lane->control.smoothedGain = lane->control.gain.load();
     lane->control.muted = s.muted;
     lane->control.outputPair = s.outputPair;
+    lane->control.pan = s.pan;
+    lane->control.smoothedPan = s.pan;
 
     const double sr = engine.getSampleRate();
     plugin->setNonRealtime (false);
@@ -277,6 +279,7 @@ void InstrumentRack::pullMixFromLanes()
             s.gainDb = g <= 0.0f ? -60.0f : juce::Decibels::gainToDecibels (g, -60.0f);
             s.muted = s.lane->control.muted.load();
             s.outputPair = s.lane->control.outputPair.load();
+            s.pan = s.lane->control.pan.load();
         }
 }
 
@@ -293,6 +296,8 @@ void InstrumentRack::save()
         e->setAttribute ("gainDb", (double) s.gainDb);
         e->setAttribute ("muted", s.muted);
         e->setAttribute ("outputPair", s.outputPair);
+        if (std::abs (s.pan) > 1.0e-4f)
+            e->setAttribute ("pan", (double) s.pan);
         if (s.lane != nullptr && s.lane->plugin != nullptr)
         {
             juce::MemoryBlock state;
@@ -331,6 +336,7 @@ void InstrumentRack::restore()
         s.gainDb = (float) e->getDoubleAttribute ("gainDb", 0.0);
         s.muted = e->getBoolAttribute ("muted", false);
         s.outputPair = juce::jmax (0, e->getIntAttribute ("outputPair", 0));
+        s.pan = juce::jlimit (-1.0f, 1.0f, (float) e->getDoubleAttribute ("pan", 0.0));
         s.description.loadFromXml (*d);
         s.savedState.fromBase64Encoding (e->getStringAttribute ("estado"));
         nextId = juce::jmax (nextId, s.id + 1);

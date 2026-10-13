@@ -4,6 +4,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Library.h"
 #include "Triggers.h"
+#include "Loudness.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -33,9 +34,11 @@ struct LoadedTrack
     std::atomic<bool> muted { false }, solo { false };
     std::atomic<bool> replaced { false };     // su trigger la reemplaza: no suena (aparte del mute del usuario)
     std::atomic<int> outputPair { 0 };
+    std::atomic<float> pan { 0.0f };          // balance: -1 izquierda .. 1 derecha
     // Medidores post-fader: pico máximo desde la última lectura de la UI (exchange (0)) y RMS del último bloque
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f }, rmsL { 0.0f }, rmsR { 0.0f };
     float smoothedGain = 1.0f;                // solo hilo de audio
+    float smoothedPan = 0.0f;                 // solo hilo de audio
     float levelSmooth = 1.0f;                 // ganancia de nivelado por pista suavizada (solo hilo de audio)
 };
 
@@ -238,6 +241,9 @@ public:
     float takeOutputPeak (int channel);         // pico desde la última lectura; 0 si el canal no existe
     float takeClickPeak()                       { return clickPeak.exchange (0.0f); }   // pico del click generado desde la última lectura
     float getOutputRms (int channel) const;
+    // Sonoridad de las salidas 1-2 (después del fader maestro): momentánea (400 ms) y de corto plazo (3 s), en LUFS
+    float getMomentaryLufs() const  { return masterLoudness.momentary(); }
+    float getShortTermLufs() const  { return masterLoudness.shortTerm(); }
 
     double getSampleRate() const    { return sampleRate.load(); }
     int getNumOutputChannels() const { return numOutputs.load(); }
@@ -315,6 +321,7 @@ private:
     float smoothedMaster = 1.0f;             // solo hilo de audio
     std::atomic<float> outputPeak[maxMeteredOutputs] {};
     std::atomic<float> outputRms[maxMeteredOutputs] {};
+    loudness::LiveLoudness masterLoudness;
 
     juce::CriticalSection errorLock;
     juce::String deviceError;

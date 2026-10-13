@@ -25,10 +25,16 @@ struct SongMarker   // "Marker" a secas choca con AIFF.h de macOS (CoreServices)
 struct TempoRegion
 {
     static constexpr int followSong = -100;   // transpose: la sección sigue el tono de la canción
+    // Transición hacia la sección siguiente (como las rampas de la pista de tempo de Cubase): salto (el tempo cambia
+    // de golpe en el inicio de la siguiente) o una curva desde este tempo hasta el de la siguiente a lo largo de la
+    // sección (accelerando o ritardando), que el audio sigue
+    enum Curve { jump = 0, linear = 1, slowStart = 2, fastStart = 3, sCurve = 4 };
     double start = 0.0;      // segundos del audio original
     double origBpm = 120.0;  // tempo detectado (o el BPM del click si no hay análisis)
     double playBpm = 0.0;    // tempo de reproducción (0 = el de la canción)
     int transpose = followSong;   // semitonos propios de la sección, o followSong
+    int curve = jump;        // transición del tempo de reproducción (estira el audio: accelerando o ritardando al tocar)
+    int gridCurve = jump;    // transición del tempo de la grabación (el audio ya acelera o frena: la rejilla la sigue)
 };
 
 // Tramo del audio original colocado en la línea de tiempo de la canción (arreglo, fase 4)
@@ -38,15 +44,22 @@ struct Clip
     double position = 0.0;                 // dónde empieza en la línea de tiempo de la canción
     bool muted = false;                    // silenciado con la herramienta Silenciar (no suena, se ve gris)
     juce::uint32 colour = 0;               // color propio (herramienta Color); 0 = el de la pista
+    double fadeIn = 0.0, fadeOut = 0.0;    // fundidos del tramo en segundos (asas de la herramienta Objeto)
+    float gainDb = 0.0f;                   // ganancia del tramo (asa del centro)
     double length() const { return srcEnd - srcStart; }
     double end() const    { return position + length(); }
-    // Otro pedazo del mismo tramo (conserva el silencio y el color): al partir, copiar o pegar
+    // Otro pedazo del mismo tramo (conserva el silencio, el color y la ganancia; el fundido de entrada solo si empieza
+    // donde el tramo, el de salida solo si termina donde él): al partir, copiar o pegar
     Clip part (double fromSrc, double toSrc, double at) const
     {
         Clip c = *this;
         c.srcStart = fromSrc;
         c.srcEnd = toSrc;
         c.position = at;
+        if (fromSrc > srcStart + 1.0e-6) c.fadeIn = 0.0;
+        if (toSrc < srcEnd - 1.0e-6)     c.fadeOut = 0.0;
+        c.fadeIn = juce::jmin (c.fadeIn, c.length());
+        c.fadeOut = juce::jmin (c.fadeOut, c.length() - c.fadeIn);
         return c;
     }
 };
@@ -80,6 +93,7 @@ struct TriggerSettings
     float gainDb = 0.0f;         // canal del sampler en el mezclador
     bool muted = false;
     int outputPair = 0;
+    float pan = 0.0f;            // -1 izquierda .. 1 derecha
 };
 
 // Pista MIDI: los golpes de un stem (detectados por el trigger y congelados) como notas editables, para
@@ -94,6 +108,7 @@ struct MidiPad
     float gainDb = 0.0f;        // canal del mezclador (los bancos; un VST suena por el canal del instrumento)
     bool muted = false;
     int outputPair = 0;
+    float pan = 0.0f;
 };
 
 struct MidiHit
@@ -122,6 +137,7 @@ struct StemInfo
     float gainDb = 0.0f;
     bool muted = false;
     int outputPair = 0;      // 0 = salidas 1-2, 1 = 3-4, ...
+    float pan = 0.0f;        // balance: -1 izquierda .. 1 derecha
     bool songTime = false;   // grabada sobre la línea de tiempo de la canción: no pasa por el arreglo (clips)
     TriggerSettings trigger;
 };

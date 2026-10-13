@@ -11,10 +11,19 @@ El mismo código sigue compilando en macOS.
   con compases, tiempos y marcadores, cabezal y loop. Clic para saltar, Ctrl+rueda para hacer
   zoom, rueda para desplazarte, "Ajustar" para ver la canción entera. Los marcadores se
   arrastran en la regla.
-- **Mezclador** por canción: fader en dB, mute, solo, medidor estéreo con pico, RMS y clip,
-  fader maestro y **salida por pista** (por ejemplo, click y guía a la salida 3-4 para in-ears,
-  el resto a 1-2 para el PA).
-- **Modo reproducción** (botón "Reproducción"; "Volver a editar" para salir): para tocar. Se ve igual
+- **Mezclador** por canción: fader en dB (doble clic = 0 dB), mute, solo, **balance** (la perilla
+  junto a M y S; doble clic = al centro), medidor estéreo con pico, RMS, clip y su escala en dB, fader
+  maestro con la **sonoridad en vivo** (M = momentánea y S = de corto plazo, en LUFS) y **salida por
+  pista** (por ejemplo, click y guía a la salida 3-4 para in-ears, el resto a 1-2 para el PA). El click
+  tiene su propio canal (encendido, volumen y salida).
+- **Cómo está ordenada la ventana**: arriba a la izquierda lo de editar (Importar stems, Separar canción,
+  Armar mix); arriba a la derecha **Editar | Show** (el modo), Instrumentos, Ajustes IA y Audio. Bajo el
+  setlist, **"Ajustes de la canción"** (el inspector: BPM e inicio del click, tempo, tono, analizar y
+  nivelar; se puede plegar). Abajo, la **barra de estado**: la herramienta y el ajuste, los mensajes, el
+  progreso de la separación y **"? Atajos"** (o la tecla ?), con todos los atajos. El transporte usa
+  íconos; en la vista grande se agranda y lleva texto. Funciona desde 1000 x 640 (en pantallas bajas el
+  mezclador y la pista de tempo se achican).
+- **Show** (el botón "Show" arriba a la derecha; "Editar" vuelve): para tocar. Se ve igual
   que la vista de pistas, pero no se puede editar nada: solo el volumen (fader, mute, solo, maestro y
   click) y la salida de cada pista. A la izquierda está el **show**: las canciones que vas a tocar, en
   orden, con su duración y el **total de música del show**; abajo, "Todas las canciones" (doble clic o
@@ -32,9 +41,10 @@ El mismo código sigue compilando en macOS.
   `sudo apt install ffmpeg`), el click (sin click, mezclado o en un archivo aparte), si quieres además
   cada pista por separado (en una carpeta, sumando exactamente la mezcla) y el nivel (como suena, o
   llevado al objetivo de LUFS con limitador). Tarda unos segundos; mientras tanto la app no suena.
-- **Modo en vivo** (botón "En vivo" o F11): esconde la vista de arreglo y agranda el título,
-  la sección y el tiempo para leerlos desde lejos.
-- **Guía de escenario** (botón "Pantalla" o F12): una ventana aparte para poner en una segunda
+- **Vista grande** (F11, o el botón "Vista grande" en el Show): esconde la vista de arreglo y lo
+  de editar, y agranda el título, la sección, el acorde, el tiempo y el transporte para leerlos y
+  tocarlos desde lejos. "Vista normal" (o F11) vuelve.
+- **Guía de escenario** (botón "Pantalla" junto al transporte, o F12): una ventana aparte para poner en una segunda
   pantalla, de cara a los músicos: el acorde actual y el siguiente grandes al centro, el compás
   y el tiempo en que va (con puntos que marcan el pulso), el tempo, la tonalidad, la sección
   actual y la siguiente, y el tiempo. Doble clic sobre ella (o F11) la pone a pantalla
@@ -154,18 +164,19 @@ El mismo código sigue compilando en macOS.
   escenario aparece como un letrero amarillo grande cuando llega ese momento, y unos segundos
   antes se anuncia como "próxima nota".
 - **Marcadores** (intro, verso, coro…) para saltar en vivo, y **loop de sección**.
-- **Click generado** con BPM, inicio, volumen y salida propia; en el mezclador aparece como un
+- **Click generado** con BPM e inicio (en "Ajustes de la canción"); en el mezclador aparece como un
   canal más ("CLICK", con fader, medidor, encendido y salida), así puedes mandarlo a los
   in-ears por otro par de salidas. Tras analizar la canción, el click sigue los tiempos
   detectados, aunque el tempo varíe. Las salidas disponibles son las del dispositivo elegido
   en "Audio": con una interfaz multicanal aparecen los pares 3-4, 5-6, etc.
 - **Tempo y tono**: cambia el BPM sin que cambie la afinación, y transpone en semitonos si lo
-  quieres. Tras analizar, la regla muestra una fila con las **secciones de tempo** detectadas
-  (por ejemplo, cada canción de un mix con su BPM); con un clic en una sección puedes darle su
+  quieres. Tras analizar, la pista de tempo muestra las **secciones de tempo** detectadas
+  (por ejemplo, cada canción de un mix con su BPM); con clic derecho en una sección puedes darle su
   propio tempo, igualar todas las secciones a un mismo BPM, dividirla o unirla, o corregir el
   tempo detectado, o darle a esa sección su propio tono en semitonos ("Tono de la sección...",
   por ejemplo para subir medio tono solo un tema del mix). El campo "Tempo" es el BPM al que
-  suenan todas las secciones y "Tono" el de toda la canción, salvo las secciones con tono propio. El cambio se
+  suenan todas las secciones y "Tono" el de toda la canción, salvo las secciones con tono propio (los dos
+  están en "Ajustes de la canción"). El cambio se
   prepara en segundo plano (unos 40 s para 6 pistas de 7 minutos) y entra sin cortar el audio.
 - **Nivelar volumen**: mide la sonoridad real (LUFS, como Spotify) de cada pista y de la
   mezcla en cada tramo entre marcadores. Primero empareja cada pista consigo misma a lo largo
@@ -191,8 +202,8 @@ El mismo código sigue compilando en macOS.
   tiempo de compás, definir compases de 2 a 7 tiempos desde ahí, hacer un compás corto de 1 a
   3 tiempos solo en ese punto (con su "1" acentuado en el click), o quitar e insertar tiempos:
   así un enganche entre canciones de un mix puede tener un compás más corto y la siguiente
-  entra en su "1". El click sigue esos cambios. En la banda de tempo de cada sección,
-  "Click de esta sección" corrige un click que suena en corcheas o en blancas (tiempos a la
+  entra en su "1". El click sigue esos cambios. En el menú de cada sección (clic derecho en la pista de
+  tempo), "Click de esta sección" corrige un click que suena en corcheas o en blancas (tiempos a la
   mitad o al doble), pone una rejilla fija al tempo de la sección (un cambio de tempo manual),
   reparte tiempos parejos que caben justos hasta el siguiente compás (para las transiciones de
   un mix donde el análisis se enreda) o define compases de N tiempos. Clic derecho en la fila de acordes para cambiar, quitar,
@@ -215,6 +226,15 @@ El mismo código sigue compilando en macOS.
   - **Warp** (W): arrastra una línea de la rejilla (el click) hasta el golpe en el audio; los tiempos vecinos se
     acomodan. El audio no cambia: cambia dónde cae el click.
   - **Color** (K): elige el color del tramo.
+  - **Fundidos y volumen de un tramo**: arriba de cada tramo hay tres asas pequeñas. La de la izquierda,
+    arrastrada hacia la derecha, hace un fundido de entrada; la de la derecha, uno de salida; la del centro,
+    arrastrada hacia arriba o abajo, sube o baja el volumen de ese tramo (de -24 a +12 dB).
+  - **Alto de las pistas**: arrastra el borde de abajo de la cabecera de una pista para hacerla más alta o
+    más baja (doble clic vuelve al alto normal); **Alt + rueda** agranda la forma de onda.
+  - **Ajuste** (botón junto a las herramientas, o la tecla J): encendido, cortes, recortes y arrastres caen
+    en la **rejilla** (el tiempo más cercano) o en la **transiente** (el golpe más cercano), según el
+    selector de al lado; apagado, caen donde haces clic.
+  - **Deshacer y rehacer**: Ctrl+Z deshace; Ctrl+Shift+Z (o Ctrl+Y) rehace.
 - **Pista de compás y pista de tempo** (sobre las pistas; el botón "Pista de tempo" de la regla las muestra u
   oculta). Vienen con los tempos y compases de cada canción o mix, y aquí se editan:
   - **Compás**: clic en un cambio (por ejemplo "4/4") para cambiarlo: tiempos por compás (hasta 32, como 17/4),
@@ -226,6 +246,14 @@ El mismo código sigue compilando en macOS.
     **"Estira el audio"** (la sección suena más rápida o más lenta) o **"Solo el click"** (la música queda igual y
     el click y los compases se acomodan a ese tempo). La línea tenue de fondo es el tempo real de la grabación
     tiempo a tiempo.
+  - **Accelerando y ritardando**: una sección puede llegar a la siguiente de a poco en vez de saltar de tempo.
+    Clic derecho en la sección > "Transición hacia la siguiente sección" y eliges la curva: rampa lineal,
+    lenta al inicio, rápida al inicio o en S (o "Salto", como antes). Con "Estira el audio" **las pistas siguen
+    la curva**: la canción va acelerando o frenando. Con "Solo el click", la grabación ya acelera o frena por sí
+    sola y el click la sigue con esa curva. Ejemplo: un mix que pasa de 120 a 132 BPM en 4 compases.
+  - **Editor de tempo** (Ctrl+T, o el botón "Editor" de la pista de tempo): la misma pista en una ventana
+    grande aparte, cómoda para trabajar el tempo con calma, con su propio zoom, el tempo de la sección escrito,
+    la transición, "+ Cambio en el cabezal" y "Quitar el cambio". En el Show solo se mira.
 - **Cortar y mover el audio** sin tocar la grilla: clic derecho sobre un carril para cortar
   todas las pistas en ese punto (así no se desalinean), desplazar el
   tramo en milisegundos, alinear su inicio al tiempo más cercano, unir, eliminar (dejando
@@ -239,15 +267,15 @@ El mismo código sigue compilando en macOS.
   lo mueve solo en ella (aunque no tenga cortes: se corre entera). Una pista con su propio arreglo
   tiene una franja de color en su cabecera y sus cortes se ven solo en su carril; los cortes y
   movimientos de "todas las pistas" la siguen igual, y "Volver a los tramos de la canción en
-  esta pista" deshace lo suyo. Ctrl+Z deshace la última edición. El selector junto a
-  "+ Marcador" elige cómo corta: libre, a la rejilla (al tiempo más cercano) o a la
-  transiente (al golpe más cercano de la pista donde haces clic; usa la batería, que marca
-  mejor el inicio de cada tiempo). Con el mismo modo, al arrastrar un tramo su inicio o su
-  primer golpe encajan en el tiempo más cercano.
-- **Separar canción (IA)**: separa la canción seleccionada (sus pistas se reemplazan por los
+  esta pista" deshace lo suyo. Ctrl+Z deshace la última edición. El **Ajuste** elige cómo corta:
+  apagado (libre), a la rejilla (al tiempo más cercano) o a la transiente (al golpe más cercano de la
+  pista donde haces clic; usa la batería, que marca mejor el inicio de cada tiempo). Con el mismo
+  ajuste, al arrastrar un tramo su inicio o su primer golpe encajan en el tiempo más cercano.
+- **Separar canción (IA)**: el mismo diálogo trae las opciones (pistas, calidad y batería entera o en
+  partes; también en "Ajustes IA", que usan arrastrar un archivo y el armado de mix). Separa la canción seleccionada (sus pistas se reemplazan por los
   stems y se conservan marcadores, análisis, tempo y cortes; el audio anterior queda en la
-  subcarpeta "original") o un archivo que elijas, que se agrega al setlist. Con la casilla
-  "Batería en partes", la batería sale además dividida en bombo, caja, toms, hi-hat, ride y
+  subcarpeta "original") o un archivo que elijas, que se agrega al setlist. Con "Batería en
+  partes", la batería sale además dividida en bombo, caja, toms, hi-hat, ride y
   crash; y en una canción ya separada, el mismo botón ofrece "Solo la batería en partes".
   Bombo y caja salen bien; toms, hi-hat y platillos se mezclan más entre sí. Requiere la
   instalación opcional de audio-separator ("Ajustes IA" > "Instalar también Roformer y
@@ -272,15 +300,21 @@ levanta con todo. También sirve copiar la carpeta `Secuencias` entera a `~/Mús
 |---|---|
 | Espacio | Play / pausa |
 | Esc | Stop (vuelve al inicio) |
-| Flecha derecha o AvPág | Siguiente canción (en el modo reproducción, del show) |
+| Flecha derecha o AvPág | Siguiente canción (en el Show, la siguiente del show) |
 | Flecha izquierda o RePág | Canción anterior |
 | Ctrl+E | Exportar la mezcla |
+| Ctrl+Z / Ctrl+Shift+Z o Ctrl+Y | Deshacer / rehacer |
+| Ctrl+T | Editor de la pista de tempo |
+| J | Ajuste (rejilla o transiente) encendido o apagado |
+| Alt + rueda | Agrandar la forma de onda |
+| ? | Ventana con todos los atajos |
 | V R C U B Z S D P W K | Herramientas: Objeto, Rango, Cortar, Unir, Borrar, Zoom, Silenciar, Dibujar, Reproducir, Warp, Color |
 | Supr | Borra los golpes MIDI elegidos, o deja en silencio los tramos elegidos o el rango |
 | 1 – 9 (también en el teclado numérico) | Ir al marcador |
 | M | Añadir marcador |
 | L | Loop de sección on/off |
-| F11 | Modo en vivo on/off |
+| F11 | Vista grande on/off |
+| F12 | Guía de escenario (segunda pantalla) |
 
 Clic derecho sobre una canción o un marcador para más opciones (el clic derecho no cambia la
 canción que suena). Mantener una tecla o el pedal pisado no repite la acción. Si cierras la

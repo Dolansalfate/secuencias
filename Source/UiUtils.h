@@ -197,6 +197,111 @@ namespace ui
         EditTool tool;
     };
 
+    // Íconos de transporte (dibujados con Path: muchas fuentes de Ubuntu no tienen los símbolos Unicode)
+    enum class TransportIcon { none, prev, play, pause, stop, next, record, loop };
+
+    inline void drawTransportIcon (juce::Graphics& g, TransportIcon icon, juce::Rectangle<float> r, juce::Colour colour)
+    {
+        const float s = juce::jmin (r.getWidth(), r.getHeight());
+        const auto toBox = juce::AffineTransform::scale (s).translated (r.getCentreX() - s * 0.5f, r.getCentreY() - s * 0.5f);
+        juce::Path p;
+        bool stroke = false;
+        switch (icon)
+        {
+            case TransportIcon::prev:
+                p.addRectangle (0.12f, 0.2f, 0.1f, 0.6f);
+                p.addTriangle (0.52f, 0.2f, 0.52f, 0.8f, 0.22f, 0.5f);
+                p.addTriangle (0.88f, 0.2f, 0.88f, 0.8f, 0.58f, 0.5f);
+                break;
+            case TransportIcon::next:
+                p.addTriangle (0.12f, 0.2f, 0.12f, 0.8f, 0.42f, 0.5f);
+                p.addTriangle (0.48f, 0.2f, 0.48f, 0.8f, 0.78f, 0.5f);
+                p.addRectangle (0.78f, 0.2f, 0.1f, 0.6f);
+                break;
+            case TransportIcon::play:
+                p.addTriangle (0.22f, 0.12f, 0.22f, 0.88f, 0.86f, 0.5f);
+                break;
+            case TransportIcon::pause:
+                p.addRectangle (0.22f, 0.15f, 0.2f, 0.7f);
+                p.addRectangle (0.58f, 0.15f, 0.2f, 0.7f);
+                break;
+            case TransportIcon::stop:
+                p.addRectangle (0.2f, 0.2f, 0.6f, 0.6f);
+                break;
+            case TransportIcon::record:
+                p.addEllipse (0.18f, 0.18f, 0.64f, 0.64f);
+                break;
+            case TransportIcon::loop:
+                // Dos flechas que giran
+                p.addCentredArc (0.5f, 0.5f, 0.32f, 0.32f, 0.0f, 0.35f, 2.75f, true);
+                p.addCentredArc (0.5f, 0.5f, 0.32f, 0.32f, 0.0f, 3.5f, 5.9f, true);
+                stroke = true;
+                break;
+            case TransportIcon::none:
+                return;
+        }
+        p.applyTransform (toBox);
+        g.setColour (colour);
+        if (! stroke)
+        {
+            g.fillPath (p);
+            return;
+        }
+        g.strokePath (p, juce::PathStrokeType (s * 0.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // Puntas de las flechas
+        juce::Path heads;
+        heads.addTriangle (0.70f, 0.08f, 0.94f, 0.26f, 0.66f, 0.36f);
+        heads.addTriangle (0.30f, 0.92f, 0.06f, 0.74f, 0.34f, 0.64f);
+        heads.applyTransform (toBox);
+        g.fillPath (heads);
+    }
+
+    // Botón de texto con un ícono a la izquierda (o solo el ícono si no tiene texto): transporte, loop. Usa los colores
+    // de TextButton, así que se enciende y se colorea igual que los demás.
+    class IconButton : public juce::TextButton
+    {
+    public:
+        explicit IconButton (TransportIcon i = TransportIcon::none) : icon (i)
+        {
+            setWantsKeyboardFocus (false);
+            setMouseClickGrabsKeyboardFocus (false);
+        }
+
+        void setIcon (TransportIcon i)   { if (i != icon) { icon = i; repaint(); } }
+        TransportIcon getIcon() const    { return icon; }
+
+        void paintButton (juce::Graphics& g, bool over, bool down) override
+        {
+            auto& lf = getLookAndFeel();
+            const auto base = findColour (getToggleState() ? juce::TextButton::buttonOnColourId : juce::TextButton::buttonColourId);
+            lf.drawButtonBackground (g, *this, base, over, down);
+            const auto ink = findColour (getToggleState() ? juce::TextButton::textColourOnId : juce::TextButton::textColourOffId)
+                                 .withMultipliedAlpha (isEnabled() ? 1.0f : 0.4f);
+            const auto label = getButtonText();
+            const float side = juce::jmin ((float) getHeight() * 0.46f, 22.0f);
+            if (label.isEmpty())
+            {
+                drawTransportIcon (g, icon, getLocalBounds().toFloat().withSizeKeepingCentre (side, side), icon == TransportIcon::record ? juce::Colour (0xffff5252) : ink);
+                return;
+            }
+            const auto f = font (juce::jmin (15.0f, (float) getHeight() * 0.42f));
+            const float textW = (float) juce::GlyphArrangement::getStringWidthInt (f, label);
+            const float total = (icon != TransportIcon::none ? side + 8.0f : 0.0f) + textW;
+            float x = ((float) getWidth() - total) * 0.5f;
+            if (icon != TransportIcon::none)
+            {
+                drawTransportIcon (g, icon, { x, ((float) getHeight() - side) * 0.5f, side, side }, icon == TransportIcon::record ? juce::Colour (0xffff5252) : ink);
+                x += side + 8.0f;
+            }
+            g.setColour (ink);
+            g.setFont (f);
+            g.drawText (label, juce::Rectangle<float> (x, 0.0f, textW + 4.0f, (float) getHeight()), juce::Justification::centredLeft, false);
+        }
+
+    private:
+        TransportIcon icon;
+    };
+
     // Ningún hijo debe quedarse con el foco: todas las teclas van a MainComponent (ver CLAUDE.md 5.5)
     inline void disableFocus (juce::Component& c)
     {

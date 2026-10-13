@@ -33,6 +33,31 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
     };
     addAndMakeVisible (fader);
 
+    // Balance: perilla (arrastre vertical u horizontal; doble clic al centro) y su valor
+    panKnob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    panKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    panKnob.setRange (-1.0, 1.0, 0.01);
+    panKnob.setDoubleClickReturnValue (true, 0.0);
+    panKnob.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+    panKnob.setColour (juce::Slider::rotarySliderFillColourId, colour);
+    panKnob.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colours::white.withAlpha (0.25f));
+    panKnob.setColour (juce::Slider::thumbColourId, colour);
+    panKnob.setValue (track.pan.load(), juce::dontSendNotification);
+    panKnob.setTooltip ("Balance (doble clic: al centro)");
+    panKnob.onValueChange = [this]
+    {
+        track.pan = (float) panKnob.getValue();
+        showPan();
+        changed();
+    };
+    addAndMakeVisible (panKnob);
+    panLabel.setFont (ui::font (11.0f));
+    panLabel.setJustificationType (juce::Justification::centredRight);
+    panLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    panLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (panLabel);
+    showPan();
+
     // Nivelado por pista del tramo: se ve y se edita aquí (un clic abre el editor)
     levelBox.setJustificationType (juce::Justification::centred);
     levelBox.setFont (ui::font (11.0f));
@@ -61,7 +86,7 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
         if (onLevelEdited)
             onLevelEdited (db);
     };
-    addAndMakeVisible (levelBox);
+    addChildComponent (levelBox);   // se ve con el nivelado (setLevelGain)
 
     // Trigger de la pista: si suena por sí misma, si dispara un sonido (banco o VST) o ambas; un clic abre el menú
     trigBox.setJustificationType (juce::Justification::centred);
@@ -71,7 +96,7 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
     trigBox.setColour (juce::Label::textColourId, juce::Colours::grey);
     trigBox.setText ("Audio", juce::dontSendNotification);
     trigBox.onClick = [this] { if (onTriggerClicked) onTriggerClicked(); };
-    addAndMakeVisible (trigBox);
+    addChildComponent (trigBox);    // se ve con un trigger (setTriggerLabel)
 
     muteBtn.setButtonText ("M");
     muteBtn.setClickingTogglesState (true);
@@ -95,10 +120,23 @@ ChannelStrip::ChannelStrip (std::shared_ptr<void> keep, LoadedTrack& t, juce::Co
     setWantsKeyboardFocus (false);
 }
 
+void ChannelStrip::showPan()
+{
+    const int v = (int) std::lround (panKnob.getValue() * 100.0);
+    panLabel.setText (v == 0 ? juce::String() : (v < 0 ? "L" : "R") + juce::String (std::abs (v)), juce::dontSendNotification);
+    panKnob.setTooltip (v == 0 ? juce::String ("Balance: centro (doble clic: al centro)")
+                               : "Balance: " + juce::String (v < 0 ? "izquierda " : "derecha ") + juce::String (std::abs (v)) + " (doble clic: al centro)");
+}
+
 void ChannelStrip::setLevelGain (double db, bool enabled)
 {
     shownLevelDb = db;
-    levelEnabled = enabled;
+    if (levelEnabled != enabled)
+    {
+        levelEnabled = enabled;
+        levelBox.setVisible (enabled);   // sin nivelado no hay nada que mostrar
+        resized();
+    }
     if (levelBox.isBeingEdited())
         return;
     const auto text = enabled ? juce::String::formatted ("Niv %+.1f dB", db) : juce::String ("Niv --");
@@ -109,6 +147,14 @@ void ChannelStrip::setLevelGain (double db, bool enabled)
 
 void ChannelStrip::setTriggerLabel (const juce::String& text, int mode)
 {
+    // Sin trigger ("Audio") la casilla no se ve: el menú del trigger está en el botón T del carril
+    const bool active = mode != 0;
+    if (active != trigActive)
+    {
+        trigActive = active;
+        trigBox.setVisible (trigBoxVisible && trigActive);
+        resized();
+    }
     if (trigBox.getText() != text)
         trigBox.setText (text, juce::dontSendNotification);
     trigBox.setColour (juce::Label::textColourId, mode == 0 ? juce::Colours::grey : mode == 3 ? juce::Colours::orangered : juce::Colours::orange);
@@ -125,7 +171,7 @@ void ChannelStrip::setReadOnly (bool ro)
 void ChannelStrip::setTriggerBoxVisible (bool visible)
 {
     trigBoxVisible = visible;
-    trigBox.setVisible (visible);
+    trigBox.setVisible (visible && trigActive);
     resized();
 }
 
@@ -139,6 +185,8 @@ void ChannelStrip::tick()
         muteBtn.setToggleState (track.muted.load(), juce::dontSendNotification);
     if (soloBtn.getToggleState() != track.solo.load())
         soloBtn.setToggleState (track.solo.load(), juce::dontSendNotification);
+    if (std::abs (panKnob.getValue() - track.pan.load()) > 1.0e-4 && ! panKnob.isMouseButtonDown())
+        panKnob.setValue (track.pan.load(), juce::dontSendNotification);
 }
 
 void ChannelStrip::paint (juce::Graphics& g)
@@ -153,21 +201,29 @@ void ChannelStrip::resized()
 {
     auto r = getLocalBounds().reduced (6);
     r.removeFromTop (4);
-    nameLabel.setBounds (r.removeFromTop (20));
+    auto nameRow = r.removeFromTop (20);
+    // El balance va en la fila de M y S (su valor, junto al nombre cuando no está al centro)
+    panLabel.setBounds (nameRow.removeFromRight (30));
+    nameLabel.setBounds (nameRow);
     outBox.setBounds (r.removeFromBottom (22));
     r.removeFromBottom (4);
-    auto buttons = r.removeFromBottom (24);
-    muteBtn.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2).reduced (2, 0));
-    soloBtn.setBounds (buttons.reduced (2, 0));
+    auto buttons = r.removeFromBottom (26);
+    panKnob.setBounds (buttons.removeFromRight (28));
+    buttons.removeFromRight (2);
+    muteBtn.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2).reduced (1, 1));
+    soloBtn.setBounds (buttons.reduced (1, 1));
     r.removeFromBottom (4);
-    levelBox.setBounds (r.removeFromBottom (16));
-    r.removeFromBottom (2);
-    if (trigBoxVisible)
+    if (levelEnabled)
+    {
+        levelBox.setBounds (r.removeFromBottom (16));
+        r.removeFromBottom (2);
+    }
+    if (trigBoxVisible && trigActive)
     {
         trigBox.setBounds (r.removeFromBottom (16));
         r.removeFromBottom (2);
     }
-    meter.setBounds (r.removeFromRight (16).withTrimmedBottom (18));
+    meter.setBounds (r.removeFromRight (40).withTrimmedBottom (18));
     r.removeFromRight (2);
     fader.setBounds (r);
 }
@@ -257,6 +313,12 @@ MasterStrip::MasterStrip()
     label.setJustificationType (juce::Justification::centred);
     label.setFont (ui::font (13.0f, true));
     addAndMakeVisible (label);
+    // Sonoridad de la salida: momentánea (M, 400 ms) y de corto plazo (S, 3 s), en LUFS
+    loudnessLabel.setJustificationType (juce::Justification::centred);
+    loudnessLabel.setFont (ui::font (11.0f, true));
+    loudnessLabel.setColour (juce::Label::textColourId, ui::accent);
+    loudnessLabel.setTooltip (juce::String::fromUTF8 ("Sonoridad de la salida 1-2 en LUFS: M momentánea (400 ms), S de corto plazo (3 s)"));
+    addAndMakeVisible (loudnessLabel);
     addAndMakeVisible (meter);
 
     fader.setSliderStyle (juce::Slider::LinearVertical);
@@ -278,6 +340,14 @@ void MasterStrip::setGainDb (float db)
     fader.setValue (db, juce::dontSendNotification);
 }
 
+void MasterStrip::setLoudness (float momentary, float shortTerm)
+{
+    auto text = [] (float v) { return v > -70.0f ? juce::String (v, 1).replaceCharacter ('.', ',') : juce::String ("--"); };
+    const auto s = "M " + text (momentary) + "  S " + text (shortTerm);
+    if (loudnessLabel.getText() != s)
+        loudnessLabel.setText (s, juce::dontSendNotification);
+}
+
 void MasterStrip::setLevels (float peakL, float peakR, float rmsL, float rmsR)
 {
     meter.setLevels (0, peakL, rmsL);
@@ -296,6 +366,7 @@ void MasterStrip::resized()
 {
     auto r = getLocalBounds().reduced (6);
     label.setBounds (r.removeFromTop (20));
+    loudnessLabel.setBounds (r.removeFromTop (16));
     r.removeFromBottom (4);
     meter.setBounds (r.removeFromRight (44).withTrimmedBottom (18));
     r.removeFromRight (4);
@@ -308,7 +379,7 @@ MixerPanel::MixerPanel()
     view.setViewedComponent (&holder, false);
     view.setScrollBarsShown (false, true);
     addAndMakeVisible (view);
-    addAndMakeVisible (click);
+    holder.addAndMakeVisible (click);   // el click va junto a los canales (sin un hueco hasta el maestro)
     addAndMakeVisible (master);
     master.onGainChanged = [this] (float db) { if (onMasterGainChanged) onMasterGainChanged (db); };
     click.onChanged = [this] (bool on, float db, int pair) { if (onClickChanged) onClickChanged (on, db, pair); };
@@ -461,6 +532,7 @@ void MixerPanel::tick (AudioEngine& engine)
     click.setLevel (engine.takeClickPeak());
     click.tick();
     master.setLevels (engine.takeOutputPeak (0), engine.takeOutputPeak (1), engine.getOutputRms (0), engine.getOutputRms (1));
+    master.setLoudness (engine.getMomentaryLufs(), engine.getShortTermLufs());
     master.tick();
 }
 
@@ -469,18 +541,12 @@ void MixerPanel::resized()
     auto r = getLocalBounds();
     master.setBounds (r.removeFromRight (MasterStrip::width));
     r.removeFromRight (8);
-    if (click.isVisible())
-    {
-        click.setBounds (r.removeFromRight (ClickStrip::width));
-        r.removeFromRight (8);
-    }
     view.setBounds (r);
 
     const int gap = 6;
     const int h = juce::jmax (150, view.getHeight() - view.getScrollBarThickness() - 2);
     const int total = strips.size() + samplerStrips.size() + midiStrips.size() + instrumentStrips.size();
-    holder.setSize (juce::jmax (1, total * (ChannelStrip::width + gap) + (samplerStrips.size() > 0 ? gap * 2 : 0)
-                                     + (midiStrips.size() > 0 ? gap * 2 : 0) + (instrumentStrips.size() > 0 ? gap * 2 : 0)), h);
+    juce::ignoreUnused (total);
     for (int i = 0; i < strips.size(); ++i)
         strips[i]->setBounds (i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
     int x0 = strips.size() * (ChannelStrip::width + gap) + gap * 2;   // los samplers, algo separados
@@ -492,4 +558,11 @@ void MixerPanel::resized()
     x0 += midiStrips.size() * (ChannelStrip::width + gap) + (midiStrips.size() > 0 ? gap * 2 : 0);   // y los instrumentos
     for (int i = 0; i < instrumentStrips.size(); ++i)
         instrumentStrips[i]->setBounds (x0 + i * (ChannelStrip::width + gap), 0, ChannelStrip::width, h);
+    x0 += instrumentStrips.size() * (ChannelStrip::width + gap);
+    if (click.isVisible())
+    {
+        click.setBounds (x0 + gap * 2, 0, ClickStrip::width, h);
+        x0 = click.getRight() + gap;
+    }
+    holder.setSize (juce::jmax (1, x0), h);   // hasta el último canal (el click incluido)
 }

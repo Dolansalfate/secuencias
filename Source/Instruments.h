@@ -28,6 +28,7 @@ public:
         float gainDb = 0.0f;
         bool muted = false;
         int outputPair = 0;
+        float pan = 0.0f;
         juce::MemoryBlock savedState;             // estado guardado; se aplica al cargar
         bool loading = false;
     };

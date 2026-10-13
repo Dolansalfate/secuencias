@@ -9,6 +9,9 @@ static void readClipLook (Clip& clip, const juce::var& c)
 {
     clip.muted = (bool) c.getProperty ("muted", false);
     clip.colour = (juce::uint32) (juce::int64) c.getProperty ("color", 0);
+    clip.fadeIn = juce::jlimit (0.0, 600.0, (double) c.getProperty ("fadeIn", 0.0));
+    clip.fadeOut = juce::jlimit (0.0, 600.0, (double) c.getProperty ("fadeOut", 0.0));
+    clip.gainDb = juce::jlimit (-60.0f, 24.0f, (float) (double) c.getProperty ("gain", 0.0));
 }
 
 static void writeClipLook (juce::DynamicObject& o, const Clip& c)
@@ -17,6 +20,12 @@ static void writeClipLook (juce::DynamicObject& o, const Clip& c)
         o.setProperty ("muted", true);
     if (c.colour != 0)
         o.setProperty ("color", (juce::int64) c.colour);
+    if (c.fadeIn > 1.0e-6)
+        o.setProperty ("fadeIn", c.fadeIn);
+    if (c.fadeOut > 1.0e-6)
+        o.setProperty ("fadeOut", c.fadeOut);
+    if (std::abs (c.gainDb) > 1.0e-4f)
+        o.setProperty ("gain", (double) c.gainDb);
 }
 
 void SongInfo::sortMarkers()
@@ -63,7 +72,8 @@ void SongInfo::mergeEqualTempoRegions()
     {
         const auto& a = tempoRegions[(size_t) i - 1];
         const auto& b = tempoRegions[(size_t) i];
-        if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05 && a.transpose == b.transpose)
+        if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05 && a.transpose == b.transpose
+            && a.curve == TempoRegion::jump && a.gridCurve == TempoRegion::jump)
             tempoRegions.erase (tempoRegions.begin() + i);
     }
 }
@@ -493,6 +503,8 @@ SongInfo Library::readSong (const juce::File& folder) const
                 reg.playBpm = juce::jlimit (0.0, 400.0, (double) r.getProperty ("playBpm", 0.0));
                 if (r.hasProperty ("transpose"))
                     reg.transpose = juce::jlimit (-12, 12, (int) r.getProperty ("transpose", 0));
+                reg.curve = juce::jlimit (0, (int) TempoRegion::sCurve, (int) r.getProperty ("curve", 0));
+                reg.gridCurve = juce::jlimit (0, (int) TempoRegion::sCurve, (int) r.getProperty ("gridCurve", 0));
                 s.tempoRegions.push_back (reg);
             }
         s.sortTempoRegions();   // ordena y garantiza una sección que empieza en 0
@@ -527,6 +539,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                         pad.gainDb     = juce::jlimit (-60.0f, 12.0f, (float) (double) p.getProperty ("gainDb", 0.0));
                         pad.muted      = (bool) p.getProperty ("muted", false);
                         pad.outputPair = juce::jmax (0, (int) p.getProperty ("outputPair", 0));
+                        pad.pan        = juce::jlimit (-1.0f, 1.0f, (float) (double) p.getProperty ("pan", 0.0));
                         mt.pads.push_back (pad);
                     }
                 if (auto* hits = m.getProperty ("hits", juce::var()).getArray())
@@ -620,6 +633,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                 si.gainDb     = juce::jlimit (-60.0f, 12.0f, (float) (double) st.getProperty ("gainDb", 0.0));
                 si.muted      = (bool) st.getProperty ("muted", false);
                 si.outputPair = juce::jmax (0, (int) st.getProperty ("outputPair", 0));
+                si.pan        = juce::jlimit (-1.0f, 1.0f, (float) (double) st.getProperty ("pan", 0.0));
                 si.songTime   = (bool) st.getProperty ("songTime", false);
                 const auto tg = st.getProperty ("trigger", juce::var());
                 if (tg.isObject())
@@ -635,6 +649,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                     t.gainDb      = juce::jlimit (-60.0f, 12.0f, (float) (double) tg.getProperty ("gainDb", 0.0));
                     t.muted       = (bool) tg.getProperty ("muted", false);
                     t.outputPair  = juce::jmax (0, (int) tg.getProperty ("outputPair", 0));
+                    t.pan         = juce::jlimit (-1.0f, 1.0f, (float) (double) tg.getProperty ("pan", 0.0));
                 }
                 if (si.fileName.isNotEmpty() && isAudioFile (folder.getChildFile (si.fileName)))
                     s.stems.push_back (si);
@@ -747,6 +762,8 @@ bool Library::saveSong (const SongInfo& s) const
                 po->setProperty ("gainDb", (double) p.gainDb);
                 po->setProperty ("muted", p.muted);
                 po->setProperty ("outputPair", p.outputPair);
+                if (std::abs (p.pan) > 1.0e-4f)
+                    po->setProperty ("pan", (double) p.pan);
                 pads.add (juce::var (po));
             }
             for (auto& h : mt.hits)
@@ -821,6 +838,10 @@ bool Library::saveSong (const SongInfo& s) const
             ro->setProperty ("playBpm", r.playBpm);
             if (r.transpose != TempoRegion::followSong)
                 ro->setProperty ("transpose", r.transpose);
+            if (r.curve != TempoRegion::jump)
+                ro->setProperty ("curve", r.curve);   // transición hacia la siguiente sección
+            if (r.gridCurve != TempoRegion::jump)
+                ro->setProperty ("gridCurve", r.gridCurve);
             regions.add (juce::var (ro));
         }
         obj->setProperty ("tempoRegions", regions);
@@ -835,6 +856,8 @@ bool Library::saveSong (const SongInfo& s) const
         so->setProperty ("gainDb", (double) st.gainDb);
         so->setProperty ("muted", st.muted);
         so->setProperty ("outputPair", st.outputPair);
+        if (std::abs (st.pan) > 1.0e-4f)
+            so->setProperty ("pan", (double) st.pan);
         if (st.songTime)
             so->setProperty ("songTime", true);
         if (st.trigger.enabled || st.trigger.sound.isNotEmpty())
@@ -850,6 +873,8 @@ bool Library::saveSong (const SongInfo& s) const
             tg->setProperty ("gainDb", (double) st.trigger.gainDb);
             tg->setProperty ("muted", st.trigger.muted);
             tg->setProperty ("outputPair", st.trigger.outputPair);
+            if (std::abs (st.trigger.pan) > 1.0e-4f)
+                tg->setProperty ("pan", (double) st.trigger.pan);
             so->setProperty ("trigger", juce::var (tg));
         }
         stems.add (juce::var (so));

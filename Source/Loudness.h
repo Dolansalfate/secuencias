@@ -1,5 +1,7 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
+#include <atomic>
 #include <vector>
 
 // Sonoridad según EBU R128 / ITU-R BS.1770-4: ponderación K, bloques de 400 ms con 75 % de
@@ -51,4 +53,37 @@ namespace loudness
     // un polo de `release` muestras. Devuelve la mayor reducción en dB (0 si no hizo falta).
     double limiterGains (const juce::AudioBuffer<float>& audio, float gain, float ceiling, int lookahead, int release,
                          std::vector<float>& out);
+
+    struct Biquad
+    {
+        double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+        double z1 = 0, z2 = 0;
+        inline double process (double x)
+        {
+            const double y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+    };
+    void makeKWeighting (double fs, Biquad& shelf, Biquad& highpass);
+
+    // Sonoridad en vivo de la salida maestra (EBU R128): momentánea (400 ms) y de corto plazo (3 s), sin puertas.
+    // process() corre en el hilo de audio: sin memoria dinámica (todo prealocado en prepare). Los valores se leen
+    // desde la UI (atómicos).
+    class LiveLoudness
+    {
+    public:
+        void prepare (double sampleRate);
+        void process (const float* left, const float* right, int numSamples);   // right = nullptr con salida mono
+        float momentary() const  { return momentaryLufs.load(); }
+        float shortTerm() const  { return shortTermLufs.load(); }
+
+    private:
+        Biquad shelf[2], highpass[2];
+        double blockSum = 0.0;
+        int blockCount = 0, blockLength = 4410, filled = 0, next = 0;
+        std::array<double, 30> blocks {};
+        std::atomic<float> momentaryLufs { (float) unknown }, shortTermLufs { (float) unknown };
+    };
 }

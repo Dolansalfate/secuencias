@@ -22,7 +22,7 @@ namespace arrangement
         if (clips.size() != 1)
             return false;
         const auto& c = clips.front();
-        return ! c.muted && std::abs (c.position) < 1.0e-6 && std::abs (c.srcStart) < 1.0e-6 && std::abs (c.srcEnd - sourceLength) < 1.0e-6;
+        return ! c.muted && c.fadeIn < 1.0e-6 && c.fadeOut < 1.0e-6 && std::abs (c.gainDb) < 1.0e-4f && std::abs (c.position) < 1.0e-6 && std::abs (c.srcStart) < 1.0e-6 && std::abs (c.srcEnd - sourceLength) < 1.0e-6;
     }
 
     double lengthSeconds (const std::vector<Clip>& clips, double sourceLength)
@@ -55,6 +55,8 @@ namespace arrangement
             return false;   // ya hay un corte ahí (o casi)
         const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
         c.srcEnd = c.srcStart + offset;
+        c.fadeOut = 0.0;   // el primer pedazo ya no termina donde el tramo
+        c.fadeIn = juce::jmin (c.fadeIn, c.length());
         clips.insert (clips.begin() + i + 1, second);
         sortClips (clips);
         return true;
@@ -109,6 +111,8 @@ namespace arrangement
                 const double offset = at - c.position;
                 const Clip second = c.part (c.srcStart + offset, c.srcEnd, at + length);
                 c.srcEnd = c.srcStart + offset;
+                c.fadeOut = 0.0;   // el primer pedazo ya no termina donde el tramo
+                c.fadeIn = juce::jmin (c.fadeIn, c.length());
                 clips.insert (clips.begin() + i + 1, second);
             }
             else if (c.position >= at - 1.0e-9)
@@ -140,7 +144,8 @@ namespace arrangement
         const auto& p = clips[(size_t) index - 1];
         const auto& c = clips[(size_t) index];
         return std::abs (p.srcEnd - c.srcStart) < 1.0e-6 && std::abs (p.end() - c.position) < 1.0e-6
-               && p.muted == c.muted && p.colour == c.colour;
+               && p.muted == c.muted && p.colour == c.colour && std::abs (p.gainDb - c.gainDb) < 1.0e-4f
+               && p.fadeOut < 1.0e-6 && c.fadeIn < 1.0e-6;   // con un fundido en la unión no es el mismo audio seguido
     }
 
     bool joinWithPrevious (std::vector<Clip>& clips, int index)
@@ -148,6 +153,7 @@ namespace arrangement
         if (! canJoinWithPrevious (clips, index))
             return false;
         clips[(size_t) index - 1].srcEnd = clips[(size_t) index].srcEnd;
+        clips[(size_t) index - 1].fadeOut = clips[(size_t) index].fadeOut;
         clips.erase (clips.begin() + index);
         return true;
     }
@@ -162,6 +168,8 @@ namespace arrangement
             {
                 const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
                 c.srcEnd = c.srcStart + offset;
+                c.fadeOut = 0.0;   // el primer pedazo ya no termina donde el tramo
+                c.fadeIn = juce::jmin (c.fadeIn, c.length());
                 clips.insert (clips.begin() + i + 1, second);
             }
         }
@@ -221,6 +229,8 @@ namespace arrangement
                 return false;
             c.srcStart += at - c.position;
             c.position = at;
+            c.fadeIn = juce::jmin (c.fadeIn, c.length());
+            c.fadeOut = juce::jmin (c.fadeOut, c.length() - c.fadeIn);
         }
         else
         {
@@ -232,6 +242,8 @@ namespace arrangement
             if (std::abs (at - c.end()) < 1.0e-6)
                 return false;
             c.srcEnd = c.srcStart + (at - c.position);
+            c.fadeOut = juce::jmin (c.fadeOut, c.length());
+            c.fadeIn = juce::jmin (c.fadeIn, c.length() - c.fadeOut);
         }
         sortClips (clips);
         return true;
@@ -782,15 +794,24 @@ namespace arrangement
                 if (n <= 0 || p < 0)
                     continue;
                 const int fade = juce::jmin (fadeN, n / 2);
+                // Ganancia y fundidos del tramo (asas de la herramienta Objeto): curvas de seno, sin clics
+                const float clipGain = std::abs (c.gainDb) > 1.0e-4f ? juce::Decibels::decibelsToGain (c.gainDb, -100.0f) : 1.0f;
+                const int full = s1 - s0;
+                const int fadeInN = juce::jmin (full, (int) std::llround (c.fadeIn * sr));
+                const int fadeOutN = juce::jmin (full, (int) std::llround (c.fadeOut * sr));
                 for (int ch = 0; ch < 2; ++ch)
                 {
                     const float* in = src->buffer.getReadPointer (juce::jmin (ch, channels - 1), s0);
                     float* o = t->buffer.getWritePointer (ch, p);
                     for (int i = 0; i < n; ++i)
                     {
-                        float g = 1.0f;
-                        if (i < fade)              g = (float) (i + 1) / (float) (fade + 1);
-                        else if (i >= n - fade)    g = (float) (n - i) / (float) (fade + 1);
+                        float g = clipGain;
+                        if (i < fade)              g *= (float) (i + 1) / (float) (fade + 1);
+                        else if (i >= n - fade)    g *= (float) (n - i) / (float) (fade + 1);
+                        if (i < fadeInN)
+                            g *= std::sin (juce::MathConstants<float>::halfPi * (float) i / (float) fadeInN);
+                        if (i >= full - fadeOutN)
+                            g *= std::sin (juce::MathConstants<float>::halfPi * (float) (full - i) / (float) juce::jmax (1, fadeOutN));
                         o[i] += in[i] * g;
                     }
                 }

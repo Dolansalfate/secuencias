@@ -16,6 +16,78 @@ int effectiveTranspose (const SongInfo& info, const TempoRegion& r)
     return r.transpose != TempoRegion::followSong ? juce::jlimit (-12, 12, r.transpose) : info.transpose;
 }
 
+double tempoCurveShape (int curve, double u)
+{
+    u = juce::jlimit (0.0, 1.0, u);
+    switch (curve)
+    {
+        case TempoRegion::linear:    return u;
+        case TempoRegion::slowStart: return u * u;                          // cambia poco al principio y mucho al final
+        case TempoRegion::fastStart: return 1.0 - (1.0 - u) * (1.0 - u);   // cambia mucho al principio y se asienta
+        case TempoRegion::sCurve:    return u * u * (3.0 - 2.0 * u);        // suave en los dos extremos
+        default:                     return 0.0;                           // salto: el tempo de la sección hasta el final
+    }
+}
+
+juce::String tempoCurveName (int curve)
+{
+    switch (curve)
+    {
+        case TempoRegion::linear:    return juce::String::fromUTF8 ("Rampa lineal");
+        case TempoRegion::slowStart: return juce::String::fromUTF8 ("Curva lenta al inicio");
+        case TempoRegion::fastStart: return juce::String::fromUTF8 ("Curva rápida al inicio");
+        case TempoRegion::sCurve:    return juce::String::fromUTF8 ("Curva en S");
+        default:                     return juce::String::fromUTF8 ("Salto");
+    }
+}
+
+double TempoSegment::fractionAt (double t) const
+{
+    return origEnd > origStart + 1.0e-9 ? juce::jlimit (0.0, 1.0, (t - origStart) / (origEnd - origStart)) : 0.0;
+}
+
+double TempoSegment::origBpmAt (double t) const
+{
+    return origBpm + (origBpmEnd - origBpm) * tempoCurveShape (gridCurve, fractionAt (t));
+}
+
+double TempoSegment::playBpmAt (double t) const
+{
+    if (followsOriginal)
+        return origBpmAt (t) * playBpm / origBpm;
+    return playBpm + (playBpmEnd - playBpm) * tempoCurveShape (curve, fractionAt (t));
+}
+
+double TempoSegment::toPlayback (double t) const
+{
+    if (! ramps())
+        return playStart + (t - origStart) * ratio;
+    // Fuera del tramo (el último sigue más allá del audio): con la razón del borde
+    if (t <= origStart)
+        return playStart + (t - origStart) * ratio;
+    if (t >= origEnd)
+        return playEnd() + (t - origEnd) * (origBpmEnd / playBpmEnd);
+    const double x = (t - origStart) / (origEnd - origStart) * lutSteps;
+    const int i = juce::jlimit (0, lutSteps - 1, (int) x);
+    return playStart + lut[(size_t) i] + (lut[(size_t) i + 1] - lut[(size_t) i]) * (x - i);
+}
+
+double TempoSegment::toOriginal (double p) const
+{
+    if (! ramps())
+        return origStart + (p - playStart) / ratio;
+    const double rel = p - playStart;
+    if (rel <= 0.0)
+        return origStart + rel / ratio;
+    if (rel >= playLength)
+        return origEnd + (rel - playLength) / (origBpmEnd / playBpmEnd);
+    const auto it = std::upper_bound (lut.begin(), lut.end(), rel);
+    const int i = juce::jlimit (0, lutSteps - 1, (int) (it - lut.begin()) - 1);
+    const double a = lut[(size_t) i], b = lut[(size_t) i + 1];
+    const double frac = b > a ? (rel - a) / (b - a) : 0.0;
+    return origStart + (i + frac) / lutSteps * (origEnd - origStart);
+}
+
 TimeMap TimeMap::build (const SongInfo& info, double length)
 {
     TimeMap map;
@@ -41,6 +113,51 @@ TimeMap TimeMap::build (const SongInfo& info, double length)
         s.playBpm = juce::jmax (1.0, effectivePlayBpm (info, regions[i]));
         s.ratio = s.origBpm / s.playBpm;
         s.transpose = effectiveTranspose (info, regions[i]);
+        s.origBpmEnd = s.origBpm;
+        s.playBpmEnd = s.playBpm;
+        s.playLength = (s.origEnd - s.origStart) * s.ratio;
+        // Transiciones hacia la siguiente sección: los tempos siguen sus curvas y el tiempo de reproducción se integra
+        // (dt de reproducción = dt original · tempo original / tempo de reproducción)
+        const bool hasNext = i + 1 < regions.size() && s.origEnd > s.origStart + 1.0e-3;
+        auto follows = [&info] (const TempoRegion& r) { return r.playBpm <= 0.0 && info.playBpm <= 0.0; };
+        if (hasNext)
+        {
+            s.gridCurve = regions[i].gridCurve;
+            if (s.gridCurve != TempoRegion::jump)
+                s.origBpmEnd = juce::jmax (1.0, regions[i + 1].origBpm);
+            s.followsOriginal = follows (regions[i]) && follows (regions[i + 1]);
+            if (s.followsOriginal)
+            {
+                s.curve = s.gridCurve;   // suena a su tempo: el de reproducción es el de la grabación
+                s.playBpmEnd = s.origBpmEnd;
+            }
+            else if (regions[i].curve != TempoRegion::jump)
+            {
+                s.curve = regions[i].curve;
+                s.playBpmEnd = juce::jmax (1.0, effectivePlayBpm (info, regions[i + 1]));
+            }
+            const bool varies = std::abs (s.origBpmEnd - s.origBpm) > 1.0e-6 || std::abs (s.playBpmEnd - s.playBpm) > 1.0e-6;
+            if (varies && ! s.followsOriginal)
+            {
+                constexpr int n = TempoSegment::lutSteps;
+                const double span = s.origEnd - s.origStart;
+                auto rate = [&s] (double u)
+                {
+                    const double o = s.origBpm + (s.origBpmEnd - s.origBpm) * tempoCurveShape (s.gridCurve, u);
+                    const double p = s.playBpm + (s.playBpmEnd - s.playBpm) * tempoCurveShape (s.curve, u);
+                    return o / p;
+                };
+                s.lut.resize ((size_t) n + 1);
+                s.lut[0] = 0.0;
+                for (int k = 0; k < n; ++k)
+                {
+                    // Simpson en cada paso
+                    const double u0 = (double) k / n, u1 = (double) (k + 1) / n;
+                    s.lut[(size_t) k + 1] = s.lut[(size_t) k] + span / n * (rate (u0) + 4.0 * rate (0.5 * (u0 + u1)) + rate (u1)) / 6.0;
+                }
+                s.playLength = s.lut.back();
+            }
+        }
         playStart = s.playEnd();
         map.segs.push_back (s);
     }
@@ -53,7 +170,7 @@ double TimeMap::toPlayback (double t) const
         return t;
     for (auto& s : segs)
         if (t < s.origEnd || &s == &segs.back())
-            return s.playStart + (t - s.origStart) * s.ratio;
+            return s.toPlayback (t);
     return t;
 }
 
@@ -63,7 +180,7 @@ double TimeMap::toOriginal (double t) const
         return t;
     for (auto& s : segs)
         if (t < s.playEnd() || &s == &segs.back())
-            return s.origStart + (t - s.playStart) / s.ratio;
+            return s.toOriginal (t);
     return t;
 }
 
@@ -75,7 +192,7 @@ double TimeMap::playbackLength() const
 bool TimeMap::isIdentity() const
 {
     for (auto& s : segs)
-        if (std::abs (s.ratio - 1.0) > 1.0e-6)
+        if (std::abs (s.ratio - 1.0) > 1.0e-6 || s.ramps())   // una razón que cambia dentro del tramo estira
             return false;
     return true;
 }
@@ -96,6 +213,62 @@ const TempoSegment* TimeMap::segmentAtPlayback (double t) const
         if (t < s.playEnd())
             return &s;
     return &segs.back();
+}
+
+const TempoSegment* TimeMap::segmentAtOriginal (double t) const
+{
+    if (segs.empty())
+        return nullptr;
+    for (auto& s : segs)
+        if (t < s.origEnd)
+            return &s;
+    return &segs.back();
+}
+
+double TimeMap::playBpmAt (double t) const
+{
+    const auto* s = segmentAtOriginal (t);
+    return s != nullptr ? s->playBpmAt (t) : 120.0;
+}
+
+double TimeMap::origBpmAt (double t) const
+{
+    const auto* s = segmentAtOriginal (t);
+    return s != nullptr ? s->origBpmAt (t) : 120.0;
+}
+
+void rampGrid (Analysis& a, double from, double to, double bpmFrom, double bpmTo, int curve, int meter, int unit)
+{
+    if (! (to > from) || bpmFrom <= 0.0 || bpmTo <= 0.0)
+        return;
+    // Tiempos acumulados a lo largo del tramo (integral del tempo), redondeados a un número entero que termine en `to`
+    constexpr int n = 2048;
+    std::vector<double> beatsAt ((size_t) n + 1, 0.0);
+    auto bpm = [&] (double u) { return bpmFrom + (bpmTo - bpmFrom) * tempoCurveShape (curve, u); };
+    for (int k = 0; k < n; ++k)
+    {
+        const double u0 = (double) k / n, u1 = (double) (k + 1) / n;
+        beatsAt[(size_t) k + 1] = beatsAt[(size_t) k] + (to - from) / n * (bpm (u0) + 4.0 * bpm (0.5 * (u0 + u1)) + bpm (u1)) / 6.0 / 60.0;
+    }
+    const int count = juce::jmax (1, (int) std::lround (beatsAt.back()));
+    const double scale = beatsAt.back() / count;   // la curva se estira apenas para que los tiempos calcen
+    std::vector<Beat> grid;
+    for (int b = 0; b < count; ++b)
+    {
+        const double target = b * scale;
+        const auto it = std::lower_bound (beatsAt.begin(), beatsAt.end(), target);
+        const int i = juce::jlimit (1, n, (int) (it - beatsAt.begin()));
+        const double x0 = beatsAt[(size_t) i - 1], x1 = beatsAt[(size_t) i];
+        const double u = (i - 1 + (x1 > x0 ? (target - x0) / (x1 - x0) : 0.0)) / n;
+        grid.push_back ({ from + u * (to - from), 1, unit });
+    }
+    const int first = a.firstBeatAtOrAfter (from);
+    const int last = a.firstBeatAtOrAfter (to);
+    a.beats.erase (a.beats.begin() + first, a.beats.begin() + last);
+    a.beats.insert (a.beats.begin() + first, grid.begin(), grid.end());
+    a.renumberBeats (first, meter, first + (int) grid.size());
+    for (int i = first; i < first + (int) grid.size(); ++i)
+        a.beats[(size_t) i].unit = unit;
 }
 
 //==============================================================================
