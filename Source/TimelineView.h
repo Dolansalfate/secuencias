@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "AudioEngine.h"
 #include "Library.h"
+#include "UiUtils.h"
 
 // Vista de arreglo: regla con marcadores, compases y tiempo; una pista horizontal con forma de
 // onda por stem (cabecera con nombre, mute y solo); cabezal; loop sombreado; zoom con
@@ -94,6 +95,14 @@ public:
     // la regla o en un carril sigue saltando, y un clic en un marcador va a él
     void setReadOnly (bool);
     bool isReadOnly() const { return readOnly; }
+    // Herramienta de los carriles (como en Cubase). Selección: clic = ir a ese punto, Shift + arrastre mueve el tramo de
+    // todas las pistas, Ctrl + Shift + arrastre el de una, Alt + clic corta. Cortar (tijera): una guía muestra dónde
+    // caerá el corte; clic corta la pista del carril, Shift + clic todas. Mover: arrastrar mueve el tramo de la pista
+    // del carril, Shift + arrastre el de todas. El clic derecho abre siempre el menú del tramo.
+    void setTool (ui::EditTool);
+    ui::EditTool getTool() const { return tool; }
+    void showCutGuide (double seconds, int lane, bool allTracks);   // la guía de la tijera (captura); seconds < 0 la quita
+    void dragForCapture (int lane, double fromSeconds, double toSeconds, juce::ModifierKeys);   // un arrastre sobre el carril
 
     std::function<void (double seconds)> onSeek;
     std::function<void (int index, bool popup)> onMarkerClicked;
@@ -105,6 +114,10 @@ public:
     std::function<void (double seconds, int lane)> onLaneMenu;                        // clic derecho sobre un carril (menú del audio)
     // Shift + arrastre sobre un carril: mover el tramo en todas las pistas; Ctrl + Shift + arrastre: solo en esa pista
     std::function<void (double seconds, double deltaSeconds, int lane, bool trackOnly)> onClipDragged;
+    // Tijera: dónde caería un corte en ese instante del carril (según el modo de corte; tiempo de reproducción) y el
+    // corte en sí (seconds = donde se hizo clic, sin ajustar)
+    std::function<double (double seconds, int lane)> snapCut;
+    std::function<void (double seconds, int lane, bool allTracks)> onCut;
     std::function<void (int track, bool state)> onMute, onSolo, onTrigger;
     std::function<void (int track)> onLaneHeaderMenu;   // clic derecho en la cabecera de un carril (trigger)
     // Pistas MIDI (índices de golpe = índices en MidiLaneView::hits; tiempos de reproducción)
@@ -160,6 +173,12 @@ private:
     std::vector<ClipView> clips;
     std::vector<LaneClips> laneClips;              // por carril (setLaneClips)
     bool readOnly = false;
+    ui::EditTool tool = ui::EditTool::select;
+    juce::MouseCursor scissorsCursor;              // el de la tijera (se crea con la vista: no puede vivir más que JUCE)
+    double cutGuide = -1.0;                        // guía de la tijera en tiempo de reproducción (-1 = sin guía)
+    int cutGuideLane = -1;
+    bool cutGuideAll = false;                      // Shift: el corte alcanza a todas las pistas
+    void setCutGuide (double seconds, int lane, bool allTracks);
     bool anyOwnLane() const;
     bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo
     bool clipDragTrackOnly = false;                // con Ctrl: solo el tramo de esa pista

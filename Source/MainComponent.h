@@ -57,6 +57,13 @@ public:
     // Corta los stems y desplaza el tramo que sigue (herramienta de captura); con lane >= 0, solo esa pista
     void editForCapture (double cutSeconds, double moveMs, int lane = -1);
     void setCutModeForCapture (int mode)                      { cutModeBox.setSelectedId (juce::jlimit (1, 3, mode), juce::dontSendNotification); }
+    // --herramienta=cortar|mover [--guiacorte=seg] [--tijera=seg]: elige la herramienta, corta con la tijera en ese
+    // instante (en el carril `lane`, o en todas las pistas con -1) y muestra la guía de la tijera
+    void toolForCapture (ui::EditTool, double guideSeconds, double cutSeconds, int lane);
+    void dragForCapture (int lane, double fromSeconds, double toSeconds, bool shift)
+    {
+        timeline.dragForCapture (juce::jmax (0, lane), fromSeconds, toSeconds, shift ? juce::ModifierKeys::shiftModifier : 0);
+    }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
     void setDrumPartsForCapture (bool on)                     { drumPartsBtn.setToggleState (on, juce::dontSendNotification); }
@@ -389,6 +396,10 @@ private:
     const StemInfo* stemForLane (int lane) const;                   // la pista del carril (lo que suena), o nullptr
     static juce::StringArray stemFilesOf (const SongInfo&);         // archivos de los stems por índice (render del arreglo)
     void clipMenu (double playbackSeconds, int lane);
+    // Herramientas de edición (Selección, Cortar, Mover): botones, teclas V, C y D, y lo que hace la tijera
+    void setEditTool (ui::EditTool);
+    void cutWithTool (double playbackSeconds, int lane, bool allTracks);
+    bool cutAllTracksAt (double songSeconds);   // cortar todas las pistas (con deshacer); false si no cortó nada
     // Una edición de una sola pista (ids 21 a 29 del menú del carril) en el instante `songSeconds`
     void trackClipAction (int action, double songSeconds, const juce::String& stemFile);
     // Portapapeles de tramos: el tramo copiado con la grilla (tiempos y acordes) de su rango y el tempo de su sección
@@ -578,6 +589,9 @@ private:
     juce::Slider positionSlider;
 
     juce::TextButton addMarkerBtn, addNoteBtn;
+    ui::ToolButton selectToolBtn { ui::EditTool::select, tr ("Selección") },
+                   cutToolBtn { ui::EditTool::cut, "Cortar" },
+                   moveToolBtn { ui::EditTool::move, "Mover" };
     juce::ComboBox cutModeBox;                 // modo de corte y de encaje al mover tramos
     juce::OwnedArray<MarkerButton> markerButtons;
 

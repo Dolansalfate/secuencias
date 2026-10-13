@@ -77,6 +77,25 @@ public:
                 captureDuplicate = commandLine.fromFirstOccurrenceOf ("--duplicar=", false, false).getDoubleValue();
             if (commandLine.contains ("--modocorte="))
                 captureCutMode = commandLine.fromFirstOccurrenceOf ("--modocorte=", false, false).getIntValue();
+            // Herramientas: --herramienta=cortar|mover, --guiacorte=seg (guía de la tijera), --tijera=seg (un clic de la
+            // tijera; en --pista=N o, sin ella, en todas las pistas)
+            if (commandLine.contains ("--herramienta="))
+            {
+                const auto tool = commandLine.fromFirstOccurrenceOf ("--herramienta=", false, false).upToFirstOccurrenceOf (" ", false, false);
+                captureTool = tool == "cortar" ? 1 : tool == "mover" ? 2 : 0;
+            }
+            if (commandLine.contains ("--guiacorte="))
+                captureCutGuide = commandLine.fromFirstOccurrenceOf ("--guiacorte=", false, false).getDoubleValue();
+            if (commandLine.contains ("--tijera="))
+                captureScissors = commandLine.fromFirstOccurrenceOf ("--tijera=", false, false).getDoubleValue();
+            // --arrastrar=desde:hasta (segundos) sobre --pista=N con la herramienta elegida; --shift lo hace con Shift
+            if (commandLine.contains ("--arrastrar="))
+            {
+                const auto range = commandLine.fromFirstOccurrenceOf ("--arrastrar=", false, false).upToFirstOccurrenceOf (" ", false, false);
+                captureDrag = { range.upToFirstOccurrenceOf (":", false, false).getDoubleValue(),
+                                range.fromFirstOccurrenceOf (":", false, false).getDoubleValue() };
+                captureDragShift = hasFlag ("--shift");
+            }
             // Modo reproducción: --reproduccion [--show=1,2,3] (canciones del setlist para el show activo)
             if (hasFlag ("--reproduccion"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
@@ -124,6 +143,11 @@ public:
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs, captureLane);
             if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
+            if (captureTool > 0 || captureScissors >= 0.0)
+                mc->toolForCapture (captureTool == 2 ? ui::EditTool::move : captureTool == 1 || captureScissors >= 0.0 ? ui::EditTool::cut : ui::EditTool::select,
+                                    captureCutGuide, captureScissors, captureLane);
+            if (captureDrag.first >= 0.0)
+                mc->dragForCapture (captureLane, captureDrag.first, captureDrag.second, captureDragShift);
             if (captureExport != juce::File()) mc->exportForCapture (captureExport);
         }
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
@@ -213,6 +237,10 @@ private:
     bool captureDrumParts = false, captureSeparateDrums = false;
     double captureTempo = 0.0, captureCut = 0.0, captureMoveMs = 0.0, captureDuplicate = 0.0, capturePosition = 0.0;
     int captureLane = -1;   // --pista=N: el corte y el desplazamiento de --corte solo en ese carril
+    int captureTool = 0;    // --herramienta: 1 cortar, 2 mover
+    double captureCutGuide = -1.0, captureScissors = -1.0;
+    std::pair<double, double> captureDrag { -1.0, -1.0 };
+    bool captureDragShift = false;
     juce::File captureExport;   // --exportar=<carpeta>: exportar la mezcla de la canción cargada
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;

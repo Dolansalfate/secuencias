@@ -197,6 +197,13 @@ El mismo código sigue compilando en macOS.
   reparte tiempos parejos que caben justos hasta el siguiente compás (para las transiciones de
   un mix donde el análisis se enreda) o define compases de N tiempos. Clic derecho en la fila de acordes para cambiar, quitar,
   dividir, unir o añadir acordes.
+- **Herramientas, como en Cubase** (botones junto a "+ Nota", o las teclas V, C y D):
+  **Selección** (V) es la de siempre: un clic lleva el cabezal a ese punto. **Cortar** (C) cambia el
+  cursor por una tijera y muestra una línea donde caerá el corte (con el modo de corte de al lado: libre,
+  al tiempo o a la transiente) y a qué pistas alcanza; un clic corta la pista donde hiciste clic y
+  Shift + clic corta todas. **Mover** (D): arrastra un tramo para moverlo en su pista, o con Shift en
+  todas. Cuando termines, vuelve a Selección con su botón o la V. Con Selección, Alt + clic también
+  corta. El clic derecho sigue abriendo el menú del tramo con cualquier herramienta, y Ctrl+Z deshace.
 - **Cortar y mover el audio** sin tocar la grilla: clic derecho sobre un carril para cortar
   todas las pistas en ese punto (así no se desalinean), desplazar el
   tramo en milisegundos, alinear su inicio al tiempo más cercano, unir, eliminar (dejando
@@ -246,6 +253,7 @@ levanta con todo. También sirve copiar la carpeta `Secuencias` entera a `~/Mús
 | Flecha derecha o AvPág | Siguiente canción (en el modo reproducción, del show) |
 | Flecha izquierda o RePág | Canción anterior |
 | Ctrl+E | Exportar la mezcla |
+| V / C / D | Herramienta Selección / Cortar (tijera) / Mover |
 | 1 – 9 (también en el teclado numérico) | Ir al marcador |
 | M | Añadir marcador |
 | L | Loop de sección on/off |

@@ -252,12 +252,21 @@ modelo que usa Moises).
   solo en la pista del carril, y "Volver a los tramos de la canción en esta pista" quita su arreglo propio;
   Ctrl + Shift + arrastre mueve su tramo. Las ediciones de todas las pistas también alcanzan, por tiempo, a
   las pistas con arreglo propio (salvo a las grabaciones, que no siguen los tramos de la canción).
+- **Herramientas de edición** (como en Cubase; botones "Selección", "Cortar" y "Mover" junto a "+ Nota", o
+  las teclas V, C y D; `ui::EditTool`, `ui::ToolButton`, `TimelineView::setTool`): con **Selección** (la de
+  siempre) un clic lleva el cabezal, el clic derecho abre el menú del tramo, Shift + arrastre y Ctrl + Shift +
+  arrastre mueven tramos y Alt + clic corta. Con **Cortar** (cursor de tijera) una guía muestra dónde caerá el
+  corte según el modo de corte, con un letrero ("Cortar en 0:05.5 · solo Bajo"); un clic corta solo la pista
+  del carril (le da su arreglo propio) y Shift + clic corta todas. Con **Mover** (mano) arrastrar mueve el
+  tramo de la pista del carril y Shift + arrastre el de todas (si la canción tiene cortes). La app siempre
+  parte en Selección y el modo reproducción vuelve a ella. El clic derecho abre el menú del tramo con
+  cualquier herramienta.
 - **Modo de corte** (selector junto a "+ Marcador", ajuste `cutMode`): "Corte libre" corta
   donde se hizo clic; "Corte a la rejilla" en el tiempo detectado más cercano (o de la
   rejilla fija del click); "Corte a la transiente" busca el ataque más cercano (±200 ms) en la
   pista del carril donde se hizo clic (la batería es la mejor referencia) y corta justo antes
   del golpe (`findOnset`). El menú muestra dónde caerá el corte. El mismo modo rige el
-  Shift + arrastre: a la rejilla encaja el inicio del tramo en el tiempo más cercano; a la
+  Shift + arrastre, la tijera y la herramienta Mover: a la rejilla encaja el inicio del tramo en el tiempo más cercano; a la
   transiente encaja el primer golpe del tramo (en su primer cuarto de segundo) en el tiempo.
 - **Nivelado de sonoridad** (EBU R128, `Loudness`): "Nivelar" mide primero **cada stem** por
   tramo entre marcadores y le da a cada stem, en cada tramo, la ganancia que lo lleva al nivel
@@ -839,7 +848,18 @@ Pasos de `run()`:
   propio creado de paso. `renderedTrackClips` / `sameTrackClips` deciden si hay que volver a renderizar.
   `TimelineView::setLaneClips` (`LaneClips`, `mappedLaneClips`): con alguna pista propia, cada carril dibuja sus
   bordes y huecos (con una franja de acento en la cabecera) y la capa de encima solo el arrastre de toda la canción;
-  `onClipDragged (..., trackOnly)` con Ctrl + Shift (`clipDragTrackOnly`, el carril dibuja el arrastre).
+  `onClipDragged (..., trackOnly)` con Ctrl + Shift (`clipDragTrackOnly`, el carril dibuja el arrastre, también
+  en una pista sin cortes).
+- Herramientas: `TimelineView::setTool` (`tool`); `Lane::hover` pone el cursor (`scissorsCursor`, dibujado con
+  `ui::drawToolIcon` al crear la vista) y la guía (`setCutGuide`, que repinta solo su franja de la capa de encima;
+  `Overlay::drawCutGuide`) con `snapCut` (MainComponent: `snapCutTime` en tiempo de reproducción, salvo mientras
+  renderiza); `modifierKeysChanged` la actualiza con Shift o Alt sin mover el mouse. Un clic de la tijera llama a
+  `onCut` → `MainComponent::cutWithTool` (canción ligada: `linkedSongMenu` y luego el mismo corte; una pista:
+  `trackClipAction (21)`; todas: `cutAllTracksAt`, el mismo camino que "Cortar todas las pistas" del menú) y
+  escribe en la barra de estado qué cortó. Mover arranca el mismo arrastre que Ctrl + Shift (o Shift con
+  Shift). `setEditTool` sincroniza botones, vista y ayuda. Captura: `--herramienta=cortar|mover`,
+  `--guiacorte=seg`, `--tijera=seg` (en `--pista=N` o en todas) y `--arrastrar=desde:hasta [--shift]`
+  (`TimelineView::dragForCapture`, eventos de mouse sintéticos sobre el carril).
 
 ### 5.4f Triggers (golpes y sampler)
 - `triggers::detect (buffer, sr, umbralDb, sensibilidad, minMs)`: envolvente RMS en dB por
@@ -1380,7 +1400,8 @@ Fases, en orden:
    (en ms, al tiempo más cercano o con Shift + arrastre), eliminar (con o sin cerrar el hueco),
    unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer, y lo mismo por pista
    (borrar un tramo de una pista lo silencia). Pendiente: rehacer, recorte de inicio y fin como
-   gesto directo, pegar insertando en una sola pista.
+   gesto directo, pegar insertando en una sola pista. Las herramientas (Selección, Cortar, Mover) están hechas
+   (v0.11.1).
 
 **Plan de estudio en vivo** (acordado el 2026-09-27): 1) triggers de las pistas separadas con
 sampler interno y bancos grabados (hecho, v0.4.0), 2) grabación de entradas como pistas nuevas y
@@ -1399,6 +1420,11 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.11.1 (herramientas de edición)**: caja de herramientas al estilo Cubase (Selección, Cortar con tijera y
+  guía del corte, Mover; teclas V, C y D; Alt + clic corta con la selección), `ui::EditTool`, `ui::drawToolIcon`,
+  `ui::ToolButton`, `TimelineView::setTool` / `snapCut` / `onCut` / `setCutGuide`, `cutWithTool`,
+  `cutAllTracksAt` (sacado del menú del tramo), el arrastre de una sola pista se dibuja aunque no haya cortes,
+  y en la captura `--herramienta`, `--guiacorte`, `--tijera` y `--arrastrar`.
 - **v0.11.0 (exportar, LUFS libre y modo reproducción)**: `Bounce` (render fuera de tiempo real con el
   motor, cada fuente y el click por su par, `normalize` con limitador, `preventClipping`), diálogo "Exportar la
   mezcla" (WAV o MP3 con ffmpeg, click mezclado o aparte, pistas por separado, nivel), `Separator::findFfmpeg`,

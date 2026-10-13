@@ -250,6 +250,16 @@ MainComponent::MainComponent()
     cutModeBox.addItem ("Corte a la transiente", 3);
     cutModeBox.setSelectedId (juce::jlimit (1, 3, props.getUserSettings()->getIntValue ("cutMode", 1)), juce::dontSendNotification);
     cutModeBox.onChange = [this] { props.getUserSettings()->setValue ("cutMode", cutModeBox.getSelectedId()); };
+    // Caja de herramientas (como en Cubase): la app siempre parte con la de selección
+    selectToolBtn.setConnectedEdges (juce::Button::ConnectedOnRight);
+    cutToolBtn.setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+    moveToolBtn.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    for (auto* b : { &selectToolBtn, &cutToolBtn, &moveToolBtn })
+    {
+        b->onClick = [this, b] { setEditTool (b->getTool()); };
+        addAndMakeVisible (b);
+    }
+    selectToolBtn.setToggleState (true, juce::dontSendNotification);
 
     for (auto* c : std::initializer_list<juce::Component*> { &songTitle, &nextLabel, &sectionLabel, &timeLabel, &chordLabel, &keyLabel,
                      &prevBtn, &playBtn, &stopBtn, &nextBtn, &recordBtn, &loopBtn, &positionSlider, &addMarkerBtn, &cutModeBox })
@@ -422,6 +432,15 @@ MainComponent::MainComponent()
     timeline.onNoteClicked = [this] (int index, double t) { noteMenu (index, t); };
     timeline.onChordClicked = [this] (int index, double t) { chordMenu (index, t); };
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
+    timeline.onCut = [this] (double t, int lane, bool all) { cutWithTool (t, lane, all); };
+    timeline.snapCut = [this] (double t, int lane)
+    {
+        // La guía de la tijera cae donde caerá el corte (modo libre, a la rejilla o a la transiente)
+        if (currentInfo() == nullptr || arrangedSong == nullptr || rendering)
+            return t;
+        juce::String how;
+        return timeMap.toPlayback (snapCutTime (timeMap.toOriginal (t), lane, how));
+    };
     timeline.onTrigger = [this] (int track, bool on) { setTriggerEnabled (track, on); };
     timeline.onLaneHeaderMenu = [this] (int track) { triggerMenu (track); };
     // Pistas MIDI: las ediciones llegan en tiempo de reproducción; los golpes se guardan en el de la canción
@@ -766,9 +785,15 @@ void MainComponent::resized()
         addNoteBtn.setBounds (markerRow.removeFromLeft (80));
         markerRow.removeFromLeft (8);
     }
-    cutModeBox.setVisible (! liveMode && ! playbackMode);
-    if (! liveMode && ! playbackMode)
+    const bool editing = ! liveMode && ! playbackMode;
+    for (auto* c : std::initializer_list<juce::Component*> { &cutModeBox, &selectToolBtn, &cutToolBtn, &moveToolBtn })
+        c->setVisible (editing);
+    if (editing)
     {
+        selectToolBtn.setBounds (markerRow.removeFromLeft (106));
+        cutToolBtn.setBounds (markerRow.removeFromLeft (86));
+        moveToolBtn.setBounds (markerRow.removeFromLeft (86));
+        markerRow.removeFromLeft (8);
         cutModeBox.setBounds (markerRow.removeFromLeft (180));
         markerRow.removeFromLeft (8);
     }
@@ -900,6 +925,9 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (c == 'm' && ! playbackMode)      addMarkerHere();
         else if (c == 'n' && ! playbackMode) addNoteHere();
         else if (c == 'm' || c == 'n')       {}   // en reproducción no se edita
+        else if ((c == 'v' || c == 'c' || c == 'd') && ! playbackMode && ! key.getModifiers().isCtrlDown()
+                 && ! key.getModifiers().isCommandDown() && ! key.getModifiers().isAltDown())
+            setEditTool (c == 'v' ? ui::EditTool::select : c == 'c' ? ui::EditTool::cut : ui::EditTool::move);
         else if (c == 'l') { loopBtn.setToggleState (! loopBtn.getToggleState(), juce::dontSendNotification); updateLoopRegion(); }
         else               handled = false;
     }
@@ -6280,7 +6308,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     m.addItem (9, anyOwn ? tr ("Restaurar el audio original (sin cortes en ninguna pista)") : tr ("Restaurar el audio original (sin cortes)"),
                ! info->clips.empty() || anyOwn);
     m.addSeparator();
-    m.addItem (10, tr ("Shift + arrastrar mueve el tramo en todas las pistas; Ctrl + Shift + arrastrar, solo en esa pista"), false);
+    m.addItem (10, tr ("Herramientas: Cortar (C) corta con un clic y Mover (D) arrastra el tramo; con Shift, en todas las pistas"), false);
 
     const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
@@ -6302,6 +6330,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         if (result == 11) { copyClip (idx); return; }
         if (result == 12) { duplicateClip (idx); return; }
         if (result == 13 || result == 14) { pasteClipboard (t, result == 13); return; }
+        if (result == 1) { cutAllTracksAt (t); return; }
         if (result == 2 || result == 3)
         {
             askText (tr ("Desplazamiento en milisegundos (+ = más tarde, - = antes)"), "0", [this, idx, result, sourceLength] (const juce::String& text)
@@ -6328,17 +6357,7 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         arrangement::ensureClips (inf->clips, sourceLength);
         auto& cl = inf->clips;
         bool gridChanged = false;
-        if (result == 1)
-        {
-            const bool cutSong = arrangement::cutAt (cl, t, sourceLength);
-            arrangement::cutOwnAt (*inf, t);
-            if (! cutSong && inf->trackClips.empty())
-            {
-                undoStack.pop_back();
-                return;
-            }
-        }
-        else if (result == 4 && juce::isPositiveAndBelow (idx, (int) cl.size()))
+        if (result == 4 && juce::isPositiveAndBelow (idx, (int) cl.size()))
         {
             const int nb = inf->analysis.nearestBeat (cl[(size_t) idx].position, 0.5);
             if (nb >= 0)
@@ -6382,6 +6401,92 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
         else
             arrangementEdited();
     });
+}
+
+bool MainComponent::cutAllTracksAt (double t)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return false;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    pushUndo();
+    arrangement::ensureClips (info->clips, sourceLength);
+    const bool cutSong = arrangement::cutAt (info->clips, t, sourceLength);
+    arrangement::cutOwnAt (*info, t);   // y las pistas con arreglo propio, en el mismo instante
+    if (! cutSong && info->trackClips.empty())
+    {
+        undoStack.pop_back();
+        return false;
+    }
+    arrangementEdited();
+    return true;
+}
+
+//==============================================================================
+// Herramientas de edición (como en Cubase): Selección, Cortar (tijera) y Mover
+
+void MainComponent::setEditTool (ui::EditTool tool)
+{
+    if (playbackMode)
+        tool = ui::EditTool::select;   // en reproducción no se edita
+    selectToolBtn.setToggleState (tool == ui::EditTool::select, juce::dontSendNotification);
+    cutToolBtn.setToggleState (tool == ui::EditTool::cut, juce::dontSendNotification);
+    moveToolBtn.setToggleState (tool == ui::EditTool::move, juce::dontSendNotification);
+    const bool changed = timeline.getTool() != tool;
+    timeline.setTool (tool);
+    if (! changed)
+        return;
+    if (tool == ui::EditTool::cut)
+        sepLabel.setText (tr ("Tijera: clic corta la pista donde haces clic; Shift + clic corta todas las pistas. "
+                              "El corte sigue el modo de al lado. V vuelve a Selección."), juce::dontSendNotification);
+    else if (tool == ui::EditTool::move)
+        sepLabel.setText (tr ("Mover: arrastra un tramo para moverlo en su pista; Shift + arrastre lo mueve en todas las pistas. "
+                              "V vuelve a Selección."), juce::dontSendNotification);
+    else
+        sepLabel.setText (tr ("Selección: clic lleva el cabezal a ese punto; clic derecho, el menú del tramo; Alt + clic corta."),
+                          juce::dontSendNotification);
+}
+
+void MainComponent::cutWithTool (double playbackSeconds, int lane, bool allTracks)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || arrangedSong == nullptr || playbackMode)
+        return;
+    // En una canción ligada, editar aquí la desliga de su mix (se pregunta); después se hace el mismo corte
+    if (linkedSongMenu (*info, [this, playbackSeconds, lane, allTracks] { cutWithTool (playbackSeconds, lane, allTracks); }))
+        return;
+    juce::String how;
+    const double t = snapCutTime (timeMap.toOriginal (playbackSeconds), lane, how);   // según el modo de corte
+    const auto at = formatTime (timeMap.toPlayback (t));
+    const auto* stem = stemForLane (lane);
+    if (allTracks || stem == nullptr)
+    {
+        if (cutAllTracksAt (t))
+            sepLabel.setText (tr ("Cortadas todas las pistas en ") + at + how + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+        else
+            sepLabel.setText (tr ("Ahí no hay audio que cortar (") + at + ")", juce::dontSendNotification);
+        return;
+    }
+    const auto name = stem->name;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    const auto before = arrangement::clipsOf (*info, *stem, sourceLength).size();
+    trackClipAction (21, t, stem->fileName);
+    const bool done = arrangement::clipsOf (*info, *stem, sourceLength).size() > before;
+    sepLabel.setText (done ? tr ("Cortada «") + name + tr ("» en ") + at + how + tr (" (las demás pistas no cambian; Ctrl+Z deshace)")
+                                                : tr ("Ahí «") + name + tr ("» no tiene audio que cortar (") + at + ")",
+                      juce::dontSendNotification);
+}
+
+void MainComponent::toolForCapture (ui::EditTool tool, double guideSeconds, double cutSeconds, int lane)
+{
+    setEditTool (tool);
+    if (cutSeconds >= 0.0)
+    {
+        cutWithTool (cutSeconds, juce::jmax (0, lane), lane < 0);
+        std::cout << "captura: tijera en " << cutSeconds << " s: " << sepLabel.getText() << "\n";
+    }
+    if (tool == ui::EditTool::cut && guideSeconds >= 0.0)
+        timeline.showCutGuide (guideSeconds, juce::jmax (0, lane), lane < 0);
 }
 
 void MainComponent::trackClipAction (int action, double t, const juce::String& stemFile)
@@ -7637,7 +7742,7 @@ void MainComponent::showHelpText()
                            ? tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción del show · 1-9: marcador · "
                                  "L: loop · F11: en vivo · Ctrl+rueda: zoom · Solo volumen y salida de cada pista")
                            : tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción · 1-9: marcador · M: añadir marcador · "
-                                 "L: loop · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
+                                 "L: loop · V/C/D: selección, cortar, mover · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
                        juce::dontSendNotification);
 }
 
@@ -7659,6 +7764,8 @@ void MainComponent::setPlaybackMode (bool on)
     showHelpText();
     timeline.setReadOnly (on);
     mixer.setReadOnly (on);
+    if (on)
+        setEditTool (ui::EditTool::select);
     ++preloadGeneration;   // los trabajos de antes ya no valen (ni avisan: nada queda esperándolos)
     preloadingFolder.clear();
     durationsPending = false;

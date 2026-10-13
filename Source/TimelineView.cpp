@@ -441,6 +441,26 @@ public:
             if (owner.onLaneMenu) owner.onLaneMenu (t, index);
             return;
         }
+        if (cuts (e.mods))
+        {
+            // Tijera (o Alt + clic con la selección): corta esta pista; con Shift, todas
+            if (owner.onCut) owner.onCut (t, index, e.mods.isShiftDown());
+            return;
+        }
+        if (owner.tool == ui::EditTool::move)
+        {
+            // Mover: arrastrar lleva el tramo de esta pista; con Shift, el de todas (si la canción tiene cortes)
+            const bool all = e.mods.isShiftDown();
+            if (all && owner.clips.empty())
+                return;
+            owner.clipDragging = true;
+            owner.clipDragTrackOnly = ! all;
+            owner.clipDragFrom = t;
+            owner.clipDragDelta = 0.0;
+            owner.clipDragLane = index;
+            owner.repaintOverlay();
+            return;
+        }
         const bool trackOnly = e.mods.isShiftDown() && (e.mods.isCtrlDown() || e.mods.isCommandDown());
         if (e.mods.isShiftDown() && (trackOnly || ! owner.clips.empty()))
         {
@@ -470,6 +490,31 @@ public:
             return;
         }
         owner.seekAt (juce::jmax (0, e.x - headerWidth), true);
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override        { hover (e.x, e.mods); }
+    void mouseExit (const juce::MouseEvent&) override          { owner.setCutGuide (-1.0, -1, false); }
+    void modifierKeysChanged (const juce::ModifierKeys& mods) override
+    {
+        if (isMouseOver (false))
+            hover (getMouseXYRelative().x, mods);   // Shift o Alt cambian la guía sin mover el mouse
+    }
+
+    // Cursor y guía de la tijera según la herramienta y la posición del mouse
+    void hover (int x, juce::ModifierKeys mods)
+    {
+        const bool content = x >= headerWidth && owner.song != nullptr && ! owner.readOnly;
+        const bool cutting = content && cuts (mods) && ! owner.clipDragging;
+        setMouseCursor (cutting ? owner.scissorsCursor
+                        : content && owner.tool == ui::EditTool::move ? juce::MouseCursor (juce::MouseCursor::DraggingHandCursor)
+                                                                       : juce::MouseCursor (juce::MouseCursor::NormalCursor));
+        if (! cutting)
+        {
+            owner.setCutGuide (-1.0, -1, false);
+            return;
+        }
+        const double t = juce::jlimit (0.0, owner.lengthSeconds(), owner.xToTime (x - headerWidth));
+        owner.setCutGuide (owner.snapCut ? owner.snapCut (t, index) : t, index, mods.isShiftDown());
     }
 
     void mouseUp (const juce::MouseEvent&) override
@@ -522,11 +567,19 @@ public:
     LoadedTrack& getTrack() { return track; }
 
 private:
+    // Un clic izquierdo corta con la tijera, o con Alt en la herramienta de selección (como en Cubase)
+    bool cuts (juce::ModifierKeys mods) const
+    {
+        return owner.tool == ui::EditTool::cut || (owner.tool == ui::EditTool::select && mods.isAltDown());
+    }
+
     // Con pistas de arreglo propio, los bordes y huecos de los tramos van por carril: los suyos (con una franja de
     // color en la cabecera) o los de la canción. Durante Ctrl + Shift + arrastre en este carril, su tramo desplazado.
     void drawClips (juce::Graphics& g)
     {
-        if (! owner.anyOwnLane())
+        const bool perLane = owner.anyOwnLane();
+        const bool dragHere = owner.clipDragging && owner.clipDragTrackOnly && owner.clipDragLane == index;
+        if (! perLane && ! dragHere)
             return;
         const bool own = juce::isPositiveAndBelow (index, (int) owner.laneClips.size()) && owner.laneClips[(size_t) index].own;
         const auto& list = own ? owner.laneClips[(size_t) index].clips : owner.clips;
@@ -535,8 +588,6 @@ private:
             g.setColour (ui::accent);
             g.fillRect (headerWidth - 4, 0, 3, getHeight());
         }
-        if (! own && list.empty())
-            return;   // la canción sin cortes
         juce::Graphics::ScopedSaveState state (g);
         g.reduceClipRegion (headerWidth, 0, getWidth() - headerWidth, getHeight());
         auto shade = [&] (double a, double b)
@@ -544,33 +595,41 @@ private:
             g.setColour (juce::Colours::black.withAlpha (0.45f));
             g.fillRect (headerWidth + owner.timeToX (a), 0, juce::jmax (1, owner.timeToX (b) - owner.timeToX (a)), getHeight());
         };
-        double lastEnd = 0.0;
-        for (auto& c : list)
+        if (perLane && (own || ! list.empty()))   // sin cortes la canción no tiene bordes que dibujar
         {
-            if (c.start > lastEnd + 1.0e-6)
-                shade (lastEnd, c.start);
-            lastEnd = juce::jmax (lastEnd, c.end);
-            g.setColour (juce::Colours::white.withAlpha (0.35f));
-            g.fillRect (headerWidth + owner.timeToX (c.start), 0, 1, getHeight());
-            g.fillRect (headerWidth + owner.timeToX (c.end), 0, 1, getHeight());
-        }
-        if (own && owner.lengthSeconds() > lastEnd + 1.0e-6)
-            shade (lastEnd, owner.lengthSeconds());   // después de su último tramo la pista no suena
-        if (owner.clipDragging && owner.clipDragTrackOnly && owner.clipDragLane == index)
+            double lastEnd = 0.0;
             for (auto& c : list)
-                if (owner.clipDragFrom >= c.start && owner.clipDragFrom < c.end)
-                {
-                    const int a = headerWidth + owner.timeToX (c.start + owner.clipDragDelta), b = headerWidth + owner.timeToX (c.end + owner.clipDragDelta);
-                    g.setColour (ui::accent.withAlpha (0.25f));
-                    g.fillRect (a, 0, juce::jmax (1, b - a), getHeight());
-                    g.setColour (ui::accent);
-                    g.fillRect (a, 0, 1, getHeight());
-                    g.fillRect (b, 0, 1, getHeight());
-                    g.setFont (ui::font (12.0f, true));
-                    g.setColour (juce::Colours::white);
-                    g.drawText (juce::String::formatted ("%+.0f ms", owner.clipDragDelta * 1000.0), a + 4, 2, 120, 16, juce::Justification::centredLeft);
-                    break;
-                }
+            {
+                if (c.start > lastEnd + 1.0e-6)
+                    shade (lastEnd, c.start);
+                lastEnd = juce::jmax (lastEnd, c.end);
+                g.setColour (juce::Colours::white.withAlpha (0.35f));
+                g.fillRect (headerWidth + owner.timeToX (c.start), 0, 1, getHeight());
+                g.fillRect (headerWidth + owner.timeToX (c.end), 0, 1, getHeight());
+            }
+            if (own && owner.lengthSeconds() > lastEnd + 1.0e-6)
+                shade (lastEnd, owner.lengthSeconds());   // después de su último tramo la pista no suena
+        }
+        if (! dragHere)
+            return;
+        // Arrastre de un tramo de esta pista (Ctrl + Shift o la herramienta Mover): sin cortes, la pista entera
+        std::vector<ClipView> whole;
+        if (list.empty())
+            whole.push_back ({ 0.0, owner.lengthSeconds() });
+        for (auto& c : list.empty() ? whole : list)
+            if (owner.clipDragFrom >= c.start && owner.clipDragFrom < c.end)
+            {
+                const int a = headerWidth + owner.timeToX (c.start + owner.clipDragDelta), b = headerWidth + owner.timeToX (c.end + owner.clipDragDelta);
+                g.setColour (ui::accent.withAlpha (0.25f));
+                g.fillRect (a, 0, juce::jmax (1, b - a), getHeight());
+                g.setColour (ui::accent);
+                g.fillRect (a, 0, 1, getHeight());
+                g.fillRect (b, 0, 1, getHeight());
+                g.setFont (ui::font (12.0f, true));
+                g.setColour (juce::Colours::white);
+                g.drawText (juce::String::formatted ("%+.0f ms", owner.clipDragDelta * 1000.0), a + 4, 2, 120, 16, juce::Justification::centredLeft);
+                break;
+            }
     }
 
     void renderImage()
@@ -1485,6 +1544,7 @@ public:
                         break;
                     }
         }
+        drawCutGuide (g);
         const int px = headerWidth + owner.timeToX (owner.position);
         g.setColour (ui::playhead);
         g.fillRect (px, 0, 2, getHeight());
@@ -1494,6 +1554,41 @@ public:
     }
 
 private:
+    // La guía de la tijera: una línea donde caerá el corte, en el carril bajo el mouse (o en todos con Shift), y un
+    // letrero con el instante y a qué pistas alcanza
+    void drawCutGuide (juce::Graphics& g)
+    {
+        if (owner.cutGuide < 0.0)
+            return;
+        auto area = getLocalArea (&owner.laneView, owner.laneView.getLocalBounds());
+        juce::String who = tr ("todas las pistas");
+        if (! owner.cutGuideAll && juce::isPositiveAndBelow (owner.cutGuideLane, owner.lanes.size()))
+        {
+            auto* lane = owner.lanes[owner.cutGuideLane];
+            area = getLocalArea (lane, lane->getLocalBounds()).getIntersection (area);
+            who = tr ("solo ") + lane->getTrack().name;
+        }
+        if (area.isEmpty())
+            return;
+        const int x = headerWidth + owner.timeToX (owner.cutGuide);
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        g.fillRect (x - 1, area.getY(), 3, area.getHeight());
+        g.setColour (juce::Colours::white);
+        g.fillRect (x, area.getY(), 1, area.getHeight());
+        const auto text = tr ("Cortar en ") + ui::formatTime (owner.cutGuide) + " · " + who;
+        const auto f = ui::font (12.0f, true);
+        const int w = juce::GlyphArrangement::getStringWidthInt (f, text) + 12;
+        int bx = x + 6;
+        if (bx + w > getWidth())
+            bx = x - 6 - w;   // cerca del borde derecho, a la izquierda de la línea
+        const juce::Rectangle<int> box (bx, area.getY() + 3, w, 18);
+        g.setColour (juce::Colours::black.withAlpha (0.75f));
+        g.fillRoundedRectangle (box.toFloat(), 3.0f);
+        g.setColour (juce::Colours::white);
+        g.setFont (f);
+        g.drawText (text, box, juce::Justification::centred, false);
+    }
+
     TimelineView& owner;
 };
 
@@ -1502,6 +1597,13 @@ TimelineView::TimelineView()
 {
     ruler = std::make_unique<Ruler> (*this);
     overlay = std::make_unique<Overlay> (*this);
+    {
+        // Cursor de la tijera: el punto activo es el de las puntas de las hojas
+        juce::Image img (juce::Image::ARGB, 28, 28, true);
+        juce::Graphics g (img);
+        ui::drawToolIcon (g, ui::EditTool::cut, { 2.0f, 1.0f, 24.0f, 24.0f }, juce::Colours::white, juce::Colours::black);
+        scissorsCursor = juce::MouseCursor (img, 14, 2);
+    }
     addAndMakeVisible (*ruler);
     laneView.setViewedComponent (&laneHolder, false);
     laneView.setScrollBarsShown (true, false, false, false);
@@ -1561,11 +1663,64 @@ void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr)
 void TimelineView::setReadOnly (bool ro)
 {
     readOnly = ro;
+    if (ro)
+        setTool (ui::EditTool::select);
     for (auto* lane : lanes)
         lane->setReadOnlyLook (ro);
     for (auto* lane : midiLanes)
         lane->setInterceptsMouseClicks (! ro, ! ro);   // las pistas MIDI no se tocan
     repaint();
+}
+
+void TimelineView::setTool (ui::EditTool t)
+{
+    tool = readOnly ? ui::EditTool::select : t;
+    setCutGuide (-1.0, -1, false);
+    // El carril bajo el mouse cambia de cursor (y de guía) al instante, sin esperar a que se mueva
+    for (auto* lane : lanes)
+        if (lane->isMouseOver (false))
+            lane->hover (lane->getMouseXYRelative().x, juce::ModifierKeys::getCurrentModifiers());
+        else
+            lane->setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
+void TimelineView::setCutGuide (double seconds, int lane, bool allTracks)
+{
+    if (std::abs (seconds - cutGuide) < 1.0e-9 && lane == cutGuideLane && allTracks == cutGuideAll)
+        return;
+    // Solo la franja de la guía vieja y la nueva (con su letrero a un lado o al otro)
+    auto strip = [this] (double s) { return juce::Rectangle<int> (headerWidth + timeToX (s) - 330, 0, 660, overlay->getHeight()); };
+    if (cutGuide >= 0.0)
+        overlay->repaint (strip (cutGuide));
+    cutGuide = seconds;
+    cutGuideLane = lane;
+    cutGuideAll = allTracks;
+    if (cutGuide >= 0.0)
+        overlay->repaint (strip (cutGuide));
+}
+
+void TimelineView::dragForCapture (int lane, double fromSeconds, double toSeconds, juce::ModifierKeys mods)
+{
+    if (! juce::isPositiveAndBelow (lane, lanes.size()))
+        return;
+    auto* l = lanes[lane];
+    const auto source = juce::Desktop::getInstance().getMainMouseSource();
+    const auto start = juce::Point<float> ((float) (headerWidth + timeToX (fromSeconds)), l->getHeight() * 0.5f);
+    const auto now = juce::Time::getCurrentTime();
+    auto event = [&] (double seconds, bool dragged)
+    {
+        const juce::Point<float> at ((float) (headerWidth + timeToX (seconds)), start.y);
+        return juce::MouseEvent (source, at, mods.withFlags (juce::ModifierKeys::leftButtonModifier), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                 l, l, now, start, now, 1, dragged);
+    };
+    l->mouseDown (event (fromSeconds, false));
+    l->mouseDrag (event (toSeconds, true));
+    l->mouseUp (event (toSeconds, true));
+}
+
+void TimelineView::showCutGuide (double seconds, int lane, bool allTracks)
+{
+    setCutGuide (seconds < 0.0 ? -1.0 : (snapCut ? snapCut (seconds, lane) : seconds), lane, allTracks);
 }
 
 void TimelineView::setLoadingText (const juce::String& text)
