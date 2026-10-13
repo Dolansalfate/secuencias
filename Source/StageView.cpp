@@ -144,7 +144,7 @@ void StageView::paint (juce::Graphics& g)
         g.drawText (tr ("tiempo ") + juce::String (state.beat) + " / " + juce::String (state.beatsInBar), barArea, juce::Justification::centredLeft);
 
         // Pulso: un punto por tiempo del compás; el actual lleno (el 1 en color de acento) y una barra de avance
-        const int n = juce::jlimit (1, 12, state.beatsInBar);
+        const int n = juce::jlimit (1, maxBeatsPerBar, state.beatsInBar);
         const float dot = juce::jmin (unit * 1.1f, (float) footer.getWidth() / (float) (n * 2));
         const float gap = dot * 0.6f;
         const float total = n * dot + (n - 1) * gap;

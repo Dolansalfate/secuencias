@@ -2,6 +2,22 @@
 #include "TempoMap.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
+
+// Silencio y color de un tramo en song.json: solo se escriben si no son los de siempre
+static void readClipLook (Clip& clip, const juce::var& c)
+{
+    clip.muted = (bool) c.getProperty ("muted", false);
+    clip.colour = (juce::uint32) (juce::int64) c.getProperty ("color", 0);
+}
+
+static void writeClipLook (juce::DynamicObject& o, const Clip& c)
+{
+    if (c.muted)
+        o.setProperty ("muted", true);
+    if (c.colour != 0)
+        o.setProperty ("color", (juce::int64) c.colour);
+}
 
 void SongInfo::sortMarkers()
 {
@@ -119,7 +135,7 @@ int Analysis::nearestBeat (double seconds, double maxDistance) const
 
 void Analysis::renumberBeats (int from, int meterIn, int toExclusive, int anchor)
 {
-    const int m = juce::jlimit (1, 7, meterIn);
+    const int m = juce::jlimit (1, maxBeatsPerBar, meterIn);
     const int to = juce::jlimit (0, (int) beats.size(), toExclusive);
     if (anchor < 0)
         anchor = from;
@@ -189,10 +205,10 @@ double Analysis::evenGrid (double fromSeconds, double toSeconds, int count, int 
         return 0.0;
     const double interval = (toSeconds - fromSeconds) / count;
     replaceBeatsWithGrid (fromSeconds, toSeconds, 60.0 / interval, meterIn);
-    const int m = juce::jlimit (1, 7, meterIn);
+    const int m = juce::jlimit (1, maxBeatsPerBar, meterIn);
     const int from = firstBeatAtOrAfter (fromSeconds);
     const int remainder = count % m;
-    if (absorbRemainder && remainder > 0 && remainder * 2 < m && count > m && m + remainder <= 7)
+    if (absorbRemainder && remainder > 0 && remainder * 2 < m && count > m && m + remainder <= maxBeatsPerBar)
         for (int k = 0; k < remainder; ++k)
             beats[(size_t) (from + count - remainder + k)].beatInBar = m + 1 + k;
     meter = 1;
@@ -203,7 +219,7 @@ double Analysis::evenGrid (double fromSeconds, double toSeconds, int count, int 
 
 void Analysis::shortBar (int index, int beatsInBar, int meterAfter, int toExclusive)
 {
-    const int n = juce::jlimit (1, 7, beatsInBar);
+    const int n = juce::jlimit (1, maxBeatsPerBar, beatsInBar);
     const int to = juce::jlimit (0, (int) beats.size(), toExclusive);
     if (index < 0 || index >= to)
         return;
@@ -227,6 +243,78 @@ void Analysis::replaceBeatsWithGrid (double fromSeconds, double toSeconds, doubl
     renumberBeats (from, meterIn, from + (int) grid.size());
 }
 
+std::vector<Analysis::SignatureRun> Analysis::signatureRuns() const
+{
+    std::vector<SignatureRun> runs;
+    std::vector<int> downs;
+    for (int i = 0; i < (int) beats.size(); ++i)
+        if (beats[(size_t) i].beatInBar == 1)
+            downs.push_back (i);
+    for (size_t k = 0; k < downs.size(); ++k)
+    {
+        const int start = downs[k];
+        const int end = k + 1 < downs.size() ? downs[k + 1] : (int) beats.size();
+        const int length = end - start;
+        const int unit = beats[(size_t) start].unit;
+        const bool last = k + 1 == downs.size();
+        // El mismo tipo sigue el tramo; el último compás, incompleto (la canción termina), también
+        if (! runs.empty() && runs.back().unit == unit && (runs.back().numerator == length || (last && length < runs.back().numerator)))
+        {
+            runs.back().endBeat = end;
+            continue;
+        }
+        runs.push_back ({ start, end, length, unit, (int) k + 1 });
+    }
+    return runs;
+}
+
+void Analysis::setSignature (int from, int numerator, int unit, int toExclusive)
+{
+    const int to = juce::jlimit (0, (int) beats.size(), toExclusive);
+    from = juce::jlimit (0, to, from);
+    if (from >= to)
+        return;
+    renumberBeats (from, numerator, to, from);
+    for (int i = from; i < to; ++i)
+        beats[(size_t) i].unit = unit;
+}
+
+bool Analysis::warpBeat (int index, double seconds)
+{
+    const int n = (int) beats.size();
+    if (! juce::isPositiveAndBelow (index, n) || ! std::isfinite (seconds))
+        return false;
+    // Anclas: los primeros tiempos de compás antes y después (sin el propio); sin uno antes, el inicio de la canción
+    int a = index - 1;
+    while (a >= 0 && beats[(size_t) a].beatInBar != 1)
+        --a;
+    int b = index + 1;
+    while (b < n && beats[(size_t) b].beatInBar != 1)
+        ++b;
+    const double tI = beats[(size_t) index].seconds;
+    const double tA = a >= 0 ? beats[(size_t) a].seconds : 0.0;
+    constexpr double minGap = 0.02;   // ningún tiempo puede quedar a menos de 20 ms del anterior
+    const double lo = tA + minGap * (index - a);
+    const double hi = b < n ? beats[(size_t) b].seconds - minGap * (b - index) : std::numeric_limits<double>::max();
+    if (seconds < lo || seconds > hi || (a < 0 && index > 0 && tI - tA < 1.0e-6))
+        return false;
+    if (std::abs (seconds - tI) < 1.0e-6)
+        return false;
+    for (int i = a + 1; i < index; ++i)
+        beats[(size_t) i].seconds = tA + (beats[(size_t) i].seconds - tA) * (seconds - tA) / (tI - tA);
+    if (b < n)
+    {
+        const double tB = beats[(size_t) b].seconds;
+        for (int i = index + 1; i < b; ++i)
+            beats[(size_t) i].seconds = seconds + (beats[(size_t) i].seconds - tI) * (tB - seconds) / (tB - tI);
+    }
+    else
+        for (int i = index + 1; i < n; ++i)
+            beats[(size_t) i].seconds += seconds - tI;
+    beats[(size_t) index].seconds = seconds;
+    return true;
+}
+
 juce::var Library::analysisToVar (const Analysis& a)
 {
     auto* an = new juce::DynamicObject();
@@ -235,7 +323,8 @@ juce::var Library::analysisToVar (const Analysis& a)
     an->setProperty ("key", a.key);
     juce::Array<juce::var> beats, chords;
     for (auto& b : a.beats)
-        beats.add (juce::Array<juce::var> { b.seconds, b.beatInBar });
+        beats.add (b.unit == 4 ? juce::Array<juce::var> { b.seconds, b.beatInBar }
+                               : juce::Array<juce::var> { b.seconds, b.beatInBar, b.unit });   // la figura, solo si no es negra
     for (auto& c : a.chords)
         chords.add (juce::Array<juce::var> { c.start, c.end, c.name });
     an->setProperty ("beats", beats);
@@ -249,12 +338,18 @@ Analysis Library::analysisFromVar (const juce::var& v)
     if (! v.isObject())
         return a;
     a.bpm   = juce::jmax (0.0, (double) v.getProperty ("bpm", 0.0));
-    a.meter = juce::jlimit (2, 7, (int) v.getProperty ("meter", 4));
+    a.meter = juce::jlimit (1, maxBeatsPerBar, (int) v.getProperty ("meter", 4));
     a.key   = v.getProperty ("key", "").toString();
     if (auto* arr = v.getProperty ("beats", juce::var()).getArray())
         for (auto& b : *arr)
             if (auto* pair = b.getArray(); pair != nullptr && pair->size() >= 2)
-                a.beats.push_back ({ juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, 7, (int) (*pair)[1]) });
+            {
+                Beat beat { juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, maxBeatsPerBar, (int) (*pair)[1]) };
+                if (pair->size() >= 3)
+                    if (const int unit = (int) (*pair)[2]; unit == 2 || unit == 4 || unit == 8 || unit == 16)
+                        beat.unit = unit;
+                a.beats.push_back (beat);
+            }
     if (auto* arr = v.getProperty ("chords", juce::var()).getArray())
         for (auto& c : *arr)
             if (auto* t = c.getArray(); t != nullptr && t->size() >= 3)
@@ -483,6 +578,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                 clip.srcStart = juce::jmax (0.0, (double) c.getProperty ("start", 0.0));
                 clip.srcEnd   = juce::jmax (clip.srcStart, (double) c.getProperty ("end", 0.0));
                 clip.position = juce::jmax (0.0, (double) c.getProperty ("at", 0.0));
+                readClipLook (clip, c);
                 if (clip.srcEnd > clip.srcStart + 1.0e-6)
                     s.clips.push_back (clip);
             }
@@ -502,6 +598,7 @@ SongInfo Library::readSong (const juce::File& folder) const
                         clip.srcStart = juce::jmax (0.0, (double) c.getProperty ("start", 0.0));
                         clip.srcEnd   = juce::jmax (clip.srcStart, (double) c.getProperty ("end", 0.0));
                         clip.position = juce::jmax (0.0, (double) c.getProperty ("at", 0.0));
+                        readClipLook (clip, c);
                         if (std::isfinite (clip.srcStart) && std::isfinite (clip.srcEnd) && std::isfinite (clip.position)
                             && clip.srcEnd > clip.srcStart + 1.0e-6)
                             own.clips.push_back (clip);
@@ -684,6 +781,7 @@ bool Library::saveSong (const SongInfo& s) const
             co->setProperty ("start", c.srcStart);
             co->setProperty ("end", c.srcEnd);
             co->setProperty ("at", c.position);
+            writeClipLook (*co, c);
             clips.add (juce::var (co));
         }
         obj->setProperty ("clips", clips);
@@ -701,6 +799,7 @@ bool Library::saveSong (const SongInfo& s) const
                 co->setProperty ("start", c.srcStart);
                 co->setProperty ("end", c.srcEnd);
                 co->setProperty ("at", c.position);
+                writeClipLook (*co, c);
                 list.add (juce::var (co));
             }
             auto* to = new juce::DynamicObject();

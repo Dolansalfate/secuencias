@@ -103,7 +103,7 @@ modelo que usa Moises).
   los marcadores propios, las notas y los golpes MIDI van con su tramo; la mezcla, los triggers y
   las salidas de cada pista se conservan. En una canción ligada los tramos (cortar, mover, pegar)
   se editan en el mix; el menú del setlist ofrece "Abrir su mix" y "Desligar del mix", y el clic derecho
-  (o Shift + arrastre) sobre un carril ofrece "Editar aquí", que la desliga tras preguntar (`confirmUnlink`).
+  (o cualquier herramienta que edite tramos) sobre un carril ofrece "Editar aquí", que la desliga tras preguntar (`confirmUnlink`).
 - Importar stems: varios archivos o una carpeta (o arrastrar varios archivos a la ventana).
   Formatos: wav, aiff, flac, mp3, ogg (m4a solo en macOS: JUCE no decodifica AAC en Linux).
 - **Vista de arreglo** (`TimelineView`): regla con marcadores (clic = ir, arrastrar = mover,
@@ -236,8 +236,8 @@ modelo que usa Moises).
 - **Arreglo del audio** (fase 4, `Arrangement`): clic derecho sobre un carril: cortar los
   stems en ese punto (todos a la vez), desplazar el tramo (o el tramo y los siguientes) en
   milisegundos, alinear su inicio al tiempo detectado más cercano, unir con el anterior,
-  eliminar dejando silencio o cerrando el hueco, restaurar el audio original. Shift + arrastre
-  sobre un carril mueve el tramo bajo el mouse (se ve el desplazamiento en ms). "Copiar
+  eliminar dejando silencio o cerrando el hueco, restaurar el audio original. Con la herramienta
+  Objeto, arrastrar un tramo lo mueve (se ve el desplazamiento en ms; Shift: el de todas las pistas). "Copiar
   tramo", "Pegar insertando" (abre espacio: el audio y la grilla que siguen se corren, y la
   copia trae los tiempos y acordes de su rango y, si venía de una sección con otro tempo, su
   propia sección de tempo), "Pegar encima" (superpone) y "Duplicar tramo" (pega insertando a
@@ -250,23 +250,43 @@ modelo que usa Moises).
   **Cada pista por separado** (`SongInfo::trackClips`): la sección "Solo «pista»" del mismo menú corta,
   desplaza (el tramo o el tramo y los siguientes), alinea, une, borra (deja silencio), copia y pega encima
   solo en la pista del carril, y "Volver a los tramos de la canción en esta pista" quita su arreglo propio;
-  Ctrl + Shift + arrastre mueve su tramo. Las ediciones de todas las pistas también alcanzan, por tiempo, a
+  con Objeto, arrastrar el tramo de un carril lo mueve solo en esa pista. Las ediciones de todas las pistas también alcanzan, por tiempo, a
   las pistas con arreglo propio (salvo a las grabaciones, que no siguen los tramos de la canción).
-- **Herramientas de edición** (como en Cubase; botones "Selección", "Cortar" y "Mover" junto a "+ Nota", o
-  las teclas V, C y D; `ui::EditTool`, `ui::ToolButton`, `TimelineView::setTool`): con **Selección** (la de
-  siempre) un clic lleva el cabezal, el clic derecho abre el menú del tramo, Shift + arrastre y Ctrl + Shift +
-  arrastre mueven tramos y Alt + clic corta. Con **Cortar** (cursor de tijera) una guía muestra dónde caerá el
-  corte según el modo de corte, con un letrero ("Cortar en 0:05.5 · solo Bajo"); un clic corta solo la pista
-  del carril (le da su arreglo propio) y Shift + clic corta todas. Con **Mover** (mano) arrastrar mueve el
-  tramo de la pista del carril y Shift + arrastre el de todas (si la canción tiene cortes). La app siempre
-  parte en Selección y el modo reproducción vuelve a ella. El clic derecho abre el menú del tramo con
-  cualquier herramienta.
+- **Caja de herramientas** como la de Cubase (11 íconos junto a "+ Nota", con su nombre y tecla en la ayuda
+  emergente; `ui::EditTool`, `ui::drawToolIcon`, `ui::ToolButton`, `TimelineView::setTool`): **Objeto** (V: clic
+  elige el tramo de la pista, Ctrl suma o quita, arrastrar mueve los elegidos, arrastrar un borde lo recorta o
+  alarga, Supr los deja en silencio, clic en un hueco lleva el cabezal, Alt + clic corta), **Rango** (R: arrastrar
+  marca un rango en las pistas recorridas; clic derecho dentro: silenciar, quitar cerrando el hueco, cortar en los
+  bordes, loop del rango, zoom; Supr lo silencia), **Cortar** (C: tijera con guía del corte según el modo de corte),
+  **Unir** (U: con el tramo siguiente si sigue el mismo audio), **Borrar** (B: deja el tramo en silencio; en la pista
+  de tempo o de compás quita el cambio, en una pista MIDI el golpe), **Zoom** (Z: clic acerca, Alt + clic aleja,
+  arrastrar muestra lo marcado), **Silenciar** (S: el tramo no suena y se ve rayado "silenciado"), **Dibujar** (D: en
+  la pista de tempo o de compás agrega un cambio, en una pista MIDI un golpe), **Reproducir** (P: suena desde ahí
+  mientras se mantiene el clic y al soltar vuelve), **Warp** (W: arrastrar una línea de la rejilla hasta el golpe del
+  audio; los tiempos entre los compases vecinos se acomodan, el audio no cambia) y **Color** (K: color del tramo).
+  En todas, Shift alcanza al tramo de toda la canción en vez del de la pista del carril, y el clic derecho abre el
+  menú del tramo. La app parte en Objeto y el modo reproducción vuelve a ella. No están el Comp ni la Línea de Cubase
+  (no hay tomas ni automatización).
+- **Pista de compás y pista de tempo** (sobre los carriles, como las pistas globales de Cubase; botón "Pista de tempo"
+  en la regla para mostrarlas u ocultarlas, ajuste `tempoTrack`; `TimelineView::TempoLane`): vienen con los tempos y
+  compases de cada canción (del análisis o del mix) y se editan aquí. La de compás muestra cada cambio (4/4, 17/4,
+  7/8...; hasta 32 tiempos por compás, `maxBeatsPerBar`, y la figura del tiempo, `Beat::unit`): clic edita el cambio
+  (tiempos, figura y hasta dónde: el próximo cambio, solo ese compás o el final), arrastrarlo lo lleva a otro tiempo,
+  doble clic (o Dibujar) agrega uno, Borrar lo quita, y el clic derecho ofrece además **insertar compases** (N
+  compases de N/D antes de ese compás: silencio en todas las pistas y lo que sigue se corre) y eliminar un compás
+  (cierra el hueco). Con la rejilla fija del click (sin análisis), primero la pasa a tiempos. La de tempo dibuja la
+  escalera del tempo de cada sección y, de fondo, el tempo que se detecta tiempo a tiempo: arrastrar un escalón
+  cambia el tempo, arrastrar un cambio lo corre (al primer tiempo de compás más cercano), doble clic (o Dibujar) agrega
+  un cambio a la altura del clic, Borrar lo quita, clic derecho abre el menú de la sección. Su botón elige qué hace el
+  tempo: **"Estira el audio"** (la sección suena a ese tempo, como "Tempo de la sección") o **"Solo el click"** (la
+  rejilla de la sección pasa a ese tempo y el audio suena igual: se conserva la razón del estirado); ajuste
+  `tempoTrackStretches`.
 - **Modo de corte** (selector junto a "+ Marcador", ajuste `cutMode`): "Corte libre" corta
   donde se hizo clic; "Corte a la rejilla" en el tiempo detectado más cercano (o de la
   rejilla fija del click); "Corte a la transiente" busca el ataque más cercano (±200 ms) en la
   pista del carril donde se hizo clic (la batería es la mejor referencia) y corta justo antes
   del golpe (`findOnset`). El menú muestra dónde caerá el corte. El mismo modo rige el
-  Shift + arrastre, la tijera y la herramienta Mover: a la rejilla encaja el inicio del tramo en el tiempo más cercano; a la
+  la tijera, el rango, el recorte y el arrastre con Objeto: a la rejilla encaja el inicio del tramo en el tiempo más cercano; a la
   transiente encaja el primer golpe del tramo (en su primer cuarto de segundo) en el tiempo.
 - **Nivelado de sonoridad** (EBU R128, `Loudness`): "Nivelar" mide primero **cada stem** por
   tramo entre marcadores y le da a cada stem, en cada tramo, la ganancia que lo lleva al nivel
@@ -613,15 +633,20 @@ Secuencias/
   `gainDb`, `lufs`, `truePeakDb`. Por pista: `stemSongLufs` (canción entera), `headStemGainsDb`
   y `headStemLufs`, y por marcador `stemGainsDb` y `stemLufs`, todos indexados como `stems`
   (`fitStemArrays` los ajusta al leer). `unmeasuredDb` (-100) significa sin medir.
-- `analysis` (opcional): `{ "bpm", "meter", "key", "beats": [[segundos, tiempoEnCompás], ...],
+- `analysis` (opcional): `{ "bpm", "meter", "key", "beats": [[segundos, tiempoEnCompás, figura?], ...],
   "chords": [[inicio, fin, "Am"], ...] }`. `Analysis::bpmBetween`, `chordAt`, `downbeatAfter`
   y `nearestBeat` son las consultas que usa la UI; `renumberBeats` (con ancla), `halveBeats`,
   `doubleBeats`, `replaceBeatsWithGrid`, `evenGrid` y `shortBar` editan el click; `detectedBpmBetween` (TempoMap) mide
   el tempo de un tramo con los mismos criterios que la detección de secciones. Los
   acordes se guardan como los escribe madmom (siempre con sostenidos) y la tonalidad
-  traducida ("Mib mayor"); la escritura se decide al mostrar.
-- Arreglo: `clips`: `[{ "start", "end", "at" }]`, tramos del audio original (segundos) y
-  dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. `trackClips`:
+  traducida ("Mib mayor"); la escritura se decide al mostrar. La figura del tiempo (`Beat::unit`, el denominador
+  del compás: 2, 4, 8 o 16) solo se escribe si no es 4. `signatureRuns` (pista de compás: tramos de compases del
+  mismo tipo), `setSignature` y `warpBeat` (herramienta Warp) son las ediciones de la pista de compás; los compases
+  van de 1 a `maxBeatsPerBar` (32) tiempos.
+- Arreglo: `clips`: `[{ "start", "end", "at", "muted"?, "color"? }]`, tramos del audio original (segundos) y
+  dónde empiezan en la línea de tiempo de la canción; vacío = el audio entero. `muted` (herramienta Silenciar: no
+  suena) y `color` (ARGB; herramienta Color) solo se escriben si no son los de siempre (`Clip::muted`, `colour`;
+  `Clip::part` los conserva al partir, copiar o pegar). `trackClips`:
   `[{ "stem" (archivo), "clips": [...] }]`, las pistas con su propio arreglo (`TrackClips`; una
   lista vacía = la pista no suena); se usan en vez de `clips` en esa pista. Al separar una pista en
   partes (batería) cada parte hereda su arreglo propio, y los de pistas que ya no están se quitan. Todo lo demás
@@ -671,8 +696,9 @@ en macOS `~/Library/Application Support/Secuencias/`. Claves: `audioDevice` (XML
 `quality` (1 normal, 2 alta, 3 máxima), `levelTargetLufs` (objetivo del nivelado en LUFS, -30 a -6; las
 versiones de antes guardaban en `levelTarget` el índice del selector, 1 = -12 ... 4 = -18, que se lee una vez
 para migrar), `playbackMode` (la app vuelve en el modo reproducción), `exportFormat` (0 WAV, 1 MP3),
-`exportClick` (0 sin click, 1 mezclado, 2 aparte), `exportStems`, `exportLevel` (0 como suena, 1 al objetivo) y
-`exportFolder`; `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
+`exportClick` (0 sin click, 1 mezclado, 2 aparte), `exportStems`, `exportLevel` (0 como suena, 1 al objetivo),
+`exportFolder`, `tempoTrack` (mostrar la pista de tempo y de compás) y `tempoTrackStretches` (el tempo estira el
+audio o solo mueve el click); `model` es el selector antiguo de la v0.2 y solo se lee para migrarlo.
 
 Shows (modo reproducción): `<raíz>/shows.json` = `{ "active": 0, "shows": [{ "name", "songs": [carpetas] }] }`
 (`SongShow`, `Library::shows`, `activeShow`, `loadShows` desde `load()`, `saveShows`; sin archivo, un show "Show"
@@ -848,19 +874,7 @@ Pasos de `run()`:
   propio creado de paso. `renderedTrackClips` / `sameTrackClips` deciden si hay que volver a renderizar.
   `TimelineView::setLaneClips` (`LaneClips`, `mappedLaneClips`): con alguna pista propia, cada carril dibuja sus
   bordes y huecos (con una franja de acento en la cabecera) y la capa de encima solo el arrastre de toda la canción;
-  `onClipDragged (..., trackOnly)` con Ctrl + Shift (`clipDragTrackOnly`, el carril dibuja el arrastre, también
-  en una pista sin cortes).
-- Herramientas: `TimelineView::setTool` (`tool`); `Lane::hover` pone el cursor (`scissorsCursor`, dibujado con
-  `ui::drawToolIcon` al crear la vista) y la guía (`setCutGuide`, que repinta solo su franja de la capa de encima;
-  `Overlay::drawCutGuide`) con `snapCut` (MainComponent: `snapCutTime` en tiempo de reproducción, salvo mientras
-  renderiza); `modifierKeysChanged` la actualiza con Shift o Alt sin mover el mouse. Un clic de la tijera llama a
-  `onCut` → `MainComponent::cutWithTool` (canción ligada: `linkedSongMenu` y luego el mismo corte; una pista:
-  `trackClipAction (21)`; todas: `cutAllTracksAt`, el mismo camino que "Cortar todas las pistas" del menú) y
-  escribe en la barra de estado qué cortó. Mover arranca el mismo arrastre que Ctrl + Shift (o Shift con
-  Shift). `setEditTool` sincroniza botones, vista y ayuda. Captura: `--herramienta=cortar|mover`,
-  `--guiacorte=seg`, `--tijera=seg` (en `--pista=N` o en todas) y `--arrastrar=desde:hasta [--shift]`
-  (`TimelineView::dragForCapture`, eventos de mouse sintéticos sobre el carril).
-
+  el arrastre de un tramo (de una pista o de la canción) lo hace la herramienta Objeto (5.4m).
 ### 5.4f Triggers (golpes y sampler)
 - `triggers::detect (buffer, sr, umbralDb, sensibilidad, minMs)`: envolvente RMS en dB por
   bloques de 1 ms; golpe donde sube ≥ 6 dB en 3 ms y supera el umbral; el inicio es el bloque
@@ -954,7 +968,7 @@ Pasos de `run()`:
   deben seguirlos); crear una pista MIDI y volver a detectar esperan a que el arreglo que suena sea
   el de `SongInfo` (`arrangementReady`). `refreshReplaced` calla el stem de origen solo si alguna fila suena de verdad.
   Las ediciones de tramos mueven los golpes con el audio: `arrangement::moveMidiHits` (desplazar,
-  alinear, Shift + arrastre; con el delta que `moveClip` aplica de verdad), `removeMidiHits`
+  alinear, arrastre con Objeto; con el delta que `moveClip` aplica de verdad), `removeMidiHits`
   (eliminar dejando silencio), `midiHitsToSource` (restaurar el original), `copyMidiHits` /
   `pasteMidiHits` (copiar, pegar y duplicar); cerrar o abrir huecos los mueve `shiftGrid`. Callbacks de la vista (`onMidiAdd`,
   `onMidiMove`, `onMidiVelocity`, `onMidiDelete`, menús `midiHitsMenu`, `midiPadMenu`,
@@ -1123,7 +1137,7 @@ Pasos de `run()`:
   `stemsKey` con las opciones de arriba y separa las fuentes usadas que falten; `noteMixStems` le da al mix las pistas de
   una separación si no tenía otras. `mixSongBuilds` cuenta los armados en curso (`isMixBusy` los espera). Un marcador del mix
   renombrado o movido a mano pasa a ser propio (`fromMix = false`). El menú de
-  tramos de una canción ligada (`linkedSongMenu`) y Shift + arrastre ofrecen abrir el mix o editar aquí, que la
+  tramos de una canción ligada (`linkedSongMenu`) y las herramientas que editan tramos ofrecen abrir el mix o editar aquí, que la
   desliga tras preguntar (`confirmUnlink`, y vuelve a abrir el menú); "Separar canción (IA)" remite al mix; `openLinkedMix`, `unlinkSong`; borrar un mix desliga sus canciones.
 - `mix::render` y `mix::renderStems` comparten `makePlan` (ubicación, fundidos, uniones coherentes),
   `readLayer` (lee y estira el tramo de un archivo, alineado con el mix), `levelSegment` (ganancia y
@@ -1190,6 +1204,48 @@ Pasos de `run()`:
 - `--captura --reproduccion [--show=1,2,3]` (el show activo pasa a tener esas canciones del setlist; escribe
   `shows.json` y el ajuste `playbackMode` reales) espera a que termine la precarga (`isPreloadBusy`).
 
+### 5.4m Caja de herramientas y pista de tempo (como Cubase)
+- `ui::EditTool` (UiUtils.h, 11 herramientas), `ui::drawToolIcon` (íconos con Path; con `outline` para los cursores),
+  `ui::ToolButton` (solo ícono si no tiene texto). `MainComponent::toolButtons` (ayuda emergente con `tooltips`),
+  `toolInfo` (nombre, tecla y ayuda de cada una), `setEditTool`. `TimelineView` crea un cursor por herramienta
+  (`toolCursors`).
+- Gestos en `TimelineView` (`toolMouseDown`, `toolMouseDrag`, `toolMouseUp`, `toolHover`; el carril solo los pasa):
+  estado `Gesture` (seek, move, trim, range, zoom, warp, play), `clipList` (los tramos del carril o de la canción; sin
+  cortes, uno con toda la canción), `edgeNear` (bordes a <= 5 px), `laneArea` / `laneIndexAtY`, `beatNear`. Selección
+  `ClipPick` (carril o -1 = toda la canción; tiempo de reproducción) y `Range` (carriles firstLane..lastLane o
+  todos); se conservan en un render nuevo y `songLoaded` las suelta. La capa de encima dibuja selección, arrastre,
+  recorte, rango, banda del zoom, rejilla del warp y guía de la tijera (`Overlay::drawToolLayer`); el carril dibuja
+  los silenciados (`drawMuted`) y la onda de cada tramo con su color (`renderImage` con `clipList`). Callbacks:
+  `onPicksMoved`, `onClipTrimmed`, `onClipTool`, `onRangeMenu`, `onPlayToolDown/Up`, `onBeatWarped`, `onCut`.
+  `MidiLane`: Dibujar agrega un golpe con un clic y Borrar quita el golpe.
+- En `MainComponent`: `moveClipPicks` (ajuste del modo de corte con el tramo tomado, el mismo delta para todos;
+  pistas: `ownClips` + `moveMidiHits` con su archivo; canción: `moveClip` + `moveOwnRange`), `trimClipEdge`
+  (`arrangement::trimClip`; lo recortado calla también en las pistas propias y se lleva sus golpes MIDI),
+  `deleteClipPicks` (Supr), `clipToolClicked` (Unir con `joinWithPrevious (índice + 1)`, Borrar, Silenciar con
+  `setMutedInRange` en las pistas propias, Color con `colourMenu` y `setColourInRange`), `rangeMenu` / `editRange`
+  (`removeSongRange`, `silenceRange`, cortes en los bordes, `rangeLoopStart/End` que `updateLoopRegion` usa mientras el
+  loop siga encendido, `TimelineView::zoomToRange`), `playToolDown` / `playToolUp`, `beatWarped`. Supr: golpes MIDI,
+  si no tramos elegidos, si no el rango.
+- `arrangement`: `setMutedInRange`, `setColourInRange`, `silenceRange`, `trimClip`, `removeSongRange` (todas las pistas,
+  golpes MIDI y, cerrando el hueco, la grilla con `shiftGrid`) e `insertBars` (`insertGap` + `insertOwnGap` +
+  `shiftGrid` y los tiempos nuevos del hueco). `render` salta los tramos silenciados; `sameClips` y `playbackKey`
+  cuentan el silencio (no el color).
+- Pista de tempo y de compás (`TimelineView::TempoLane`, `tempoLaneHeight`, `tempoToggle`): fila de compás arriba
+  (`signatureMarks` desde `Analysis::signatureRuns`; rejilla fija: un "4/4" con beat -1) y escalera de tempo abajo
+  (`tempoBands`, el tempo de reproducción con "Estira el audio" o el original con "Solo el click", el otro punteado;
+  curva del tempo local de los tiempos, mediana de 5). Callbacks `onTempoSet`, `onTempoMoved`, `onTempoAdd`,
+  `onTempoRemove`, `onSignatureClicked`, `onSignatureAdd`, `onSignatureMoved`, `onSignatureRemove`,
+  `onTempoModeChanged`, `onTempoTrackToggled`; el clic derecho del tempo usa `onTempoBandClicked` (el menú de siempre).
+  En `MainComponent`: `tempoTrackSet` (estira: `playBpm` de la sección o de la canción; solo el click: `origBpm`, la
+  razón del estirado se conserva y `replaceBeatsWithGrid` en la sección con el compás que tiene; sin análisis, `bpm`),
+  `tempoTrackMoved`, `tempoTrackAdd` (en el primer tiempo de compás más cercano), `tempoTrackRemove`,
+  `tempoRegionsEdited`; `signatureMenu`, `signatureDialog` (tiempos, figura y alcance), `moveSignature`,
+  `removeSignature` (sigue el compás anterior contando desde su inicio), `insertBarsDialog` (`beatSecondsAt`: la
+  mediana de los tiempos cercanos), `deleteBar`, `ensureExplicitBeats` (la rejilla fija pasa a tiempos).
+- Captura: `--herramienta=objeto|rango|cortar|unir|borrar|zoom|silenciar|dibujar|reproducir|warp|color`,
+  `--clic=seg` y `--arrastrar=desde:hasta` (en `--pista=N`; `--shift`), `--compas=N/D:compás`,
+  `--insertarcompases=K:N/D:compás`, `--tempopista=sección:bpm [--soloclick]`.
+
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
@@ -1222,7 +1278,7 @@ Pasos de `run()`:
   `onTempoBandClicked`, `onBeatClicked` (clic derecho sobre un tiempo detectado en la fila
   de compases), `onChordClicked` (clic derecho en la fila de acordes), `onNoteClicked` (clic
   derecho en la fila de notas), `onLaneMenu` (clic
-  derecho sobre un carril), `onClipDragged` (Shift + arrastre sobre un carril), `onMute`,
+  derecho sobre un carril), los gestos de las herramientas (5.4m), `onMute`,
   `onSolo`. `setClips` recibe los tramos en tiempo de reproducción; la capa `Overlay` dibuja
   sus bordes, los huecos y el tramo que se está arrastrando. La regla (`Ruler`, 82 px) tiene filas de marcadores,
   secciones de tempo (`setTempoBands`, en tiempo de reproducción), compases, tiempo y
@@ -1326,6 +1382,11 @@ Pasos de `run()`:
   las 2 siguientes aunque no quepan); la caché en disco puede llegar a 20 GB. Salir del modo con una canción
   precargada la vuelve a cargar (se detiene). Una canción ligada a un mix que hay que volver a armar se arma
   al elegirla (no en la precarga).
+- Herramientas: Silenciar calla el audio del tramo pero no los golpes de sus pistas MIDI; Unir solo une tramos
+  seguidos del mismo audio (no arma una "parte" con huecos como Cubase); no hay Comp ni Línea. En la pista de compás,
+  la figura (x/4, x/8) es notación: el click suena en cada tiempo de la rejilla, y el tempo se cuenta en esos tiempos.
+  Lo que se edite en la pista de tempo y de compás de una canción ligada a su mix se rehace al actualizarla desde el
+  mix (como los demás cambios de la grilla).
 - Si se arrastra a la ventana un solo archivo, siempre se separa (no pregunta).
 - Con JACK, JUCE conecta las salidas del cliente a los puertos físicos al abrir el dispositivo;
   la app no elige puertos por nombre (PipeWire puede reconectarlos).
@@ -1399,9 +1460,8 @@ Fases, en orden:
    original (`clips`) colocados en la línea de tiempo. Hecho: cortar (todos los stems), mover
    (en ms, al tiempo más cercano o con Shift + arrastre), eliminar (con o sin cerrar el hueco),
    unir, restaurar, copiar, pegar (insertando o encima), duplicar, deshacer, y lo mismo por pista
-   (borrar un tramo de una pista lo silencia). Pendiente: rehacer, recorte de inicio y fin como
-   gesto directo, pegar insertando en una sola pista. Las herramientas (Selección, Cortar, Mover) están hechas
-   (v0.11.1).
+   (borrar un tramo de una pista lo silencia), la caja de herramientas de Cubase con recorte de bordes (v0.12.0) y las
+   pistas de tempo y de compás. Pendiente: rehacer, pegar insertando en una sola pista.
 
 **Plan de estudio en vivo** (acordado el 2026-09-27): 1) triggers de las pistas separadas con
 sampler interno y bancos grabados (hecho, v0.4.0), 2) grabación de entradas como pistas nuevas y
@@ -1420,6 +1480,14 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.12.0 (caja de herramientas de Cubase y pistas de tempo y de compás)**: 11 herramientas (`ui::EditTool`: Objeto
+  con selección, arrastre y recorte de bordes, Rango con su menú y loop, Cortar, Unir, Borrar, Zoom, Silenciar, Dibujar,
+  Reproducir, Warp y Color) con íconos, cursores, teclas y ayuda emergente; `Clip::muted` y `colour` (song.json,
+  render, ondas), `Beat::unit` y compases de hasta 32 tiempos (`maxBeatsPerBar`; antes 7), `Analysis::signatureRuns`,
+  `setSignature`, `warpBeat`, `arrangement::trimClip`, `silenceRange`, `setMutedInRange`, `setColourInRange`,
+  `removeSongRange`, `insertBars`; `TimelineView::TempoLane` (pista de compás y escalera de tempo editables, modo
+  "Estira el audio" / "Solo el click"), insertar y eliminar compases, captura `--herramienta --clic --compas
+  --insertarcompases --tempopista`. La herramienta Mover de la v0.11.1 pasa a ser parte de Objeto (como en Cubase).
 - **v0.11.1 (herramientas de edición)**: caja de herramientas al estilo Cubase (Selección, Cortar con tijera y
   guía del corte, Mover; teclas V, C y D; Alt + clic corta con la selección), `ui::EditTool`, `ui::drawToolIcon`,
   `ui::ToolButton`, `TimelineView::setTool` / `snapCut` / `onCut` / `setCutGuide`, `cutWithTool`,

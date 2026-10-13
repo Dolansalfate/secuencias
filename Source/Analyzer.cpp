@@ -117,12 +117,12 @@ Analysis Analyzer::parseResult (const juce::var& json, juce::String& error)
         return a;
     }
     a.bpm = juce::jmax (0.0, (double) json.getProperty ("bpm", 0.0));
-    a.meter = juce::jlimit (2, 7, (int) json.getProperty ("meter", 4));
+    a.meter = juce::jlimit (1, maxBeatsPerBar, (int) json.getProperty ("meter", 4));
     a.key = displayKey (json.getProperty ("key", "").toString());
     if (auto* arr = json.getProperty ("beats", juce::var()).getArray())
         for (auto& b : *arr)
             if (auto* pair = b.getArray(); pair != nullptr && pair->size() >= 2)
-                a.beats.push_back ({ juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, 7, (int) (*pair)[1]) });
+                a.beats.push_back ({ juce::jmax (0.0, (double) (*pair)[0]), juce::jlimit (1, maxBeatsPerBar, (int) (*pair)[1]) });
     if (auto* arr = json.getProperty ("chords", juce::var()).getArray())
         for (auto& c : *arr)
             if (auto* t = c.getArray(); t != nullptr && t->size() >= 3)

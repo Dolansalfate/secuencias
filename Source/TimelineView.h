@@ -3,6 +3,7 @@
 #include "AudioEngine.h"
 #include "Library.h"
 #include "UiUtils.h"
+#include <array>
 
 // Vista de arreglo: regla con marcadores, compases y tiempo; una pista horizontal con forma de
 // onda por stem (cabecera con nombre, mute y solo); cabezal; loop sombreado; zoom con
@@ -37,6 +38,8 @@ public:
     struct ClipView
     {
         double start = 0.0, end = 0.0;
+        bool muted = false;            // silenciado (herramienta Silenciar): onda gris
+        juce::uint32 colour = 0;       // color propio (herramienta Color); 0 = el de la pista
     };
     void setClips (const std::vector<ClipView>&);
     // Pistas con su propio arreglo (cortadas o movidas solas), en el orden de los carriles, con sus tramos en tiempo de
@@ -91,18 +94,51 @@ public:
     bool deleteSelectedMidiHits();   // Supr: avisa onMidiDelete de la pista con selección; false si no había ninguna
 
     void zoomToFit();
+    void zoomToRange (double start, double end);
     // Modo reproducción: sin edición (sin menús, sin mover marcadores ni tramos, sin tocar las pistas MIDI); clic en
     // la regla o en un carril sigue saltando, y un clic en un marcador va a él
     void setReadOnly (bool);
     bool isReadOnly() const { return readOnly; }
-    // Herramienta de los carriles (como en Cubase). Selección: clic = ir a ese punto, Shift + arrastre mueve el tramo de
-    // todas las pistas, Ctrl + Shift + arrastre el de una, Alt + clic corta. Cortar (tijera): una guía muestra dónde
-    // caerá el corte; clic corta la pista del carril, Shift + clic todas. Mover: arrastrar mueve el tramo de la pista
-    // del carril, Shift + arrastre el de todas. El clic derecho abre siempre el menú del tramo.
+    // Herramienta de los carriles, como la caja de herramientas de Cubase (ui::EditTool). En todas, Shift alcanza a
+    // todas las pistas (el tramo de la canción) en vez de solo la del carril, y el clic derecho abre el menú del tramo.
+    // - Objeto: clic elige el tramo (Ctrl suma o quita), arrastrar mueve los elegidos, arrastrar un borde lo recorta,
+    //   clic en un hueco lleva el cabezal; Alt + clic corta.
+    // - Rango: arrastrar marca un rango en los carriles que se recorren; clic lo quita y lleva el cabezal.
+    // - Cortar: una guía muestra dónde caerá el corte; clic corta. Unir, Borrar, Silenciar y Color: clic en un tramo.
+    // - Zoom: clic acerca, Alt + clic aleja, arrastrar muestra ese tramo. Reproducir: suena mientras se mantiene.
+    // - Warp: arrastrar una línea de la rejilla la lleva a donde está el golpe en el audio. Dibujar: en la pista de
+    //   tempo, de compás o MIDI agrega un cambio o un golpe.
     void setTool (ui::EditTool);
     ui::EditTool getTool() const { return tool; }
     void showCutGuide (double seconds, int lane, bool allTracks);   // la guía de la tijera (captura); seconds < 0 la quita
     void dragForCapture (int lane, double fromSeconds, double toSeconds, juce::ModifierKeys);   // un arrastre sobre el carril
+    void clickForCapture (int lane, double seconds, juce::ModifierKeys);                         // un clic sobre el carril
+
+    // Tramos elegidos con Objeto: de la pista de un carril, o de toda la canción (lane = -1); tiempo de reproducción
+    struct ClipPick
+    {
+        int lane = -1;
+        double start = 0.0, end = 0.0;
+    };
+    void setClipSelection (std::vector<ClipPick>);
+    const std::vector<ClipPick>& getClipSelection() const { return clipSelection; }
+    // Rango marcado con la herramienta Rango, en los carriles firstLane..lastLane (-1 = todos)
+    struct Range
+    {
+        double start = 0.0, end = 0.0;
+        int firstLane = -1, lastLane = -1;
+        bool isEmpty() const { return end <= start; }
+        bool allLanes() const { return firstLane < 0; }
+        bool hasLane (int lane) const { return allLanes() || (lane >= firstLane && lane <= lastLane); }
+    };
+    void setRange (Range);
+    Range getRange() const { return range; }
+
+    // Pista de compás y pista de tempo (las pistas globales de Cubase), sobre los carriles
+    void setTempoTrackVisible (bool);
+    bool isTempoTrackVisible() const { return tempoTrackVisible; }
+    void setTempoStretches (bool);   // arrastrar el tempo estira el audio (true) o solo mueve el click (false)
+    bool tempoStretchesAudio() const { return tempoStretches; }
 
     std::function<void (double seconds)> onSeek;
     std::function<void (int index, bool popup)> onMarkerClicked;
@@ -112,12 +148,31 @@ public:
     std::function<void (int noteIndex, double seconds)> onNoteClicked;     // clic derecho en la fila de notas (-1 = hueco)
     std::function<void (int chordIndex, double seconds)> onChordClicked;   // clic derecho en la fila de acordes (-1 = sin acorde ahí)
     std::function<void (double seconds, int lane)> onLaneMenu;                        // clic derecho sobre un carril (menú del audio)
-    // Shift + arrastre sobre un carril: mover el tramo en todas las pistas; Ctrl + Shift + arrastre: solo en esa pista
-    std::function<void (double seconds, double deltaSeconds, int lane, bool trackOnly)> onClipDragged;
     // Tijera: dónde caería un corte en ese instante del carril (según el modo de corte; tiempo de reproducción) y el
     // corte en sí (seconds = donde se hizo clic, sin ajustar)
     std::function<double (double seconds, int lane)> snapCut;
     std::function<void (double seconds, int lane, bool allTracks)> onCut;
+    // Objeto: los elegidos se arrastraron `delta` (primary = el que se tomó, grab = el instante donde se tomó); un borde
+    // de un tramo se llevó a `edge`
+    std::function<void (std::vector<ClipPick> picks, int primary, double grabSeconds, double deltaSeconds)> onPicksMoved;
+    std::function<void (ClipPick clip, bool startEdge, double edgeSeconds)> onClipTrimmed;
+    // Unir, Borrar, Silenciar, Color y Dibujar (en un carril de audio): clic en ese instante del carril
+    std::function<void (ui::EditTool, double seconds, int lane, bool allTracks)> onClipTool;
+    std::function<void (double seconds, int lane)> onRangeMenu;         // clic derecho dentro del rango
+    std::function<void (double seconds)> onPlayToolDown;                // Reproducir: desde ahí mientras se mantiene
+    std::function<void()> onPlayToolUp;
+    std::function<void (int beat, double seconds)> onBeatWarped;        // Warp: el tiempo `beat` va a ese instante
+    // Pista de tempo (índices de setTempoBands) y de compás (índices de los tiempos del análisis)
+    std::function<void (bool visible)> onTempoTrackToggled;
+    std::function<void (bool stretches)> onTempoModeChanged;
+    std::function<void (int band, double bpm)> onTempoSet;              // arrastre vertical de una sección
+    std::function<void (int band, double seconds)> onTempoMoved;        // arrastre del cambio de tempo (inicio de la sección)
+    std::function<void (double seconds, double bpm)> onTempoAdd;        // doble clic o Dibujar
+    std::function<void (int band)> onTempoRemove;                       // Borrar sobre un cambio de tempo
+    std::function<void (int beat, bool popup, double seconds)> onSignatureClicked;   // un cambio de compás (-1 = ninguno ahí)
+    std::function<void (int beat)> onSignatureAdd;                      // doble clic o Dibujar: el primer tiempo del compás
+    std::function<void (int fromBeat, int toBeat)> onSignatureMoved;
+    std::function<void (int beat)> onSignatureRemove;                   // Borrar sobre un cambio de compás
     std::function<void (int track, bool state)> onMute, onSolo, onTrigger;
     std::function<void (int track)> onLaneHeaderMenu;   // clic derecho en la cabecera de un carril (trigger)
     // Pistas MIDI (índices de golpe = índices en MidiLaneView::hits; tiempos de reproducción)
@@ -140,7 +195,7 @@ public:
     void resized() override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
-    static constexpr int headerWidth = 130, rulerHeight = 96, scrollHeight = 12;
+    static constexpr int headerWidth = 130, rulerHeight = 96, scrollHeight = 12, tempoLaneHeight = 78;
     static constexpr int gutter = 10;              // reserva para la barra vertical de los carriles
     static constexpr int minLaneHeight = 44, maxLaneHeight = 120;
 
@@ -149,6 +204,7 @@ private:
     class Lane;
     class MidiLane;
     class Overlay;
+    class TempoLane;
 
     void layoutLanes();                                       // carriles de audio y pistas MIDI dentro de laneHolder
     void clearMidiSelectionExcept (const MidiLane* keep);     // la selección de golpes vive en una sola pista MIDI
@@ -174,16 +230,39 @@ private:
     std::vector<LaneClips> laneClips;              // por carril (setLaneClips)
     bool readOnly = false;
     ui::EditTool tool = ui::EditTool::select;
-    juce::MouseCursor scissorsCursor;              // el de la tijera (se crea con la vista: no puede vivir más que JUCE)
+    std::array<juce::MouseCursor, (size_t) ui::numEditTools> toolCursors;   // uno por herramienta (se crean con la vista)
     double cutGuide = -1.0;                        // guía de la tijera en tiempo de reproducción (-1 = sin guía)
     int cutGuideLane = -1;
     bool cutGuideAll = false;                      // Shift: el corte alcanza a todas las pistas
     void setCutGuide (double seconds, int lane, bool allTracks);
     bool anyOwnLane() const;
-    bool clipDragging = false;                     // Shift + arrastre en curso sobre un tramo
-    bool clipDragTrackOnly = false;                // con Ctrl: solo el tramo de esa pista
-    double clipDragFrom = 0.0, clipDragDelta = 0.0;
-    int clipDragLane = 0;
+    // Tramos de un carril (los suyos o los de la canción) o de la canción; sin cortes, uno con toda la canción
+    std::vector<ClipView> clipList (int lane, bool song) const;
+    static int clipIndexAt (const std::vector<ClipView>&, double seconds);
+    juce::Rectangle<int> laneArea (int firstLane, int lastLane) const;   // en coordenadas de la capa de encima
+    int laneIndexAtY (int yInView) const;                                 // carril bajo esa altura (de la vista), o -1
+    int beatNear (double seconds, int pixels) const;                      // tiempo del análisis a menos de esos px, o -1
+    // Gestos de las herramientas sobre un carril (contentX: desde el borde del contenido)
+    void toolMouseDown (int lane, int contentX, juce::ModifierKeys);
+    void toolMouseDrag (int lane, juce::Point<int> inView, int dragDistanceX);
+    void toolMouseUp (int contentX);
+    juce::MouseCursor toolHover (int lane, int contentX, juce::ModifierKeys);
+    void toolHoverExit();
+    int edgeNear (const std::vector<ClipView>&, int contentX, bool& startEdge) const;   // tramo con un borde a <= 5 px
+    std::vector<ClipPick> clipSelection;
+    Range range;
+    // Gesto en curso con una herramienta sobre un carril
+    enum class Gesture { none, seek, move, trim, range, zoom, warp, play };
+    Gesture gesture = Gesture::none;
+    int gestureLane = -1, gesturePrimary = -1, gestureBeat = -1;
+    double gestureFrom = 0.0, gestureNow = 0.0;
+    bool gestureMoved = false, gestureAll = false, trimStartEdge = false;
+    ClipPick trimTarget;
+    int hoverBeat = -1;                            // Warp: la línea de la rejilla bajo el mouse
+    // Pista de compás y de tempo
+    std::unique_ptr<TempoLane> tempoLane;
+    juce::TextButton tempoToggle;
+    bool tempoTrackVisible = true, tempoStretches = true;
     Analysis analysis;
     bool levelingEnabled = false;
     double bpm = 120.0, clickOffset = 0.0;

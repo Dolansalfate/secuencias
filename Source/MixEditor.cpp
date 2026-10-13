@@ -1995,7 +1995,7 @@ int MixEditor::Impl::segmentMeter (const MixSegment& seg) const
     if (! validSource (seg.source))
         return 4;
     const auto& a = project()->sources[(size_t) seg.source].analysis;
-    return a.beats.empty() ? 4 : juce::jlimit (1, 7, a.meter);
+    return a.beats.empty() ? 4 : juce::jlimit (1, maxBeatsPerBar, a.meter);
 }
 
 // "3. Coro · c. 17-32"
@@ -3166,9 +3166,9 @@ void MixEditor::Impl::sourceMenuResult (const juce::String& file, int result)
     if (n < 2)
         return;
     if (result == 2)
-        a.halveBeats (0, n, juce::jlimit (1, 7, a.meter));
+        a.halveBeats (0, n, juce::jlimit (1, maxBeatsPerBar, a.meter));
     else if (result == 3)
-        a.doubleBeats (0, n, juce::jlimit (1, 7, a.meter));
+        a.doubleBeats (0, n, juce::jlimit (1, maxBeatsPerBar, a.meter));
     else if (result == 4 || result == 5)
         a.renumberBeats (0, result == 4 ? 3 : 4, n, a.firstDownbeatIn (0, n));
     else
@@ -3212,7 +3212,7 @@ void MixEditor::Impl::sourceWaveMenu (double seconds, double tolerance)
             const int b = a.nearestBeat (seconds, tolerance);
             if (b < 0)
                 return;
-            a.renumberBeats (0, a.meter >= 2 ? juce::jmin (a.meter, 7) : 4, (int) a.beats.size(), b);
+            a.renumberBeats (0, a.meter >= 2 ? juce::jmin (a.meter, maxBeatsPerBar) : 4, (int) a.beats.size(), b);
             impl.sourceWave.repaint();
             impl.changed();
         }

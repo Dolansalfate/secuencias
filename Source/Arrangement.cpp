@@ -22,7 +22,7 @@ namespace arrangement
         if (clips.size() != 1)
             return false;
         const auto& c = clips.front();
-        return std::abs (c.position) < 1.0e-6 && std::abs (c.srcStart) < 1.0e-6 && std::abs (c.srcEnd - sourceLength) < 1.0e-6;
+        return ! c.muted && std::abs (c.position) < 1.0e-6 && std::abs (c.srcStart) < 1.0e-6 && std::abs (c.srcEnd - sourceLength) < 1.0e-6;
     }
 
     double lengthSeconds (const std::vector<Clip>& clips, double sourceLength)
@@ -53,7 +53,7 @@ namespace arrangement
         const double offset = t - c.position;
         if (offset < 0.001 || offset > c.length() - 0.001)
             return false;   // ya hay un corte ahí (o casi)
-        Clip second { c.srcStart + offset, c.srcEnd, t };
+        const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
         c.srcEnd = c.srcStart + offset;
         clips.insert (clips.begin() + i + 1, second);
         sortClips (clips);
@@ -107,7 +107,7 @@ namespace arrangement
             {
                 // Atraviesa el punto: se parte y la segunda mitad se corre
                 const double offset = at - c.position;
-                Clip second { c.srcStart + offset, c.srcEnd, at + length };
+                const Clip second = c.part (c.srcStart + offset, c.srcEnd, at + length);
                 c.srcEnd = c.srcStart + offset;
                 clips.insert (clips.begin() + i + 1, second);
             }
@@ -123,7 +123,7 @@ namespace arrangement
             return -1;
         if (insert)
             insertGap (clips, at, source.length());
-        Clip copy { source.srcStart, source.srcEnd, juce::jmax (0.0, at) };
+        const Clip copy = source.part (source.srcStart, source.srcEnd, juce::jmax (0.0, at));
         clips.push_back (copy);
         sortClips (clips);
         for (int i = 0; i < (int) clips.size(); ++i)
@@ -139,7 +139,8 @@ namespace arrangement
             return false;
         const auto& p = clips[(size_t) index - 1];
         const auto& c = clips[(size_t) index];
-        return std::abs (p.srcEnd - c.srcStart) < 1.0e-6 && std::abs (p.end() - c.position) < 1.0e-6;
+        return std::abs (p.srcEnd - c.srcStart) < 1.0e-6 && std::abs (p.end() - c.position) < 1.0e-6
+               && p.muted == c.muted && p.colour == c.colour;
     }
 
     bool joinWithPrevious (std::vector<Clip>& clips, int index)
@@ -159,12 +160,81 @@ namespace arrangement
             const double offset = t - c.position;
             if (offset > 0.001 && offset < c.length() - 0.001)
             {
-                Clip second { c.srcStart + offset, c.srcEnd, t };
+                const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
                 c.srcEnd = c.srcStart + offset;
                 clips.insert (clips.begin() + i + 1, second);
             }
         }
         sortClips (clips);
+    }
+
+    namespace
+    {
+        bool inside (const Clip& c, double from, double to)
+        {
+            return c.position >= from - 1.0e-6 && c.end() <= to + 1.0e-6;
+        }
+    }
+
+    void setMutedInRange (std::vector<Clip>& clips, double from, double to, bool muted)
+    {
+        splitAllAt (clips, from);
+        splitAllAt (clips, to);
+        for (auto& c : clips)
+            if (inside (c, from, to))
+                c.muted = muted;
+    }
+
+    void setColourInRange (std::vector<Clip>& clips, double from, double to, juce::uint32 colour)
+    {
+        for (auto& c : clips)
+            if (inside (c, from, to))
+                c.colour = colour;
+    }
+
+    bool silenceRange (std::vector<Clip>& clips, double from, double to)
+    {
+        if (! (to > from))
+            return false;
+        splitAllAt (clips, from);
+        splitAllAt (clips, to);
+        const auto before = clips.size();
+        clips.erase (std::remove_if (clips.begin(), clips.end(), [=] (const Clip& c) { return inside (c, from, to); }), clips.end());
+        return clips.size() != before;
+    }
+
+    bool trimClip (std::vector<Clip>& clips, int index, bool startEdge, double edge, double sourceLength)
+    {
+        if (! juce::isPositiveAndBelow (index, (int) clips.size()) || ! std::isfinite (edge))
+            return false;
+        auto& c = clips[(size_t) index];
+        constexpr double minLength = 0.01;
+        if (startEdge)
+        {
+            // El inicio: no antes del final del tramo anterior que suena antes, ni antes del audio original o de 0
+            double lo = std::max (0.0, c.position - c.srcStart);
+            for (int i = 0; i < (int) clips.size(); ++i)
+                if (i != index && clips[(size_t) i].end() <= c.position + 1.0e-6)
+                    lo = std::max (lo, clips[(size_t) i].end());
+            const double at = juce::jlimit (lo, c.end() - minLength, edge);
+            if (std::abs (at - c.position) < 1.0e-6)
+                return false;
+            c.srcStart += at - c.position;
+            c.position = at;
+        }
+        else
+        {
+            double hi = c.position + (sourceLength - c.srcStart);
+            for (int i = 0; i < (int) clips.size(); ++i)
+                if (i != index && clips[(size_t) i].position >= c.end() - 1.0e-6)
+                    hi = std::min (hi, clips[(size_t) i].position);
+            const double at = juce::jlimit (c.position + minLength, std::max (c.position + minLength, hi), edge);
+            if (std::abs (at - c.end()) < 1.0e-6)
+                return false;
+            c.srcEnd = c.srcStart + (at - c.position);
+        }
+        sortClips (clips);
+        return true;
     }
 
     namespace
@@ -280,6 +350,46 @@ namespace arrangement
         forEachOwn (info, [=] (std::vector<Clip>& clips) { insertGap (clips, at, length); });
     }
 
+    void removeSongRange (SongInfo& info, double from, double to, bool closeGap, double sourceLength)
+    {
+        if (! (to > from))
+            return;
+        ensureClips (info.clips, sourceLength);
+        silenceRange (info.clips, from, to);
+        if (closeGap)
+        {
+            for (auto& c : info.clips)
+                if (c.position >= to - 1.0e-6)
+                    c.position = std::max (from, c.position - (to - from));
+            sortClips (info.clips);
+        }
+        removeOwnRange (info, from, to, closeGap);
+        if (closeGap)
+            shiftGrid (info, from, -(to - from));   // la grilla, las notas, los marcadores y los golpes MIDI se adelantan
+        else
+            removeMidiHits (info, from, to);
+    }
+
+    double insertBars (SongInfo& info, double at, int bars, int numerator, int unit, double beatSeconds, double sourceLength)
+    {
+        numerator = juce::jlimit (1, maxBeatsPerBar, numerator);
+        bars = juce::jlimit (1, 64, bars);
+        if (! (beatSeconds > 0.01) || ! std::isfinite (at) || at < 0.0)
+            return 0.0;
+        const int count = bars * numerator;
+        const double length = count * beatSeconds;
+        ensureClips (info.clips, sourceLength);
+        insertGap (info.clips, at, length);
+        insertOwnGap (info, at, length);
+        shiftGrid (info, at, length);   // los tiempos, acordes, marcadores, notas, golpes MIDI y secciones desde `at` se corren
+        auto& beats = info.analysis.beats;
+        for (int k = 0; k < count; ++k)
+            beats.push_back ({ at + k * beatSeconds, k % numerator + 1, unit });
+        std::stable_sort (beats.begin(), beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
+        info.analysis.meter = juce::jmax (info.analysis.meter, numerator);
+        return length;
+    }
+
     std::vector<Clip> clipsInRange (const std::vector<Clip>& clips, double from, double to)
     {
         std::vector<Clip> out;
@@ -287,7 +397,7 @@ namespace arrangement
         {
             const double a = std::max (c.position, from), b = std::min (c.end(), to);
             if (b - a > 1.0e-6)
-                out.push_back ({ c.srcStart + (a - c.position), c.srcStart + (b - c.position), a - from });
+                out.push_back (c.part (c.srcStart + (a - c.position), c.srcStart + (b - c.position), a - from));
         }
         return out;
     }
@@ -367,7 +477,7 @@ namespace arrangement
         GridSlice g;
         for (auto& b : a.beats)
             if (b.seconds >= from - 1.0e-9 && b.seconds < to - 1.0e-9)
-                g.beats.push_back ({ b.seconds - from, b.beatInBar });
+                g.beats.push_back ({ b.seconds - from, b.beatInBar, b.unit });
         for (auto& c : a.chords)
         {
             const double s0 = juce::jmax (c.start, from), s1 = juce::jmin (c.end, to);
@@ -380,7 +490,7 @@ namespace arrangement
     void pasteGrid (Analysis& a, const GridSlice& g, double at)
     {
         for (auto& b : g.beats)
-            a.beats.push_back ({ b.seconds + at, b.beatInBar });
+            a.beats.push_back ({ b.seconds + at, b.beatInBar, b.unit });
         for (auto& c : g.chords)
             a.chords.push_back ({ c.start + at, c.end + at, c.name });
         std::stable_sort (a.beats.begin(), a.beats.end(), [] (const Beat& x, const Beat& y) { return x.seconds < y.seconds; });
@@ -663,6 +773,8 @@ namespace arrangement
             }
             for (auto& c : own != nullptr ? *own : clips)
             {
+                if (c.muted)
+                    continue;   // silenciado con la herramienta Silenciar
                 const int s0 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcStart * sr));
                 const int s1 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcEnd * sr));
                 const int p = (int) std::llround (c.position * sr);

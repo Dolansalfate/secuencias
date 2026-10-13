@@ -232,7 +232,7 @@ std::vector<TempoRegion> detectTempoRegions (const Analysis& a, double fallbackB
         if (! out.empty() && std::abs (bpm - out.back().origBpm) / out.back().origBpm < 0.02)
             continue;
         TempoRegion r;
-        r.start = k == 0 ? 0.0 : snapToDownbeat (beats, beatIndex[(size_t) starts[k]], juce::jlimit (2, 7, a.meter));
+        r.start = k == 0 ? 0.0 : snapToDownbeat (beats, beatIndex[(size_t) starts[k]], juce::jlimit (1, maxBeatsPerBar, a.meter));
         r.origBpm = bpm;
         out.push_back (r);
     }

@@ -770,7 +770,7 @@ namespace mix
                     // tramo: va en la unión; si no, el primer "1" del mix quedaría en negativo y se perdería
                     const double t = b.seconds < p.srcStart ? p.outStart : toMix (p, b.seconds);
                     if (t >= 0.0 && t < nextStart[i])
-                        beats.push_back ({ Beat { t, b.beatInBar }, i, 30.0 / juce::jmax (1.0, p.playBpm) });
+                        beats.push_back ({ Beat { t, b.beatInBar, b.unit }, i, 30.0 / juce::jmax (1.0, p.playBpm) });
                 }
             for (auto& c : an.chords)
             {

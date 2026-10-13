@@ -197,24 +197,46 @@ El mismo código sigue compilando en macOS.
   reparte tiempos parejos que caben justos hasta el siguiente compás (para las transiciones de
   un mix donde el análisis se enreda) o define compases de N tiempos. Clic derecho en la fila de acordes para cambiar, quitar,
   dividir, unir o añadir acordes.
-- **Herramientas, como en Cubase** (botones junto a "+ Nota", o las teclas V, C y D):
-  **Selección** (V) es la de siempre: un clic lleva el cabezal a ese punto. **Cortar** (C) cambia el
-  cursor por una tijera y muestra una línea donde caerá el corte (con el modo de corte de al lado: libre,
-  al tiempo o a la transiente) y a qué pistas alcanza; un clic corta la pista donde hiciste clic y
-  Shift + clic corta todas. **Mover** (D): arrastra un tramo para moverlo en su pista, o con Shift en
-  todas. Cuando termines, vuelve a Selección con su botón o la V. Con Selección, Alt + clic también
-  corta. El clic derecho sigue abriendo el menú del tramo con cualquier herramienta, y Ctrl+Z deshace.
+- **Caja de herramientas, como en Cubase** (los íconos junto a "+ Nota"; al dejar el mouse encima dicen su
+  nombre y su tecla). Con Shift, cada herramienta alcanza al tramo de **todas** las pistas en vez de solo la
+  pista donde haces clic; el clic derecho sigue abriendo el menú del tramo, y Ctrl+Z deshace.
+  - **Objeto** (V): clic elige un tramo (Ctrl para elegir varios), arrastrar lo mueve, arrastrar un borde lo
+    recorta o lo alarga, Supr lo deja en silencio. Clic en un hueco o en la regla mueve el cabezal; Alt + clic corta.
+  - **Rango** (R): arrastra para marcar un rango en las pistas que recorras. Clic derecho dentro: silenciarlo,
+    quitarlo cerrando el hueco, cortar en sus bordes, hacer loop de él o hacer zoom.
+  - **Cortar** (C): tijera; una línea muestra dónde caerá el corte (según el modo de corte de al lado).
+  - **Unir** (U): une el tramo con el siguiente si siguen el mismo audio.
+  - **Borrar** (B): deja el tramo en silencio; en la pista de tempo o de compás quita el cambio, y en una pista
+    MIDI, el golpe.
+  - **Zoom** (Z): clic acerca, Alt + clic aleja, arrastrar muestra lo que marcaste.
+  - **Silenciar** (S): el tramo no suena (se ve rayado); otro clic lo vuelve a encender.
+  - **Dibujar** (D): en la pista de tempo o de compás agrega un cambio; en una pista MIDI, un golpe.
+  - **Reproducir** (P): mantén el clic para escuchar desde ahí; al soltar, el cabezal vuelve.
+  - **Warp** (W): arrastra una línea de la rejilla (el click) hasta el golpe en el audio; los tiempos vecinos se
+    acomodan. El audio no cambia: cambia dónde cae el click.
+  - **Color** (K): elige el color del tramo.
+- **Pista de compás y pista de tempo** (sobre las pistas; el botón "Pista de tempo" de la regla las muestra u
+  oculta). Vienen con los tempos y compases de cada canción o mix, y aquí se editan:
+  - **Compás**: clic en un cambio (por ejemplo "4/4") para cambiarlo: tiempos por compás (hasta 32, como 17/4),
+    figura (x/4, x/8...) y hasta dónde llega (el próximo cambio, solo ese compás o el final). Doble clic agrega un
+    cambio; arrástralo para correrlo; clic derecho para **insertar compases** (por ejemplo 1 compás de 17/4 antes
+    del compás 9: se abre espacio en silencio y todo lo que sigue se corre) o eliminar un compás.
+  - **Tempo**: arrastra el escalón de una sección hacia arriba o abajo para cambiar su tempo (con Shift, fino);
+    arrastra un cambio de tempo para correrlo; doble clic agrega uno. El botón de la izquierda elige qué pasa:
+    **"Estira el audio"** (la sección suena más rápida o más lenta) o **"Solo el click"** (la música queda igual y
+    el click y los compases se acomodan a ese tempo). La línea tenue de fondo es el tempo real de la grabación
+    tiempo a tiempo.
 - **Cortar y mover el audio** sin tocar la grilla: clic derecho sobre un carril para cortar
   todas las pistas en ese punto (así no se desalinean), desplazar el
   tramo en milisegundos, alinear su inicio al tiempo más cercano, unir, eliminar (dejando
   silencio o cerrando el hueco) o restaurar el audio original. También copiar un tramo y
   pegarlo en otro punto insertando (se abre espacio y todo lo que sigue, audio y grilla, se
   corre; la copia lleva sus tiempos y acordes) o encima, y duplicarlo a continuación: así se
-  reordena una canción o se repite un coro. Shift + arrastrar sobre un carril mueve el tramo
-  a mano. **Cada pista por separado**: en el mismo menú, la parte "Solo «Bajo»" (la pista del
+  reordena una canción o se repite un coro. Con la herramienta Objeto, arrastrar un tramo lo
+  mueve a mano. **Cada pista por separado**: en el mismo menú, la parte "Solo «Bajo»" (la pista del
   carril donde hiciste clic) corta, desplaza, alinea, une, borra (deja silencio), copia y pega
-  encima solo en esa pista; las demás no se mueven. Ctrl + Shift + arrastrar mueve el tramo
-  solo en esa pista (aunque no tenga cortes: se corre entera). Una pista con su propio arreglo
+  encima solo en esa pista; las demás no se mueven. Con Objeto, arrastrar el tramo de una pista
+  lo mueve solo en ella (aunque no tenga cortes: se corre entera). Una pista con su propio arreglo
   tiene una franja de color en su cabecera y sus cortes se ven solo en su carril; los cortes y
   movimientos de "todas las pistas" la siguen igual, y "Volver a los tramos de la canción en
   esta pista" deshace lo suyo. Ctrl+Z deshace la última edición. El selector junto a
@@ -253,7 +275,8 @@ levanta con todo. También sirve copiar la carpeta `Secuencias` entera a `~/Mús
 | Flecha derecha o AvPág | Siguiente canción (en el modo reproducción, del show) |
 | Flecha izquierda o RePág | Canción anterior |
 | Ctrl+E | Exportar la mezcla |
-| V / C / D | Herramienta Selección / Cortar (tijera) / Mover |
+| V R C U B Z S D P W K | Herramientas: Objeto, Rango, Cortar, Unir, Borrar, Zoom, Silenciar, Dibujar, Reproducir, Warp, Color |
+| Supr | Borra los golpes MIDI elegidos, o deja en silencio los tramos elegidos o el rango |
 | 1 – 9 (también en el teclado numérico) | Ir al marcador |
 | M | Añadir marcador |
 | L | Loop de sección on/off |

@@ -81,9 +81,33 @@ public:
             // tijera; en --pista=N o, sin ella, en todas las pistas)
             if (commandLine.contains ("--herramienta="))
             {
+                // objeto, rango, cortar, unir, borrar, zoom, silenciar, dibujar, reproducir, warp o color
                 const auto tool = commandLine.fromFirstOccurrenceOf ("--herramienta=", false, false).upToFirstOccurrenceOf (" ", false, false);
-                captureTool = tool == "cortar" ? 1 : tool == "mover" ? 2 : 0;
+                const juce::StringArray names { "objeto", "rango", "cortar", "unir", "borrar", "zoom", "silenciar", "dibujar", "reproducir", "warp", "color" };
+                captureTool = juce::jmax (0, names.indexOf (tool));
             }
+            // --tempopista=sección:bpm (1 = la primera) y --soloclick (sin estirar el audio)
+            if (commandLine.contains ("--tempopista="))
+            {
+                const auto v = commandLine.fromFirstOccurrenceOf ("--tempopista=", false, false).upToFirstOccurrenceOf (" ", false, false);
+                captureTempoBand = v.upToFirstOccurrenceOf (":", false, false).getIntValue();
+                captureTempoBpm = v.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
+                captureTempoStretches = ! hasFlag ("--soloclick");
+            }
+            if (commandLine.contains ("--clic="))
+                captureClick = commandLine.fromFirstOccurrenceOf ("--clic=", false, false).getDoubleValue();
+            // --compas=N/D:compás (cambio de compás) e --insertarcompases=K:N/D:compás
+            for (auto* flag : { "--compas=", "--insertarcompases=" })
+                if (commandLine.contains (flag))
+                {
+                    auto v = commandLine.fromFirstOccurrenceOf (flag, false, false).upToFirstOccurrenceOf (" ", false, false);
+                    captureInsertBars = juce::String (flag) == "--insertarcompases=" ? v.upToFirstOccurrenceOf (":", false, false).getIntValue() : 0;
+                    if (captureInsertBars > 0)
+                        v = v.fromFirstOccurrenceOf (":", false, false);
+                    captureSigNum = v.upToFirstOccurrenceOf ("/", false, false).getIntValue();
+                    captureSigUnit = v.fromFirstOccurrenceOf ("/", false, false).upToFirstOccurrenceOf (":", false, false).getIntValue();
+                    captureSigBar = v.fromFirstOccurrenceOf (":", false, false).getIntValue();
+                }
             if (commandLine.contains ("--guiacorte="))
                 captureCutGuide = commandLine.fromFirstOccurrenceOf ("--guiacorte=", false, false).getDoubleValue();
             if (commandLine.contains ("--tijera="))
@@ -94,8 +118,8 @@ public:
                 const auto range = commandLine.fromFirstOccurrenceOf ("--arrastrar=", false, false).upToFirstOccurrenceOf (" ", false, false);
                 captureDrag = { range.upToFirstOccurrenceOf (":", false, false).getDoubleValue(),
                                 range.fromFirstOccurrenceOf (":", false, false).getDoubleValue() };
-                captureDragShift = hasFlag ("--shift");
             }
+            captureDragShift = hasFlag ("--shift");
             // Modo reproducción: --reproduccion [--show=1,2,3] (canciones del setlist para el show activo)
             if (hasFlag ("--reproduccion"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
@@ -143,11 +167,17 @@ public:
             if (captureCutMode > 0) mc->setCutModeForCapture (captureCutMode);
             if (captureCut > 0.0) mc->editForCapture (captureCut, captureMoveMs, captureLane);
             if (captureDuplicate > 0.0) mc->duplicateForCapture (captureDuplicate);
+            if (captureTempoBand > 0 && captureTempoBpm > 0.0)
+                mc->tempoTrackForCapture (captureTempoBand - 1, captureTempoBpm, captureTempoStretches);
+            if (captureSigNum > 0 && captureSigBar > 0)
+                mc->signatureForCapture (captureSigBar, captureSigNum, juce::jmax (1, captureSigUnit), captureInsertBars);
             if (captureTool > 0 || captureScissors >= 0.0)
-                mc->toolForCapture (captureTool == 2 ? ui::EditTool::move : captureTool == 1 || captureScissors >= 0.0 ? ui::EditTool::cut : ui::EditTool::select,
+                mc->toolForCapture (captureScissors >= 0.0 && captureTool == 0 ? ui::EditTool::cut : (ui::EditTool) captureTool,
                                     captureCutGuide, captureScissors, captureLane);
             if (captureDrag.first >= 0.0)
                 mc->dragForCapture (captureLane, captureDrag.first, captureDrag.second, captureDragShift);
+            if (captureClick >= 0.0)
+                mc->clickForCapture (captureLane, captureClick, captureDragShift);
             if (captureExport != juce::File()) mc->exportForCapture (captureExport);
         }
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
@@ -241,6 +271,10 @@ private:
     double captureCutGuide = -1.0, captureScissors = -1.0;
     std::pair<double, double> captureDrag { -1.0, -1.0 };
     bool captureDragShift = false;
+    double captureClick = -1.0;   // --clic=seg: un clic con la herramienta elegida en --pista=N (con --shift, en todas)
+    int captureSigNum = 0, captureSigUnit = 4, captureSigBar = 0, captureInsertBars = 0, captureTempoBand = 0;
+    double captureTempoBpm = 0.0;
+    bool captureTempoStretches = true;
     juce::File captureExport;   // --exportar=<carpeta>: exportar la mezcla de la canción cargada
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
     int captureTicks = 0;

@@ -33,6 +33,14 @@ namespace arrangement
     bool joinWithPrevious (std::vector<Clip>&, int index);
     void sortClips (std::vector<Clip>&);
     void splitAllAt (std::vector<Clip>&, double seconds);              // parte en ese instante todo tramo que lo atraviese
+    // Herramientas Silenciar y Color: los tramos enteros dentro de [from, to) (silenciar parte antes en los bordes)
+    void setMutedInRange (std::vector<Clip>&, double from, double to, bool muted);
+    void setColourInRange (std::vector<Clip>&, double from, double to, juce::uint32 colour);
+    // Deja en silencio [from, to) de una lista: parte en los bordes y quita lo de dentro. false si no había audio ahí.
+    bool silenceRange (std::vector<Clip>&, double from, double to);
+    // Recorta (o alarga) un borde de un tramo hasta `edge`, sin pisar al vecino ni salir del audio original (como el
+    // recorte de un evento en Cubase). false si no cambió.
+    bool trimClip (std::vector<Clip>&, int index, bool startEdge, double edge, double sourceLength);
 
     // --- Pistas con su propio arreglo ---
     // Los tramos de la pista: los suyos o los de la canción (con todo el audio si no hay cortes). En una grabación
@@ -50,6 +58,14 @@ namespace arrangement
     void moveOwnRange (SongInfo&, double from, double to, double delta, bool andFollowing);   // los que empiezan en [from, to) (o desde from)
     void removeOwnRange (SongInfo&, double from, double to, bool closeGap);
     void insertOwnGap (SongInfo&, double at, double length);
+
+    // Rangos de toda la canción (herramienta Rango, pista de compás): todas las pistas, los golpes MIDI y, al cerrar o
+    // abrir un hueco, la grilla (shiftGrid).
+    // - Quitar [from, to): deja silencio o, con closeGap, lo que sigue se adelanta.
+    void removeSongRange (SongInfo&, double from, double to, bool closeGap, double sourceLength);
+    // - Insertar `bars` compases de numerator/unit en `at` (un primer tiempo de compás): silencio en el audio, la
+    //   grilla se corre y el hueco recibe sus tiempos (de `beatSeconds` cada uno). Devuelve lo que se insertó (s).
+    double insertBars (SongInfo&, double at, int bars, int numerator, int unit, double beatSeconds, double sourceLength);
     // Lo que suena de una lista en [from, to), con posiciones relativas a `from` (para copiar)
     std::vector<Clip> clipsInRange (const std::vector<Clip>&, double from, double to);
 

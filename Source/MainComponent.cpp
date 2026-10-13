@@ -250,16 +250,19 @@ MainComponent::MainComponent()
     cutModeBox.addItem ("Corte a la transiente", 3);
     cutModeBox.setSelectedId (juce::jlimit (1, 3, props.getUserSettings()->getIntValue ("cutMode", 1)), juce::dontSendNotification);
     cutModeBox.onChange = [this] { props.getUserSettings()->setValue ("cutMode", cutModeBox.getSelectedId()); };
-    // Caja de herramientas (como en Cubase): la app siempre parte con la de selección
-    selectToolBtn.setConnectedEdges (juce::Button::ConnectedOnRight);
-    cutToolBtn.setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
-    moveToolBtn.setConnectedEdges (juce::Button::ConnectedOnLeft);
-    for (auto* b : { &selectToolBtn, &cutToolBtn, &moveToolBtn })
+    // Caja de herramientas (como en Cubase): un botón con su ícono por herramienta; la app parte con Objeto
+    for (int i = 0; i < ui::numEditTools; ++i)
     {
-        b->onClick = [this, b] { setEditTool (b->getTool()); };
+        const auto tool = (ui::EditTool) i;
+        auto* b = toolButtons.add (new ui::ToolButton (tool, {}));
+        juce::String name, key, hint;
+        toolInfo (tool, name, key, hint);
+        b->setTooltip (name + " (" + key + ")");
+        b->setConnectedEdges ((i > 0 ? juce::Button::ConnectedOnLeft : 0) | (i + 1 < ui::numEditTools ? juce::Button::ConnectedOnRight : 0));
+        b->onClick = [this, tool] { setEditTool (tool); };
         addAndMakeVisible (b);
     }
-    selectToolBtn.setToggleState (true, juce::dontSendNotification);
+    toolButtons[0]->setToggleState (true, juce::dontSendNotification);
 
     for (auto* c : std::initializer_list<juce::Component*> { &songTitle, &nextLabel, &sectionLabel, &timeLabel, &chordLabel, &keyLabel,
                      &prevBtn, &playBtn, &stopBtn, &nextBtn, &recordBtn, &loopBtn, &positionSlider, &addMarkerBtn, &cutModeBox })
@@ -433,6 +436,35 @@ MainComponent::MainComponent()
     timeline.onChordClicked = [this] (int index, double t) { chordMenu (index, t); };
     timeline.onLaneMenu = [this] (double t, int lane) { clipMenu (t, lane); };
     timeline.onCut = [this] (double t, int lane, bool all) { cutWithTool (t, lane, all); };
+    timeline.onPicksMoved = [this] (std::vector<TimelineView::ClipPick> picks, int primary, double grab, double delta)
+    {
+        moveClipPicks (std::move (picks), primary, grab, delta);
+    };
+    timeline.onClipTrimmed = [this] (TimelineView::ClipPick pick, bool startEdge, double edge) { trimClipEdge (pick, startEdge, edge); };
+    timeline.onClipTool = [this] (ui::EditTool tool, double t, int lane, bool all) { clipToolClicked (tool, t, lane, all); };
+    timeline.onRangeMenu = [this] (double t, int lane) { rangeMenu (t, lane); };
+    timeline.onPlayToolDown = [this] (double t) { playToolDown (t); };
+    timeline.onPlayToolUp = [this] { playToolUp(); };
+    timeline.onBeatWarped = [this] (int beat, double t) { beatWarped (beat, t); };
+    timeline.onTempoSet = [this] (int band, double bpm) { tempoTrackSet (band, bpm); };
+    timeline.onTempoMoved = [this] (int band, double t) { tempoTrackMoved (band, t); };
+    timeline.onTempoAdd = [this] (double t, double bpm) { tempoTrackAdd (t, bpm); };
+    timeline.onTempoRemove = [this] (int band) { tempoTrackRemove (band); };
+    timeline.onSignatureClicked = [this] (int beat, bool popup, double t) { signatureMenu (beat, popup, t); };
+    timeline.onSignatureAdd = [this] (int beat) { signatureDialog (beat, true); };
+    timeline.onSignatureMoved = [this] (int from, int to) { moveSignature (from, to); };
+    timeline.onSignatureRemove = [this] (int beat) { removeSignature (beat); };
+    timeline.onTempoTrackToggled = [this] (bool visible) { props.getUserSettings()->setValue ("tempoTrack", visible); };
+    timeline.onTempoModeChanged = [this] (bool stretches)
+    {
+        timeline.setTempoStretches (stretches);
+        props.getUserSettings()->setValue ("tempoTrackStretches", stretches);
+        sepLabel.setText (stretches ? tr ("Pista de tempo: arrastrar un tempo estira el audio (la canción suena más rápida o más lenta)")
+                                    : tr ("Pista de tempo: arrastrar un tempo solo mueve el click y los compases (el audio no cambia)"),
+                          juce::dontSendNotification);
+    };
+    timeline.setTempoTrackVisible (props.getUserSettings()->getBoolValue ("tempoTrack", true));
+    timeline.setTempoStretches (props.getUserSettings()->getBoolValue ("tempoTrackStretches", true));
     timeline.snapCut = [this] (double t, int lane)
     {
         // La guía de la tijera cae donde caerá el corte (modo libre, a la rejilla o a la transiente)
@@ -514,7 +546,6 @@ MainComponent::MainComponent()
             clickControlsFromSong();   // la fila del click muestra lo mismo
         }
     };
-    timeline.onClipDragged = [this] (double t, double delta, int lane, bool trackOnly) { clipDragged (t, delta, lane, trackOnly); };
     timeline.onMarkerClicked = [this] (int i, bool popup) { if (popup) markerMenu (i); else jumpToMarker (i); };
     timeline.onMarkerMoved = [this] (int i, double t)
     {
@@ -786,13 +817,13 @@ void MainComponent::resized()
         markerRow.removeFromLeft (8);
     }
     const bool editing = ! liveMode && ! playbackMode;
-    for (auto* c : std::initializer_list<juce::Component*> { &cutModeBox, &selectToolBtn, &cutToolBtn, &moveToolBtn })
-        c->setVisible (editing);
+    cutModeBox.setVisible (editing);
+    for (auto* b : toolButtons)
+        b->setVisible (editing);
     if (editing)
     {
-        selectToolBtn.setBounds (markerRow.removeFromLeft (106));
-        cutToolBtn.setBounds (markerRow.removeFromLeft (86));
-        moveToolBtn.setBounds (markerRow.removeFromLeft (86));
+        for (auto* b : toolButtons)
+            b->setBounds (markerRow.removeFromLeft (30));
         markerRow.removeFromLeft (8);
         cutModeBox.setBounds (markerRow.removeFromLeft (180));
         markerRow.removeFromLeft (8);
@@ -913,8 +944,19 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (! playbackMode)
             undoLastEdit();
     }
-    else if (! playbackMode && (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey) && timeline.deleteSelectedMidiHits())
-        {}
+    else if (! playbackMode && (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey))
+    {
+        // Supr: los golpes MIDI elegidos; si no hay, los tramos elegidos o el rango marcado (quedan en silencio)
+        if (! timeline.deleteSelectedMidiHits())
+        {
+            if (! timeline.getClipSelection().empty())
+                deleteClipPicks();
+            else if (! timeline.getRange().isEmpty())
+                editRange (1);
+            else
+                handled = false;
+        }
+    }
     else if (code == juce::KeyPress::F12Key)
         showStage (stageWindow == nullptr || ! stageWindow->isVisible());
     else if (key.getModifiers().isCtrlDown() && (code == 'E' || code == 'e'))
@@ -925,9 +967,19 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         if (c == 'm' && ! playbackMode)      addMarkerHere();
         else if (c == 'n' && ! playbackMode) addNoteHere();
         else if (c == 'm' || c == 'n')       {}   // en reproducción no se edita
-        else if ((c == 'v' || c == 'c' || c == 'd') && ! playbackMode && ! key.getModifiers().isCtrlDown()
-                 && ! key.getModifiers().isCommandDown() && ! key.getModifiers().isAltDown())
-            setEditTool (c == 'v' ? ui::EditTool::select : c == 'c' ? ui::EditTool::cut : ui::EditTool::move);
+        else if (! playbackMode && ! key.getModifiers().isCtrlDown() && ! key.getModifiers().isCommandDown() && ! key.getModifiers().isAltDown()
+                 && [&] { for (int i = 0; i < ui::numEditTools; ++i)
+                          {
+                              juce::String name, toolKey, hint;
+                              toolInfo ((ui::EditTool) i, name, toolKey, hint);
+                              if (toolKey.equalsIgnoreCase (juce::String::charToString (c)))
+                              {
+                                  setEditTool ((ui::EditTool) i);
+                                  return true;
+                              }
+                          }
+                          return false; }())
+            {}
         else if (c == 'l') { loopBtn.setToggleState (! loopBtn.getToggleState(), juce::dontSendNotification); updateLoopRegion(); }
         else               handled = false;
     }
@@ -1455,6 +1507,9 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
     currentSong = song;
     sourceSong = source;
     arrangedSong = arranged != nullptr ? arranged : source;
+    timeline.setClipSelection ({});   // otra canción: nada elegido ni marcado
+    timeline.setRange ({});
+    rangeLoopStart = rangeLoopEnd = 0.0;
     // Sin la fuente en RAM (precargada o leída de la caché en disco): para editarla hay que cargarla completa
     currentFromPreload = source == nullptr || source->tracks.empty();
     auto* info = currentInfo();
@@ -1789,8 +1844,8 @@ static bool sameClips (const std::vector<Clip>& a, const std::vector<Clip>& b)
         return false;
     for (size_t i = 0; i < a.size(); ++i)
         if (std::abs (a[i].srcStart - b[i].srcStart) > 1.0e-9 || std::abs (a[i].srcEnd - b[i].srcEnd) > 1.0e-9
-            || std::abs (a[i].position - b[i].position) > 1.0e-9)
-            return false;
+            || std::abs (a[i].position - b[i].position) > 1.0e-9 || a[i].muted != b[i].muted)
+            return false;   // el color no cambia el audio: no hace falta volver a renderizar
     return true;
 }
 
@@ -1993,7 +2048,14 @@ void MainComponent::sectionAt (double seconds, double& start, double& end, juce:
 void MainComponent::updateLoopRegion()
 {
     loopStartSec = loopEndSec = 0.0;
-    if (loopBtn.getToggleState() && currentSong != nullptr)
+    if (! loopBtn.getToggleState())
+        rangeLoopStart = rangeLoopEnd = 0.0;   // apagar el loop olvida el que venía de un rango
+    if (loopBtn.getToggleState() && currentSong != nullptr && rangeLoopEnd > rangeLoopStart)
+    {
+        loopStartSec = rangeLoopStart;
+        loopEndSec = rangeLoopEnd;
+    }
+    else if (loopBtn.getToggleState() && currentSong != nullptr)
     {
         double s, e;
         juce::String name;
@@ -2298,12 +2360,12 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
     const auto& an = info->analysis;
     const int firstBeat = an.firstBeatAtOrAfter (tStart), endBeat = an.firstBeatAtOrAfter (tEnd);
     const bool hasBeats = endBeat - firstBeat >= 2;
-    int meterHere = juce::jlimit (2, 7, an.meter);
+    int meterHere = juce::jlimit (1, maxBeatsPerBar, an.meter);
     if (hasBeats)
     {
         const int d = an.firstDownbeatIn (firstBeat, endBeat);
         for (int j = d + 1; j < endBeat; ++j)
-            if (an.beats[(size_t) j].beatInBar == 1) { meterHere = juce::jlimit (2, 7, j - d); break; }
+            if (an.beats[(size_t) j].beatInBar == 1) { meterHere = juce::jlimit (1, maxBeatsPerBar, j - d); break; }
     }
 
     juce::PopupMenu m;
@@ -2650,7 +2712,7 @@ std::vector<TimelineView::LaneClips> MainComponent::mappedLaneClips() const
             {
                 lane.own = true;
                 for (auto& c : *own)
-                    lane.clips.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()) });
+                    lane.clips.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()), c.muted, c.colour });
             }
         out.push_back (lane);
     }
@@ -2681,10 +2743,10 @@ std::vector<TimelineView::ClipView> MainComponent::mappedClips() const
     if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()) || sourceSong == nullptr)
         return out;
     const auto& info = library.songs[(size_t) currentIndex];
-    if (arrangement::isIdentity (info.clips, (double) sourceSong->length / engine.getSampleRate()))
+    if (arrangement::isIdentity (info.clips, (double) sourceSong->length / engine.getSampleRate()) && (info.clips.empty() || info.clips[0].colour == 0))
         return out;   // el audio original entero: sin bordes que mostrar
     for (auto& c : info.clips)
-        out.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()) });
+        out.push_back ({ timeMap.toPlayback (c.position), timeMap.toPlayback (c.end()), c.muted, c.colour });
     return out;
 }
 
@@ -2776,6 +2838,7 @@ void MainComponent::arrangementEdited()
     if (info == nullptr)
         return;
     library.saveSong (*info);
+    timeline.setClipSelection ({});   // los tramos cambiaron: lo elegido ya no es lo mismo (mover lo vuelve a elegir)
     syncTimelineMarkers();
     tempoControlsFromSong();
     applyMidiTracks();   // los golpes ya se movieron con los tramos: la vista y sus índices los siguen al instante
@@ -6308,7 +6371,8 @@ void MainComponent::clipMenu (double playbackSeconds, int lane)
     m.addItem (9, anyOwn ? tr ("Restaurar el audio original (sin cortes en ninguna pista)") : tr ("Restaurar el audio original (sin cortes)"),
                ! info->clips.empty() || anyOwn);
     m.addSeparator();
-    m.addItem (10, tr ("Herramientas: Cortar (C) corta con un clic y Mover (D) arrastra el tramo; con Shift, en todas las pistas"), false);
+    m.addItem (10, tr ("Herramientas: Objeto (V) elige, mueve y recorta; Cortar (C), Unir (U), Borrar (B), Silenciar (S) y Color (K) "
+                       "con un clic; con Shift, en todas las pistas"), false);
 
     const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
@@ -6425,26 +6489,75 @@ bool MainComponent::cutAllTracksAt (double t)
 //==============================================================================
 // Herramientas de edición (como en Cubase): Selección, Cortar (tijera) y Mover
 
+void MainComponent::toolInfo (ui::EditTool tool, juce::String& name, juce::String& key, juce::String& hint)
+{
+    switch (tool)
+    {
+        case ui::EditTool::select:
+            name = tr ("Objeto"); key = "V";
+            hint = tr ("Objeto: clic elige un tramo (Ctrl suma), arrastrar lo mueve, arrastrar un borde lo recorta, Supr lo deja en "
+                       "silencio. Shift: el tramo de todas las pistas. Clic en un hueco o en la regla lleva el cabezal; Alt + clic corta.");
+            break;
+        case ui::EditTool::range:
+            name = tr ("Rango"); key = "R";
+            hint = tr ("Rango: arrastra para marcar un rango en las pistas que recorras (Shift: en todas); clic derecho dentro: "
+                       "silenciar, quitar cerrando el hueco, cortar en los bordes o hacer loop. Supr lo deja en silencio.");
+            break;
+        case ui::EditTool::cut:
+            name = tr ("Cortar"); key = "C";
+            hint = tr ("Tijera: clic corta la pista donde haces clic; Shift + clic corta todas las pistas. El corte sigue el modo de al lado.");
+            break;
+        case ui::EditTool::glue:
+            name = tr ("Unir"); key = "U";
+            hint = tr ("Unir: clic en un tramo lo une con el siguiente si siguen el mismo audio (Shift: en todas las pistas).");
+            break;
+        case ui::EditTool::erase:
+            name = tr ("Borrar"); key = "B";
+            hint = tr ("Borrar: clic deja en silencio el tramo de esa pista (Shift: de todas). En la pista de tempo o de compás quita "
+                       "el cambio; en una pista MIDI, el golpe.");
+            break;
+        case ui::EditTool::zoom:
+            name = "Zoom"; key = "Z";
+            hint = tr ("Zoom: clic acerca, Alt + clic aleja, arrastrar muestra lo marcado. \"Ajustar\" vuelve a la canción entera.");
+            break;
+        case ui::EditTool::mute:
+            name = tr ("Silenciar"); key = "S";
+            hint = tr ("Silenciar: clic silencia el tramo de esa pista o lo vuelve a encender (Shift: el de todas las pistas).");
+            break;
+        case ui::EditTool::draw:
+            name = tr ("Dibujar"); key = "D";
+            hint = tr ("Dibujar: clic en la pista de tempo agrega un cambio de tempo (a la altura del clic), en la de compás un "
+                       "cambio de compás y en una pista MIDI un golpe.");
+            break;
+        case ui::EditTool::play:
+            name = tr ("Reproducir"); key = "P";
+            hint = tr ("Reproducir: mantén apretado el clic para escuchar desde ahí; al soltar vuelve donde estaba.");
+            break;
+        case ui::EditTool::warp:
+            name = "Warp"; key = "W";
+            hint = tr ("Warp: arrastra una línea de la rejilla hasta el golpe en el audio; los tiempos entre los compases vecinos se "
+                       "acomodan (el audio no cambia, cambian el click y los compases).");
+            break;
+        case ui::EditTool::colour:
+            name = tr ("Color"); key = "K";
+            hint = tr ("Color: clic en un tramo para elegir su color (Shift: el tramo de todas las pistas).");
+            break;
+    }
+}
+
 void MainComponent::setEditTool (ui::EditTool tool)
 {
     if (playbackMode)
         tool = ui::EditTool::select;   // en reproducción no se edita
-    selectToolBtn.setToggleState (tool == ui::EditTool::select, juce::dontSendNotification);
-    cutToolBtn.setToggleState (tool == ui::EditTool::cut, juce::dontSendNotification);
-    moveToolBtn.setToggleState (tool == ui::EditTool::move, juce::dontSendNotification);
+    for (auto* b : toolButtons)
+        b->setToggleState (b->getTool() == tool, juce::dontSendNotification);
     const bool changed = timeline.getTool() != tool;
     timeline.setTool (tool);
     if (! changed)
         return;
-    if (tool == ui::EditTool::cut)
-        sepLabel.setText (tr ("Tijera: clic corta la pista donde haces clic; Shift + clic corta todas las pistas. "
-                              "El corte sigue el modo de al lado. V vuelve a Selección."), juce::dontSendNotification);
-    else if (tool == ui::EditTool::move)
-        sepLabel.setText (tr ("Mover: arrastra un tramo para moverlo en su pista; Shift + arrastre lo mueve en todas las pistas. "
-                              "V vuelve a Selección."), juce::dontSendNotification);
-    else
-        sepLabel.setText (tr ("Selección: clic lleva el cabezal a ese punto; clic derecho, el menú del tramo; Alt + clic corta."),
-                          juce::dontSendNotification);
+    juce::String name, key, hint;
+    toolInfo (tool, name, key, hint);
+    sepLabel.setText (hint, juce::dontSendNotification);
 }
 
 void MainComponent::cutWithTool (double playbackSeconds, int lane, bool allTracks)
@@ -6477,9 +6590,1042 @@ void MainComponent::cutWithTool (double playbackSeconds, int lane, bool allTrack
                       juce::dontSendNotification);
 }
 
+// Objeto: mover los tramos elegidos. El desplazamiento se ajusta según el modo de corte con el tramo que se tomó (su
+// inicio, o su primer golpe, al tiempo más cercano) y es el mismo para todos.
+void MainComponent::moveClipPicks (std::vector<TimelineView::ClipPick> picks, int primary, double grab, double delta)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || picks.empty())
+        return;
+    if (linkedSongMenu (*info, [this] { sepLabel.setText (tr ("Desligada: ya puedes mover los tramos aquí"), juce::dontSendNotification); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    primary = juce::jlimit (0, (int) picks.size() - 1, primary);
+    const auto first = picks[(size_t) primary];
+    auto listOf = [&] (int lane)
+    {
+        if (lane >= 0)
+            if (const auto* st = stemForLane (lane))
+                return arrangement::clipsOf (*info, *st, sourceLength);
+        auto c = info->clips;
+        arrangement::ensureClips (c, sourceLength);
+        return c;
+    };
+    const auto list0 = listOf (first.lane);
+    const int idx0 = arrangement::clipAt (list0, timeMap.toOriginal (first.start) + 1.0e-4);
+    if (idx0 < 0)
+        return;
+    const auto& clip = list0[(size_t) idx0];
+    const double t0 = timeMap.toOriginal (grab);
+    double d0 = timeMap.toOriginal (grab + delta) - t0;
+    juce::String note;
+    if (cutMode() == 2)
+    {
+        if (const double target = nearestGridTime (clip.position + d0); target >= 0.0)
+        {
+            d0 = target - clip.position;
+            note = tr (" (inicio en el tiempo)");
+        }
+    }
+    else if (cutMode() == 3)
+    {
+        const double onset = onsetNear (clip.position + 0.12, first.lane, 0.13);
+        if (onset >= clip.position)
+            if (const double target = nearestGridTime (onset + d0); target >= 0.0)
+            {
+                d0 = target - onset;
+                note = tr (" (transiente en el tiempo)");
+            }
+    }
+    if (std::abs (d0) < 1.0e-4)
+        return;
+    pushUndo();
+    std::vector<TimelineView::ClipPick> moved;
+    for (auto& pick : picks)
+    {
+        const double at = timeMap.toOriginal (pick.start) + 1.0e-4;
+        if (pick.lane >= 0)
+        {
+            const auto* st = stemForLane (pick.lane);
+            if (st == nullptr)
+                continue;
+            const auto file = st->fileName;
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            const int idx = arrangement::clipAt (own, at);
+            if (idx < 0)
+                continue;
+            const auto c = own[(size_t) idx];
+            const double actual = juce::jmax (d0, -c.position);   // lo que moveClip mueve de verdad
+            arrangement::moveClip (own, idx, d0, false);
+            arrangement::moveMidiHits (*info, c.position, c.end(), actual, file);
+            moved.push_back ({ pick.lane, timeMap.toPlayback (c.position + actual), timeMap.toPlayback (c.end() + actual) });
+        }
+        else
+        {
+            arrangement::ensureClips (info->clips, sourceLength);
+            const int idx = arrangement::clipAt (info->clips, at);
+            if (idx < 0)
+                continue;
+            const auto c = info->clips[(size_t) idx];
+            const double actual = juce::jmax (d0, -c.position);
+            arrangement::moveClip (info->clips, idx, d0, false);
+            arrangement::moveOwnRange (*info, c.position, c.end(), actual, false);   // y en las pistas con arreglo propio
+            arrangement::moveMidiHits (*info, c.position, c.end(), actual);
+            moved.push_back ({ -1, timeMap.toPlayback (c.position + actual), timeMap.toPlayback (c.end() + actual) });
+        }
+    }
+    if (moved.empty())
+    {
+        undoStack.pop_back();
+        return;
+    }
+    arrangementEdited();
+    timeline.setClipSelection (moved);   // siguen elegidos en su lugar nuevo
+    sepLabel.setText ((moved.size() == 1 ? tr ("Tramo desplazado ") : juce::String (moved.size()) + tr (" tramos desplazados "))
+                          + juce::String::formatted ("%+.0f ms", d0 * 1000.0) + note + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+}
+
+// Objeto: arrastrar el borde de un tramo lo recorta (o lo alarga, hasta su audio original y sin pisar al vecino)
+void MainComponent::trimClipEdge (TimelineView::ClipPick pick, bool startEdge, double edge)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr)
+        return;
+    if (linkedSongMenu (*info, [this] { sepLabel.setText (tr ("Desligada: ya puedes recortar los tramos aquí"), juce::dontSendNotification); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    const double at = timeMap.toOriginal (pick.start) + 1.0e-4;
+    const double e = timeMap.toOriginal (edge);
+    pushUndo();
+    bool changed = false;
+    if (pick.lane >= 0)
+    {
+        const auto* st = stemForLane (pick.lane);
+        if (st != nullptr)
+        {
+            const auto file = st->fileName;
+            const bool hadOwn = info->ownClips (file) != nullptr;
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            if (const int idx = arrangement::clipAt (own, at); idx >= 0)
+            {
+                const auto before = own[(size_t) idx];
+                changed = arrangement::trimClip (own, idx, startEdge, e, sourceLength);
+                if (changed)
+                {
+                    // Los golpes MIDI de la pista en lo que se recortó se van con el audio
+                    const auto& c = own[(size_t) idx];
+                    if (startEdge && c.position > before.position)
+                        arrangement::removeMidiHits (*info, before.position, c.position, file);
+                    if (! startEdge && c.end() < before.end())
+                        arrangement::removeMidiHits (*info, c.end(), before.end(), file);
+                }
+            }
+            if (! changed && ! hadOwn)
+                arrangement::dropOwnClips (*info, file);
+        }
+    }
+    else
+    {
+        arrangement::ensureClips (info->clips, sourceLength);
+        if (const int idx = arrangement::clipAt (info->clips, at); idx >= 0)
+        {
+            const auto before = info->clips[(size_t) idx];
+            changed = arrangement::trimClip (info->clips, idx, startEdge, e, sourceLength);
+            if (changed)
+            {
+                // Lo que se recortó también calla en las pistas con arreglo propio (alargar no les agrega audio)
+                const auto& c = info->clips[(size_t) idx];
+                if (startEdge && c.position > before.position)
+                {
+                    arrangement::removeOwnRange (*info, before.position, c.position, false);
+                    arrangement::removeMidiHits (*info, before.position, c.position);
+                }
+                if (! startEdge && c.end() < before.end())
+                {
+                    arrangement::removeOwnRange (*info, c.end(), before.end(), false);
+                    arrangement::removeMidiHits (*info, c.end(), before.end());
+                }
+            }
+        }
+    }
+    if (! changed)
+    {
+        undoStack.pop_back();
+        return;
+    }
+    arrangementEdited();
+    sepLabel.setText ((startEdge ? tr ("Inicio del tramo en ") : tr ("Final del tramo en ")) + formatTime (edge) + tr (" (Ctrl+Z deshace)"),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::deleteClipPicks()
+{
+    auto* info = currentInfo();
+    const auto picks = timeline.getClipSelection();
+    if (info == nullptr || sourceSong == nullptr || picks.empty() || playbackMode)
+        return;
+    if (linkedSongMenu (*info, [this] { deleteClipPicks(); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    pushUndo();
+    int removed = 0;
+    for (auto& pick : picks)
+    {
+        const double at = timeMap.toOriginal (pick.start) + 1.0e-4;
+        double from = 0.0, length = 0.0;
+        if (pick.lane >= 0)
+        {
+            const auto* st = stemForLane (pick.lane);
+            if (st == nullptr)
+                continue;
+            const auto file = st->fileName;
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            if (const int idx = arrangement::clipAt (own, at); idx >= 0)
+            {
+                const auto c = own[(size_t) idx];
+                arrangement::removeClip (own, idx, false, from, length);
+                arrangement::removeMidiHits (*info, c.position, c.end(), file);
+                ++removed;
+            }
+        }
+        else
+        {
+            arrangement::ensureClips (info->clips, sourceLength);
+            if (const int idx = arrangement::clipAt (info->clips, at); idx >= 0)
+            {
+                const auto c = info->clips[(size_t) idx];
+                arrangement::removeMidiHits (*info, c.position, c.end());
+                arrangement::removeClip (info->clips, idx, false, from, length);
+                arrangement::removeOwnRange (*info, c.position, c.end(), false);
+                ++removed;
+            }
+        }
+    }
+    if (removed == 0)
+    {
+        undoStack.pop_back();
+        return;
+    }
+    arrangementEdited();
+    sepLabel.setText (juce::String (removed) + (removed == 1 ? tr (" tramo en silencio") : tr (" tramos en silencio")) + tr (" (Ctrl+Z deshace)"),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::clipToolClicked (ui::EditTool tool, double playbackSeconds, int lane, bool allTracks)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || playbackMode)
+        return;
+    if (tool == ui::EditTool::draw)
+    {
+        sepLabel.setText (tr ("Dibujar: en una pista de audio no hay nada que dibujar; úsalo en la pista de tempo, en la de compás o en una pista MIDI"),
+                          juce::dontSendNotification);
+        return;
+    }
+    if (linkedSongMenu (*info, [this, tool, playbackSeconds, lane, allTracks] { clipToolClicked (tool, playbackSeconds, lane, allTracks); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    const double at = timeMap.toOriginal (playbackSeconds);
+    const auto* stem = allTracks ? nullptr : stemForLane (lane);
+    if (stem == nullptr)
+        allTracks = true;
+    if (tool == ui::EditTool::colour)
+    {
+        colourMenu (at, lane, allTracks);
+        return;
+    }
+    pushUndo();
+    bool changed = false;
+    juce::String done;
+    const juce::String where = allTracks ? tr (" en todas las pistas") : tr (" en «") + stem->name + tr ("»");
+    if (allTracks)
+    {
+        arrangement::ensureClips (info->clips, sourceLength);
+        if (const int idx = arrangement::clipAt (info->clips, at); idx >= 0)
+        {
+            const auto c = info->clips[(size_t) idx];
+            if (tool == ui::EditTool::glue)
+            {
+                changed = arrangement::joinWithPrevious (info->clips, idx + 1);
+                done = tr ("Tramo unido con el siguiente");
+            }
+            else if (tool == ui::EditTool::erase)
+            {
+                double from = 0.0, length = 0.0;
+                arrangement::removeMidiHits (*info, c.position, c.end());
+                arrangement::removeClip (info->clips, idx, false, from, length);
+                arrangement::removeOwnRange (*info, c.position, c.end(), false);
+                changed = true;
+                done = tr ("Tramo en silencio");
+            }
+            else if (tool == ui::EditTool::mute)
+            {
+                const bool muted = ! c.muted;
+                info->clips[(size_t) idx].muted = muted;
+                for (auto& own : info->trackClips)
+                    for (auto& st : info->stems)
+                        if (st.fileName == own.stem && ! st.songTime)
+                            arrangement::setMutedInRange (own.clips, c.position, c.end(), muted);
+                changed = true;
+                done = muted ? tr ("Tramo silenciado") : tr ("Tramo encendido de nuevo");
+            }
+        }
+    }
+    else
+    {
+        const auto file = stem->fileName;
+        const bool hadOwn = info->ownClips (file) != nullptr;
+        auto& own = arrangement::ownClips (*info, *stem, sourceLength);
+        if (const int idx = arrangement::clipAt (own, at); idx >= 0)
+        {
+            if (tool == ui::EditTool::glue)
+            {
+                changed = arrangement::joinWithPrevious (own, idx + 1);
+                done = tr ("Tramo unido con el siguiente");
+            }
+            else if (tool == ui::EditTool::erase)
+            {
+                const auto c = own[(size_t) idx];
+                double from = 0.0, length = 0.0;
+                arrangement::removeClip (own, idx, false, from, length);
+                arrangement::removeMidiHits (*info, c.position, c.end(), file);
+                changed = true;
+                done = tr ("Tramo en silencio");
+            }
+            else if (tool == ui::EditTool::mute)
+            {
+                own[(size_t) idx].muted = ! own[(size_t) idx].muted;
+                changed = true;
+                done = own[(size_t) idx].muted ? tr ("Tramo silenciado") : tr ("Tramo encendido de nuevo");
+            }
+        }
+        if (! changed && ! hadOwn)
+            arrangement::dropOwnClips (*info, file);
+    }
+    if (! changed)
+    {
+        undoStack.pop_back();
+        sepLabel.setText (tool == ui::EditTool::glue ? tr ("Solo se unen dos tramos seguidos del mismo audio: el siguiente no continúa a este")
+                                                     : tr ("Ahí no hay un tramo"),
+                          juce::dontSendNotification);
+        return;
+    }
+    arrangementEdited();
+    sepLabel.setText (done + where + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+}
+
+void MainComponent::colourMenu (double at, int lane, bool allTracks)
+{
+    static const juce::uint32 colours[] = { 0xffe57373, 0xffffb74d, 0xfffff176, 0xff81c784, 0xff4db6ac, 0xff4fc3f7, 0xff7986cb, 0xffba68c8, 0xfff06292, 0xffa1887f };
+    static const char* const names[] = { "Rojo", "Naranjo", "Amarillo", "Verde", "Turquesa", "Celeste", "Azul", "Morado", "Rosado", "Café" };
+    juce::PopupMenu m;
+    m.addSectionHeader (allTracks ? tr ("Color del tramo en todas las pistas") : tr ("Color del tramo"));
+    for (int i = 0; i < 10; ++i)
+        m.addColouredItem (i + 1, tr (names[i]), juce::Colour (colours[i]));
+    m.addSeparator();
+    m.addItem (100, tr ("Color de la pista (quitar el color)"));
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this, at, lane, allTracks] (int result)
+    {
+        auto* info = currentInfo();
+        if (info == nullptr || sourceSong == nullptr || result == 0)
+            return;
+        const juce::uint32 colour = result == 100 ? 0u : colours[juce::jlimit (0, 9, result - 1)];
+        const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+        pushUndo();
+        bool changed = false;
+        if (allTracks)
+        {
+            arrangement::ensureClips (info->clips, sourceLength);
+            if (const int idx = arrangement::clipAt (info->clips, at); idx >= 0)
+            {
+                const auto c = info->clips[(size_t) idx];
+                info->clips[(size_t) idx].colour = colour;
+                for (auto& own : info->trackClips)
+                    arrangement::setColourInRange (own.clips, c.position, c.end(), colour);
+                changed = true;
+            }
+        }
+        else if (const auto* st = stemForLane (lane))
+        {
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            if (const int idx = arrangement::clipAt (own, at); idx >= 0)
+            {
+                own[(size_t) idx].colour = colour;
+                changed = true;
+            }
+        }
+        if (! changed)
+        {
+            undoStack.pop_back();
+            return;
+        }
+        arrangementEdited();
+    });
+}
+
+void MainComponent::rangeMenu (double playbackSeconds, int lane)
+{
+    juce::ignoreUnused (playbackSeconds, lane);
+    const auto r = timeline.getRange();
+    auto* info = currentInfo();
+    if (info == nullptr || r.isEmpty())
+        return;
+    juce::String who = tr ("todas las pistas");
+    if (! r.allLanes() && currentSong != nullptr)
+    {
+        juce::StringArray names;
+        for (int i = r.firstLane; i <= r.lastLane; ++i)
+            if (juce::isPositiveAndBelow (i, (int) currentSong->tracks.size()))
+                names.add (currentSong->tracks[(size_t) i]->name);
+        who = names.joinIntoString (", ");
+    }
+    juce::PopupMenu m;
+    m.addSectionHeader (tr ("Rango ") + formatTime (r.start) + " - " + formatTime (r.end) + " · " + who);
+    m.addItem (1, tr ("Silenciar el rango (Supr)"));
+    m.addItem (2, tr ("Quitar el rango y cerrar el hueco (la grilla y lo que sigue se adelantan)"), r.allLanes());
+    m.addItem (3, tr ("Cortar en los bordes del rango"));
+    m.addSeparator();
+    m.addItem (4, tr ("Loop de este rango"));
+    m.addItem (5, tr ("Zoom al rango"));
+    m.addItem (6, tr ("Quitar la marca del rango"));
+    if (! r.allLanes())
+        m.addItem (7, tr ("Con Shift al marcar, el rango alcanza a todas las pistas"), false);
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this] (int result) { if (result > 0) editRange (result); });
+}
+
+void MainComponent::editRange (int action)
+{
+    auto* info = currentInfo();
+    const auto r = timeline.getRange();
+    if (info == nullptr || sourceSong == nullptr || r.isEmpty() || playbackMode)
+        return;
+    if (action == 4)
+    {
+        rangeLoopStart = r.start;
+        rangeLoopEnd = r.end;
+        loopBtn.setToggleState (true, juce::dontSendNotification);
+        updateLoopRegion();
+        sepLabel.setText (tr ("Loop del rango ") + formatTime (r.start) + " - " + formatTime (r.end) + tr (" (L lo apaga)"), juce::dontSendNotification);
+        return;
+    }
+    if (action == 5)
+    {
+        timeline.zoomToRange (r.start, r.end);
+        return;
+    }
+    if (action == 6)
+    {
+        timeline.setRange ({});
+        return;
+    }
+    if (linkedSongMenu (*info, [this, action] { editRange (action); }))
+        return;
+    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
+    const double a = timeMap.toOriginal (r.start), b = timeMap.toOriginal (r.end);
+    pushUndo();
+    if (r.allLanes())
+    {
+        if (action == 1)
+            arrangement::removeSongRange (*info, a, b, false, sourceLength);
+        else if (action == 2)
+        {
+            arrangement::removeSongRange (*info, a, b, true, sourceLength);
+            timeline.setRange ({});
+            refreshFromInfo();   // la grilla se adelantó
+            sepLabel.setText (tr ("Rango quitado: lo que seguía se adelantó ") + juce::String (b - a, 1).replaceCharacter ('.', ',') + " s",
+                              juce::dontSendNotification);
+            return;
+        }
+        else if (action == 3)
+        {
+            arrangement::ensureClips (info->clips, sourceLength);
+            arrangement::cutAt (info->clips, a, sourceLength);
+            arrangement::cutAt (info->clips, b, sourceLength);
+            arrangement::cutOwnAt (*info, a);
+            arrangement::cutOwnAt (*info, b);
+        }
+    }
+    else
+    {
+        for (int lane = r.firstLane; lane <= r.lastLane; ++lane)
+        {
+            const auto* st = stemForLane (lane);
+            if (st == nullptr)
+                continue;
+            const auto file = st->fileName;
+            auto& own = arrangement::ownClips (*info, *st, sourceLength);
+            if (action == 1)
+            {
+                arrangement::silenceRange (own, a, b);
+                arrangement::removeMidiHits (*info, a, b, file);
+            }
+            else if (action == 3)
+            {
+                arrangement::splitAllAt (own, a);
+                arrangement::splitAllAt (own, b);
+            }
+        }
+    }
+    arrangementEdited();
+    sepLabel.setText (action == 1 ? tr ("Rango en silencio (Ctrl+Z deshace)") : tr ("Cortado en los bordes del rango"), juce::dontSendNotification);
+}
+
+// Reproducir: suena desde donde se aprieta mientras se mantiene; al soltar vuelve. Si ya sonaba, solo salta ahí.
+void MainComponent::playToolDown (double playbackSeconds)
+{
+    if (currentSong == nullptr)
+        return;
+    if (engine.isPlaying())
+    {
+        engine.seekSeconds (playbackSeconds);
+        playToolHeld = false;
+        return;
+    }
+    playToolReturn = engine.getPositionSeconds();
+    engine.seekSeconds (playbackSeconds);
+    engine.play();
+    playToolHeld = true;
+}
+
+void MainComponent::playToolUp()
+{
+    if (! playToolHeld)
+        return;
+    playToolHeld = false;
+    engine.pause();
+    if (playToolReturn >= 0.0)
+        engine.seekSeconds (playToolReturn);
+}
+
+// Warp: el tiempo `beat` de la rejilla va adonde está el golpe en el audio (los tiempos hasta los compases vecinos se
+// acomodan). Cambia el click y los compases, no el audio.
+void MainComponent::beatWarped (int beat, double playbackSeconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode || ! juce::isPositiveAndBelow (beat, (int) info->analysis.beats.size()))
+        return;
+    pushUndo();
+    if (! info->analysis.warpBeat (beat, timeMap.toOriginal (playbackSeconds)))
+    {
+        undoStack.pop_back();
+        sepLabel.setText (tr ("No cabe: un tiempo no puede pasar al primer tiempo del compás anterior o del siguiente"), juce::dontSendNotification);
+        return;
+    }
+    analysisEdited();
+    sepLabel.setText (tr ("Rejilla acomodada al audio (Ctrl+Z deshace)"), juce::dontSendNotification);
+}
+
+//==============================================================================
+// Pista de tempo
+
+void MainComponent::tempoRegionsEdited (SongInfo& info)
+{
+    info.sortTempoRegions();
+    library.saveSong (info);
+    tempoControlsFromSong();
+    syncTimelineMarkers();
+    analysisEdited();   // la rejilla pudo cambiar (modo "solo el click")
+    requestRender();    // y el estirado (modo "estira el audio")
+}
+
+void MainComponent::tempoTrackSet (int band, double bpm)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || arrangedSong == nullptr || playbackMode)
+        return;
+    ensureTempoRegions (*info);
+    if (! juce::isPositiveAndBelow (band, (int) info->tempoRegions.size()))
+        return;
+    bpm = juce::jlimit (20.0, 400.0, bpm);
+    pushUndo();
+    auto& r = info->tempoRegions[(size_t) band];
+    const bool single = info->tempoRegions.size() == 1;
+    if (timeline.tempoStretchesAudio())
+    {
+        // Estira el audio: el tempo al que suena la sección (como "Tempo de la sección...")
+        if (single)
+            info->playBpm = std::abs (bpm - r.origBpm) < 0.05 ? 0.0 : bpm;
+        else
+            r.playBpm = (info->playBpm <= 0.0 && std::abs (bpm - r.origBpm) < 0.05) ? 0.0 : bpm;
+        sepLabel.setText (tr ("La sección suena a ") + juce::String (bpm, 1) + tr (" BPM (el audio se estira; Ctrl+Z deshace)"), juce::dontSendNotification);
+    }
+    else
+    {
+        // Solo el click: la rejilla de la sección pasa a ese tempo y el audio suena igual (el estirado conserva su razón)
+        const double oldOrig = r.origBpm, play = effectivePlayBpm (*info, r);
+        const double newPlay = play * bpm / juce::jmax (1.0, oldOrig);
+        double tStart = 0.0, tEnd = 0.0;
+        sectionRange (*info, band, tStart, tEnd);
+        r.origBpm = bpm;
+        if (single)
+            info->playBpm = std::abs (newPlay - bpm) < 0.05 ? 0.0 : newPlay;
+        else
+            r.playBpm = (info->playBpm <= 0.0 && std::abs (newPlay - bpm) < 0.05) ? 0.0 : newPlay;
+        auto& an = info->analysis;
+        if (an.beats.empty())
+            info->bpm = bpm;   // rejilla fija del click
+        else
+        {
+            const int first = an.firstBeatAtOrAfter (tStart);
+            int meter = juce::jlimit (1, maxBeatsPerBar, an.meter), unit = 4;
+            for (auto& run : an.signatureRuns())
+                if (run.firstBeat <= juce::jmax (0, first))
+                {
+                    meter = run.numerator;
+                    unit = run.unit;
+                }
+            an.replaceBeatsWithGrid (tStart, tEnd, bpm, meter);
+            for (int i = an.firstBeatAtOrAfter (tStart); i < an.firstBeatAtOrAfter (tEnd); ++i)
+                an.beats[(size_t) i].unit = unit;
+        }
+        sepLabel.setText (tr ("Click de la sección a ") + juce::String (bpm, 1) + tr (" BPM (el audio no cambia; Ctrl+Z deshace)"), juce::dontSendNotification);
+    }
+    tempoRegionsEdited (*info);
+}
+
+void MainComponent::tempoTrackMoved (int band, double playbackSeconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode || band <= 0 || band >= (int) info->tempoRegions.size())
+        return;
+    double at = timeMap.toOriginal (playbackSeconds);
+    const double lo = info->tempoRegions[(size_t) band - 1].start + 0.25;
+    const double hi = band + 1 < (int) info->tempoRegions.size() ? info->tempoRegions[(size_t) band + 1].start - 0.25 : songLengthSeconds() - 0.25;
+    at = juce::jlimit (lo, juce::jmax (lo, hi), at);
+    pushUndo();
+    info->tempoRegions[(size_t) band].start = at;
+    tempoRegionsEdited (*info);
+    sepLabel.setText (tr ("Cambio de tempo en ") + formatTime (playbackSeconds), juce::dontSendNotification);
+}
+
+void MainComponent::tempoTrackAdd (double playbackSeconds, double bpm)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || arrangedSong == nullptr || playbackMode)
+        return;
+    ensureTempoRegions (*info);
+    bpm = juce::jlimit (20.0, 400.0, bpm);
+    double at = timeMap.toOriginal (playbackSeconds);
+    // En el primer tiempo de compás más cercano (si hay análisis)
+    const auto& an = info->analysis;
+    int best = -1;
+    for (int i = 0; i < (int) an.beats.size(); ++i)
+        if (an.beats[(size_t) i].beatInBar == 1 && (best < 0 || std::abs (an.beats[(size_t) i].seconds - at) < std::abs (an.beats[(size_t) best].seconds - at)))
+            best = i;
+    if (best >= 0)
+        at = an.beats[(size_t) best].seconds;
+    for (auto& r : info->tempoRegions)
+        if (std::abs (r.start - at) < 0.5)
+        {
+            sepLabel.setText (tr ("Ya hay un cambio de tempo ahí: arrástralo para cambiarlo"), juce::dontSendNotification);
+            return;
+        }
+    pushUndo();
+    const int idx = juce::jmax (0, info->tempoRegionAt (at));
+    const auto base = info->tempoRegions[(size_t) idx];
+    TempoRegion added { at, base.origBpm, base.playBpm, base.transpose };
+    if (timeline.tempoStretchesAudio())
+        added.playBpm = std::abs (bpm - base.origBpm) < 0.05 && info->playBpm <= 0.0 ? 0.0 : bpm;
+    else
+    {
+        // Solo el click: desde ahí la rejilla va a ese tempo (y el audio suena igual)
+        const double play = effectivePlayBpm (*info, base);
+        added.origBpm = bpm;
+        added.playBpm = std::abs (play - base.origBpm) < 0.05 && info->playBpm <= 0.0 ? 0.0 : play * bpm / juce::jmax (1.0, base.origBpm);
+        double tEnd = songLengthSeconds();
+        for (auto& r : info->tempoRegions)
+            if (r.start > at + 1.0e-6)
+                tEnd = juce::jmin (tEnd, r.start);
+        auto& a = info->analysis;
+        if (! a.beats.empty())
+        {
+            const int first = a.firstBeatAtOrAfter (at);
+            int meter = juce::jlimit (1, maxBeatsPerBar, a.meter);
+            for (auto& run : a.signatureRuns())
+                if (run.firstBeat <= first)
+                    meter = run.numerator;
+            a.replaceBeatsWithGrid (at, tEnd, bpm, meter);
+        }
+    }
+    info->tempoRegions.push_back (added);
+    tempoRegionsEdited (*info);
+    sepLabel.setText (tr ("Cambio de tempo a ") + juce::String (bpm, 1) + tr (" BPM en ") + formatTime (timeMap.toPlayback (at)) + tr (" (arrástralo para ajustar)"),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::tempoTrackRemove (int band)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode || band <= 0 || band >= (int) info->tempoRegions.size())
+        return;
+    pushUndo();
+    info->tempoRegions.erase (info->tempoRegions.begin() + band);
+    tempoRegionsEdited (*info);
+    sepLabel.setText (tr ("Cambio de tempo quitado: la sección sigue a la anterior"), juce::dontSendNotification);
+}
+
+//==============================================================================
+// Pista de compás
+
+bool MainComponent::ensureExplicitBeats (SongInfo& info)
+{
+    if (! info.analysis.beats.empty())
+        return true;
+    if (info.bpm <= 0.0 || arrangedSong == nullptr)
+        return false;
+    // La rejilla fija del click (4/4 desde su inicio) pasa a ser una lista de tiempos, que ya se puede editar
+    info.analysis.replaceBeatsWithGrid (juce::jmax (0.0, info.clickOffset), songLengthSeconds(), info.bpm, 4);
+    info.analysis.bpm = info.bpm;
+    info.analysis.meter = 4;
+    ensureTempoRegions (info);
+    return ! info.analysis.beats.empty();
+}
+
+double MainComponent::beatSecondsAt (const SongInfo& info, int beat) const
+{
+    const auto& b = info.analysis.beats;
+    std::vector<double> gaps;
+    for (int i = juce::jmax (1, beat - 4); i <= juce::jmin ((int) b.size() - 1, beat + 4); ++i)
+        if (b[(size_t) i].seconds > b[(size_t) i - 1].seconds)
+            gaps.push_back (b[(size_t) i].seconds - b[(size_t) i - 1].seconds);
+    if (gaps.empty())
+        return 60.0 / juce::jmax (20.0, info.bpm);
+    std::sort (gaps.begin(), gaps.end());
+    return gaps[gaps.size() / 2];
+}
+
+void MainComponent::signatureMenu (int beat, bool popup, double playbackSeconds)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode)
+        return;
+    auto& an = info->analysis;
+    if (an.beats.empty())
+    {
+        // Rejilla fija: para cambiar compases primero pasa a tiempos (el click suena igual)
+        juce::PopupMenu m;
+        m.addSectionHeader (tr ("Rejilla fija del click: 4/4 a ") + juce::String (info->bpm, 1) + " BPM");
+        m.addItem (1, tr ("Cambiar el compás... (la rejilla pasa a tiempos editables)"), info->bpm > 0.0);
+        m.addItem (2, tr ("Insertar compases al inicio..."), info->bpm > 0.0);
+        m.showMenuAsync (juce::PopupMenu::Options(), [this] (int result)
+        {
+            auto* s = currentInfo();
+            if (s == nullptr || result == 0)
+                return;
+            pushUndo();
+            if (! ensureExplicitBeats (*s))
+            {
+                undoStack.pop_back();
+                return;
+            }
+            analysisEdited();
+            const int down = s->analysis.downbeatAfter (0.0);
+            if (down < 0)
+                return;
+            if (result == 1)
+                signatureDialog (down, false);
+            else
+                insertBarsDialog (down);
+        });
+        return;
+    }
+    const double at = timeMap.toOriginal (playbackSeconds);
+    // El compás bajo el mouse: su primer tiempo
+    int down = -1, bar = 0, barHere = 0;
+    for (int i = 0; i < (int) an.beats.size(); ++i)
+        if (an.beats[(size_t) i].beatInBar == 1)
+        {
+            ++bar;
+            if (an.beats[(size_t) i].seconds <= at + 0.05 || down < 0)
+            {
+                down = i;
+                barHere = bar;
+            }
+        }
+    if (! popup)
+    {
+        if (beat >= 0)
+            signatureDialog (beat, false);
+        return;
+    }
+    const auto runs = an.signatureRuns();
+    bool isChange = false, first = false;
+    juce::String current;
+    for (size_t k = 0; k < runs.size(); ++k)
+        if (runs[k].firstBeat == beat)
+        {
+            isChange = true;
+            first = k == 0;
+            current = juce::String (runs[k].numerator) + "/" + juce::String (runs[k].unit);
+        }
+    juce::PopupMenu m;
+    m.addSectionHeader (tr ("Compás ") + juce::String (juce::jmax (1, barHere)));
+    m.addItem (1, tr ("Cambiar este compás (") + current + ")...", isChange);
+    m.addItem (2, tr ("Cambio de compás desde el compás ") + juce::String (juce::jmax (1, barHere)) + "...", down >= 0);
+    m.addItem (3, tr ("Quitar este cambio de compás (sigue el anterior)"), isChange && ! first);
+    m.addSeparator();
+    m.addItem (4, tr ("Insertar compases antes del compás ") + juce::String (juce::jmax (1, barHere)) + tr ("... (silencio en todas las pistas)"), down >= 0);
+    m.addItem (5, tr ("Eliminar el compás ") + juce::String (juce::jmax (1, barHere)) + tr (" (cierra el hueco en todas las pistas)"), down >= 0);
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().toInt();
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (mouse.x, mouse.y, 1, 1)),
+                     [this, beat, down] (int result)
+    {
+        if (result == 1) signatureDialog (beat, false);
+        else if (result == 2) signatureDialog (down, true);
+        else if (result == 3) removeSignature (beat);
+        else if (result == 4) insertBarsDialog (down);
+        else if (result == 5) deleteBar (down);
+    });
+}
+
+void MainComponent::signatureDialog (int beat, bool adding)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (beat, (int) info->analysis.beats.size()))
+        return;
+    const auto& an = info->analysis;
+    int numerator = 4, unit = 4, bar = 0;
+    for (auto& run : an.signatureRuns())
+        if (run.firstBeat <= beat)
+        {
+            numerator = run.numerator;
+            unit = run.unit;
+        }
+    for (int i = 0; i <= beat; ++i)
+        if (an.beats[(size_t) i].beatInBar == 1)
+            ++bar;
+    auto* w = new juce::AlertWindow (adding ? tr ("Cambio de compás") : tr ("Compás"),
+        tr ("Desde el compás ") + juce::String (juce::jmax (1, bar)) + tr (". Cambia cómo se agrupan los tiempos del click (el acento en el 1, "
+                                                                           "los compases de la regla y la guía); el audio no cambia. "
+                                                                           "Hasta 32 tiempos por compás: 17/4, 7/8..."),
+        juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("num", juce::String (numerator), tr ("Tiempos por compás"));
+    w->addComboBox ("unit", { tr ("2 (blanca)"), tr ("4 (negra)"), tr ("8 (corchea)"), tr ("16 (semicorchea)") }, tr ("Figura"));
+    w->getComboBoxComponent ("unit")->setSelectedItemIndex (unit == 2 ? 0 : unit == 8 ? 2 : unit == 16 ? 3 : 1, juce::dontSendNotification);
+    w->addComboBox ("scope", { tr ("Hasta el próximo cambio de compás"), tr ("Solo este compás"), tr ("Hasta el final de la canción") }, tr ("Hasta"));
+    w->addButton ("Aceptar", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::Component::SafePointer<juce::AlertWindow> window (w);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, window, beat] (int result)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || window == nullptr || result != 1)
+            return;
+        auto* s = self->currentInfo();
+        if (s == nullptr || ! juce::isPositiveAndBelow (beat, (int) s->analysis.beats.size()))
+            return;
+        const int num = juce::jlimit (1, maxBeatsPerBar, window->getTextEditorContents ("num").getIntValue());
+        static const int units[] = { 2, 4, 8, 16 };
+        const int u = units[juce::jlimit (0, 3, window->getComboBoxComponent ("unit")->getSelectedItemIndex())];
+        const int scope = window->getComboBoxComponent ("scope")->getSelectedItemIndex();
+        auto& a = s->analysis;
+        // El tramo de compases donde cae: hasta su final llega "hasta el próximo cambio"
+        int runEnd = (int) a.beats.size(), oldNum = 4, oldUnit = 4;
+        for (auto& run : a.signatureRuns())
+            if (run.firstBeat <= beat)
+            {
+                runEnd = run.endBeat;
+                oldNum = run.numerator;
+                oldUnit = run.unit;
+            }
+        self->pushUndo();
+        if (scope == 1)
+        {
+            const int end = juce::jmin ((int) a.beats.size(), beat + num);
+            a.setSignature (beat, num, u, end);
+            if (end < runEnd)
+                a.setSignature (end, oldNum, oldUnit, runEnd);   // después vuelve el compás que había
+        }
+        else
+            a.setSignature (beat, num, u, scope == 2 ? (int) a.beats.size() : runEnd);
+        self->analysisEdited();
+        self->sepLabel.setText (tr ("Compás de ") + juce::String (num) + "/" + juce::String (u) + tr (" (Ctrl+Z deshace)"), juce::dontSendNotification);
+    }), true);
+}
+
+void MainComponent::moveSignature (int fromBeat, int toBeat)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode)
+        return;
+    auto& a = info->analysis;
+    const auto runs = a.signatureRuns();
+    int k = -1;
+    for (int i = 0; i < (int) runs.size(); ++i)
+        if (runs[(size_t) i].firstBeat == fromBeat)
+            k = i;
+    if (k < 0 || toBeat == fromBeat)
+        return;
+    const auto run = runs[(size_t) k];
+    const int lo = k > 0 ? runs[(size_t) k - 1].firstBeat + 1 : 0;
+    toBeat = juce::jlimit (lo, run.endBeat - 1, toBeat);
+    if (toBeat == fromBeat)
+        return;
+    pushUndo();
+    if (toBeat > fromBeat)
+    {
+        // Más tarde: el compás de antes sigue hasta ahí (o, si era el primero, esos tiempos quedan antes del 1)
+        if (k > 0)
+        {
+            const auto& prev = runs[(size_t) k - 1];
+            a.renumberBeats (fromBeat, prev.numerator, toBeat, prev.firstBeat);
+            for (int i = fromBeat; i < toBeat; ++i)
+                a.beats[(size_t) i].unit = prev.unit;
+        }
+        else
+            a.renumberBeats (fromBeat, run.numerator, toBeat, toBeat);
+    }
+    a.setSignature (toBeat, run.numerator, run.unit, run.endBeat);
+    analysisEdited();
+}
+
+void MainComponent::removeSignature (int beat)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || playbackMode)
+        return;
+    auto& a = info->analysis;
+    const auto runs = a.signatureRuns();
+    for (int k = 1; k < (int) runs.size(); ++k)
+        if (runs[(size_t) k].firstBeat == beat)
+        {
+            pushUndo();
+            const auto& prev = runs[(size_t) k - 1];
+            // Sigue el compás de antes, contando desde su inicio
+            a.renumberBeats (beat, prev.numerator, runs[(size_t) k].endBeat, prev.firstBeat);
+            for (int i = beat; i < runs[(size_t) k].endBeat; ++i)
+                a.beats[(size_t) i].unit = prev.unit;
+            analysisEdited();
+            sepLabel.setText (tr ("Cambio de compás quitado: sigue el ") + juce::String (prev.numerator) + "/" + juce::String (prev.unit),
+                              juce::dontSendNotification);
+            return;
+        }
+    sepLabel.setText (tr ("El primer compás no se quita: cámbialo con un clic"), juce::dontSendNotification);
+}
+
+void MainComponent::insertBarsDialog (int downbeat)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || ! juce::isPositiveAndBelow (downbeat, (int) info->analysis.beats.size()))
+        return;
+    const auto& an = info->analysis;
+    int numerator = 4, unit = 4, bar = 0;
+    for (auto& run : an.signatureRuns())
+        if (run.firstBeat <= downbeat)
+        {
+            numerator = run.numerator;
+            unit = run.unit;
+        }
+    for (int i = 0; i <= downbeat; ++i)
+        if (an.beats[(size_t) i].beatInBar == 1)
+            ++bar;
+    auto* w = new juce::AlertWindow (tr ("Insertar compases"),
+        tr ("Antes del compás ") + juce::String (juce::jmax (1, bar)) + tr (": se abre espacio en todas las pistas (silencio) y lo que sigue "
+                                                                            "(audio, click, acordes, marcadores) se corre. Al tempo de ahí."),
+        juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("bars", "1", tr ("Cuántos compases"));
+    w->addTextEditor ("num", juce::String (numerator), tr ("Tiempos por compás"));
+    w->addComboBox ("unit", { tr ("2 (blanca)"), tr ("4 (negra)"), tr ("8 (corchea)"), tr ("16 (semicorchea)") }, tr ("Figura"));
+    w->getComboBoxComponent ("unit")->setSelectedItemIndex (unit == 2 ? 0 : unit == 8 ? 2 : unit == 16 ? 3 : 1, juce::dontSendNotification);
+    w->addButton ("Insertar", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::Component::SafePointer<juce::AlertWindow> window (w);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, window, downbeat] (int result)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || window == nullptr || result != 1)
+            return;
+        auto* s = self->currentInfo();
+        if (s == nullptr || self->sourceSong == nullptr || ! juce::isPositiveAndBelow (downbeat, (int) s->analysis.beats.size()))
+            return;
+        const int bars = juce::jlimit (1, 64, window->getTextEditorContents ("bars").getIntValue());
+        const int num = juce::jlimit (1, maxBeatsPerBar, window->getTextEditorContents ("num").getIntValue());
+        static const int units[] = { 2, 4, 8, 16 };
+        const int u = units[juce::jlimit (0, 3, window->getComboBoxComponent ("unit")->getSelectedItemIndex())];
+        if (self->linkedSongMenu (*s, [] {}))
+            return;
+        const double sourceLength = (double) self->sourceSong->length / self->engine.getSampleRate();
+        self->pushUndo();
+        const double length = arrangement::insertBars (*s, s->analysis.beats[(size_t) downbeat].seconds, bars, num, u,
+                                                       self->beatSecondsAt (*s, downbeat), sourceLength);
+        if (length <= 0.0)
+        {
+            self->undoStack.pop_back();
+            return;
+        }
+        self->refreshFromInfo();
+        self->sepLabel.setText (juce::String (bars) + (bars == 1 ? tr (" compás de ") : tr (" compases de ")) + juce::String (num) + "/" + juce::String (u)
+                                    + tr (" insertados (") + juce::String (length, 1).replaceCharacter ('.', ',') + tr (" s; Ctrl+Z deshace)"),
+                                juce::dontSendNotification);
+    }), true);
+}
+
+void MainComponent::deleteBar (int downbeat)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || playbackMode || ! juce::isPositiveAndBelow (downbeat, (int) info->analysis.beats.size()))
+        return;
+    if (linkedSongMenu (*info, [this, downbeat] { deleteBar (downbeat); }))
+        return;
+    const auto& b = info->analysis.beats;
+    const double from = b[(size_t) downbeat].seconds;
+    double to = songLengthSeconds();
+    for (int i = downbeat + 1; i < (int) b.size(); ++i)
+        if (b[(size_t) i].beatInBar == 1)
+        {
+            to = b[(size_t) i].seconds;
+            break;
+        }
+    if (! (to > from))
+        return;
+    pushUndo();
+    arrangement::removeSongRange (*info, from, to, true, (double) sourceSong->length / engine.getSampleRate());
+    refreshFromInfo();
+    sepLabel.setText (tr ("Compás eliminado: lo que seguía se adelantó ") + juce::String (to - from, 1).replaceCharacter ('.', ',') + tr (" s (Ctrl+Z deshace)"),
+                      juce::dontSendNotification);
+}
+
+void MainComponent::signatureForCapture (int bar, int numerator, int unit, int insertBars)
+{
+    auto* info = currentInfo();
+    if (info == nullptr || sourceSong == nullptr || ! ensureExplicitBeats (*info))
+        return;
+    auto& a = info->analysis;
+    int down = -1, count = 0;
+    for (int i = 0; i < (int) a.beats.size() && down < 0; ++i)
+        if (a.beats[(size_t) i].beatInBar == 1 && ++count == bar)
+            down = i;
+    if (down < 0)
+        return;
+    pushUndo();
+    if (insertBars > 0)
+    {
+        arrangement::insertBars (*info, a.beats[(size_t) down].seconds, insertBars, numerator, unit, beatSecondsAt (*info, down),
+                                 (double) sourceSong->length / engine.getSampleRate());
+        refreshFromInfo();
+    }
+    else
+    {
+        int runEnd = (int) a.beats.size();
+        for (auto& run : a.signatureRuns())
+            if (run.firstBeat <= down)
+                runEnd = run.endBeat;
+        a.setSignature (down, numerator, unit, runEnd);
+        analysisEdited();
+    }
+    std::cout << "captura: compases " << a.signatureRuns().size() << " cambios\n";
+}
+
 void MainComponent::toolForCapture (ui::EditTool tool, double guideSeconds, double cutSeconds, int lane)
 {
     setEditTool (tool);
+    timeline.setTool (tool);
     if (cutSeconds >= 0.0)
     {
         cutWithTool (cutSeconds, juce::jmax (0, lane), lane < 0);
@@ -6673,7 +7819,7 @@ static void pasteIntoOwnClips (SongInfo& info, const std::vector<TrackClips>& pa
                 own.clips.push_back (c);
             }
         else
-            own.clips.push_back ({ songClip.srcStart, songClip.srcEnd, at });
+            own.clips.push_back (songClip.part (songClip.srcStart, songClip.srcEnd, at));
         arrangement::sortClips (own.clips);
     }
 }
@@ -6753,81 +7899,6 @@ void MainComponent::duplicateForCapture (double seconds)
     std::cout << "captura: duplicado el tramo " << idx << ", tramos " << info->clips.size() << ", largo " << arrangement::lengthSeconds (info->clips, (double) sourceSong->length / engine.getSampleRate()) << "\n";
 }
 
-void MainComponent::clipDragged (double playbackSeconds, double delta, int lane, bool trackOnly)
-{
-    auto* info = currentInfo();
-    if (info == nullptr || sourceSong == nullptr)
-        return;
-    // Ligada a su mix: editar aquí la desliga (se pregunta; después se vuelve a arrastrar)
-    if (linkedSongMenu (*info, [this] { sepLabel.setText (tr ("Desligada: ya puedes mover los tramos aquí"), juce::dontSendNotification); }))
-        return;
-    const double sourceLength = (double) sourceSong->length / engine.getSampleRate();
-    const double t0 = timeMap.toOriginal (playbackSeconds);
-    double d0 = timeMap.toOriginal (playbackSeconds + delta) - t0;
-    // Con Ctrl: el tramo de la pista del carril (su arreglo propio, o el de la canción que pasa a ser suyo)
-    const auto* stem = trackOnly ? stemForLane (lane) : nullptr;
-    if (trackOnly && stem == nullptr)
-        return;
-    const juce::String stemFile = stem != nullptr ? stem->fileName : juce::String();
-    const juce::String stemName = stem != nullptr ? stem->name : juce::String();
-    auto clips = stem != nullptr ? arrangement::clipsOf (*info, *stem, sourceLength) : info->clips;
-    arrangement::ensureClips (clips, sourceLength);
-    const int idx = arrangement::clipAt (clips, t0);
-    if (idx < 0 || std::abs (d0) < 1.0e-4)
-        return;
-    const auto& clip = clips[(size_t) idx];
-    juce::String note;
-    if (cutMode() == 2)
-    {
-        // A la rejilla: el inicio del tramo cae en el tiempo más cercano
-        const double target = nearestGridTime (clip.position + d0);
-        if (target >= 0.0)
-        {
-            d0 = target - clip.position;
-            note = tr (" (inicio en el tiempo)");
-        }
-    }
-    else if (cutMode() == 3)
-    {
-        // A la transiente: el primer golpe del tramo (en su primer cuarto de segundo) cae en el tiempo más cercano
-        const double onset = onsetNear (clip.position + 0.12, lane, 0.13);
-        if (onset >= clip.position)
-        {
-            const double offset = onset - clip.position;
-            const double target = nearestGridTime (clip.position + offset + d0);
-            if (target >= 0.0)
-            {
-                d0 = target - offset - clip.position;
-                note = tr (" (transiente en el tiempo)");
-            }
-        }
-    }
-    if (std::abs (d0) < 1.0e-4)
-        return;
-    pushUndo();
-    const auto moved = clips[(size_t) idx];
-    const double actual = juce::jmax (d0, -moved.position);   // lo que moveClip mueve de verdad
-    if (stem != nullptr)
-    {
-        if (const auto* st = [&]() -> const StemInfo* { for (auto& s : info->stems) if (s.fileName == stemFile) return &s; return nullptr; }())
-        {
-            auto& own = arrangement::ownClips (*info, *st, sourceLength);
-            arrangement::moveClip (own, idx, d0, false);
-            arrangement::moveMidiHits (*info, moved.position, moved.end(), actual, stemFile);
-        }
-    }
-    else
-    {
-        info->clips = clips;
-        arrangement::moveClip (info->clips, idx, d0, false);
-        arrangement::moveOwnRange (*info, moved.position, moved.end(), actual, false);   // y en las pistas con arreglo propio
-        arrangement::moveMidiHits (*info, moved.position, moved.end(), actual);
-    }
-    arrangementEdited();
-    sepLabel.setText ((stem != nullptr ? tr ("Tramo de «") + stemName + tr ("» desplazado ") : tr ("Tramo desplazado "))
-                          + juce::String::formatted ("%+.0f ms", d0 * 1000.0) + note, juce::dontSendNotification);
-}
-
 double MainComponent::nearestGridTime (double t) const
 {
     if (! juce::isPositiveAndBelow (currentIndex, (int) library.songs.size()))
@@ -6901,7 +7972,7 @@ void MainComponent::editForCapture (double cutSeconds, double moveMs, int onlyLa
     std::cout << "captura: corte en " << cutSeconds << how << (onlyLane >= 0 ? " (solo una pista)" : "") << "\n";
     if (onlyLane >= 0)
     {
-        // Solo esa pista: el mismo camino que el menú del carril (cortar) y el arrastre con Ctrl + Shift
+        // Solo esa pista: el mismo camino que el menú del carril (cortar) y el arrastre de un tramo de la pista con Objeto
         const auto* stem = stemForLane (onlyLane);
         if (stem == nullptr)
             return;
@@ -7742,7 +8813,7 @@ void MainComponent::showHelpText()
                            ? tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción del show · 1-9: marcador · "
                                  "L: loop · F11: en vivo · Ctrl+rueda: zoom · Solo volumen y salida de cada pista")
                            : tr ("Espacio: play/pausa · Esc: stop · Flechas o RePág/AvPág: canción · 1-9: marcador · M: añadir marcador · "
-                                 "L: loop · V/C/D: selección, cortar, mover · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
+                                 "L: loop · Herramientas: V R C U B Z S D P W K · F11: en vivo · Ctrl+rueda: zoom · Arrastra archivos (1 = separar, varios = stems)"),
                        juce::dontSendNotification);
 }
 
@@ -8005,7 +9076,7 @@ juce::String MainComponent::playbackKey (const SongInfo& info, double sr)
     {
         juce::Array<juce::var> list;
         for (auto& c : clips)
-            list.add (juce::Array<juce::var> { c.srcStart, c.srcEnd, c.position });
+            list.add (juce::Array<juce::var> { c.srcStart, c.srcEnd, c.position, c.muted });
         return list;
     };
     o->setProperty ("clips", clipsVar (info.clips));
@@ -8959,7 +10030,7 @@ void MainComponent::barAndBeat (double pos, int& bar, int& beat, int& beatsInBar
         int nextDown = (int) beats.size();
         for (int k = down + 1; k < (int) beats.size(); ++k)
             if (beats[(size_t) k].beatInBar == 1) { nextDown = k; break; }
-        beatsInBar = juce::jlimit (1, 12, nextDown - down);
+        beatsInBar = juce::jlimit (1, maxBeatsPerBar, nextDown - down);
         if (i + 1 < (int) beats.size())
             progress = juce::jlimit (0.0, 1.0, (orig - beats[(size_t) i].seconds) / juce::jmax (1.0e-6, beats[(size_t) i + 1].seconds - beats[(size_t) i].seconds));
         return;
@@ -9130,7 +10201,7 @@ void MainComponent::beatMenu (int index)
         if (a.beats[(size_t) j].beatInBar == 1) { nextDown = j; break; }
     for (int j = 0; j <= index; ++j)
         if (a.beats[(size_t) j].beatInBar == 1) ++barNumber;
-    const int meterHere = nextDown > prevDown ? nextDown - prevDown : juce::jlimit (2, 7, a.meter);
+    const int meterHere = nextDown > prevDown ? nextDown - prevDown : juce::jlimit (1, maxBeatsPerBar, a.meter);
 
     juce::PopupMenu m;
     m.addSectionHeader (tr ("Tiempo ") + juce::String (a.beats[(size_t) index].beatInBar) + tr (" del compás ") + juce::String (juce::jmax (1, barNumber))
@@ -9174,6 +10245,7 @@ void MainComponent::beatMenu (int index)
             Beat b;
             b.seconds = 0.5 * (an.beats[(size_t) index].seconds + an.beats[(size_t) index + 1].seconds);
             b.beatInBar = an.beats[(size_t) index].beatInBar % juce::jmax (1, an.meter) + 1;
+            b.unit = an.beats[(size_t) index].unit;
             an.beats.insert (an.beats.begin() + index + 1, b);
         }
         else if (result == 1 || (result >= 12 && result <= 17) || (result >= 61 && result <= 63))

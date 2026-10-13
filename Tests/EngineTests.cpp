@@ -549,8 +549,10 @@ int main()
         // Compases de 3 hasta el final y el compás detectado sigue al máximo
         a.renumberBeats (0, 3, 100);
         CHECK (a.beats[0].beatInBar == 1 && a.beats[2].beatInBar == 3 && a.beats[3].beatInBar == 1 && a.beats[15].beatInBar == 1 && a.meter == 3);
-        a.renumberBeats (0, 9, 16);   // se acota a 7
-        CHECK (a.meter == 7 && a.beats[7].beatInBar == 1);
+        a.renumberBeats (0, 9, 16);   // compases de 9 (hasta 32 tiempos: 17/4, por ejemplo)
+        CHECK (a.meter == 9 && a.beats[9].beatInBar == 1 && a.beats[8].beatInBar == 9);
+        a.renumberBeats (0, 40, 16);   // se acota a maxBeatsPerBar: los 16 tiempos en un compás
+        CHECK (a.meter == 16 && a.beats[15].beatInBar == 16);
         // Ancla distinta del inicio: el tiempo 6 es el 1 y los anteriores se numeran hacia atrás
         a.renumberBeats (0, 4, 16, 6);
         CHECK (a.beats[6].beatInBar == 1 && a.beats[5].beatInBar == 4 && a.beats[2].beatInBar == 1 && a.beats[0].beatInBar == 3 && a.beats[10].beatInBar == 1);
@@ -1445,6 +1447,93 @@ int main()
         rendercache::prune (cacheRoot, 80000);   // cabe una entrada (unos 58 KB), no dos
         CHECK (rendercache::load (cacheRoot, "clave-1", mixInfo, 48000.0, formats) == nullptr);
         CHECK (rendercache::load (cacheRoot, "clave-3", mixInfo, 48000.0, formats) != nullptr);
+    }
+
+    std::cout << "[Herramientas] compases de 17/4 y 7/8, warp, tramos silenciados y con color, recorte, rangos y compases insertados\n";
+    {
+        // Pista de compás: 4/4, desde el tiempo 8 un compás de 17/4, y vuelta a 4/4
+        Analysis an;
+        for (int i = 0; i < 40; ++i)
+            an.beats.push_back ({ i * 0.5, i % 4 + 1 });
+        auto runs = an.signatureRuns();
+        CHECK (runs.size() == 1 && runs[0].numerator == 4 && runs[0].firstBar == 1 && runs[0].endBeat == 40);
+        an.setSignature (8, 17, 4, 25);
+        an.setSignature (25, 4, 4, 40);
+        runs = an.signatureRuns();
+        CHECK (runs.size() == 3 && runs[1].firstBeat == 8 && runs[1].numerator == 17 && runs[1].firstBar == 3
+               && runs[2].firstBeat == 25 && runs[2].firstBar == 4);
+        CHECK (an.beats[24].beatInBar == 17 && an.beats[25].beatInBar == 1);
+        // 7/8: la figura viaja con los tiempos y se guarda (solo cuando no es negra)
+        an.setSignature (25, 7, 8, 40);
+        runs = an.signatureRuns();
+        CHECK (runs.size() == 3 && runs[2].numerator == 7 && runs[2].unit == 8);
+        const auto reread = Library::analysisFromVar (Library::analysisToVar (an));
+        CHECK (reread.beats.size() == an.beats.size() && reread.beats[30].unit == 8 && reread.beats[3].unit == 4 && reread.beats[24].beatInBar == 17);
+
+        // Warp: el tiempo 3 del primer compás va a 1,2 s; los 1 vecinos quedan y lo de en medio se estira
+        Analysis w;
+        for (int i = 0; i < 9; ++i)
+            w.beats.push_back ({ i * 0.5, i % 4 + 1 });
+        CHECK (w.warpBeat (2, 1.2));
+        CHECK (std::abs (w.beats[2].seconds - 1.2) < 1.0e-9 && std::abs (w.beats[0].seconds) < 1.0e-9 && std::abs (w.beats[4].seconds - 2.0) < 1.0e-9);
+        CHECK (std::abs (w.beats[1].seconds - 0.6) < 1.0e-9 && std::abs (w.beats[3].seconds - 1.6) < 1.0e-9);
+        CHECK (! w.warpBeat (2, 2.5));   // no puede pasar al 1 siguiente
+
+        // Silenciar y colorear: los pedazos conservan su estado al partirse; un silenciado no se une con uno que suena
+        std::vector<Clip> cl { { 0.0, 2.0, 0.0 } };
+        arrangement::setMutedInRange (cl, 0.5, 1.0, true);
+        CHECK (cl.size() == 3 && ! cl[0].muted && cl[1].muted && ! cl[2].muted);
+        arrangement::setColourInRange (cl, 1.0, 2.0, 0xffe57373);
+        CHECK (cl[2].colour == 0xffe57373u && cl[1].colour == 0u);
+        arrangement::cutAt (cl, 1.5, 2.0);
+        CHECK (cl.size() == 4 && cl[3].colour == 0xffe57373u && cl[2].colour == 0xffe57373u);
+        CHECK (! arrangement::canJoinWithPrevious (cl, 1) && arrangement::canJoinWithPrevious (cl, 3));
+        {
+            auto flat = std::make_shared<LoadedSong>();
+            flat->sampleRate = 1000.0;
+            flat->length = 2000;
+            auto t = std::make_unique<LoadedTrack>();
+            t->buffer.setSize (2, 2000);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2000; ++i)
+                    t->buffer.setSample (ch, i, 0.5f);
+            flat->tracks.push_back (std::move (t));
+            auto muted = arrangement::render (flat, cl, 1000.0);
+            CHECK (muted != nullptr && std::abs (muted->tracks[0]->buffer.getSample (0, 750)) < 1.0e-6f
+                   && std::abs (muted->tracks[0]->buffer.getSample (0, 250) - 0.5f) < 1.0e-6f);
+        }
+        // En song.json
+        Library looks (tmp.getChildFile ("looks"));
+        CHECK (looks.importStemFolder (src, "Looks") == 0);
+        looks.songs[0].clips = cl;
+        looks.saveSong (looks.songs[0]);
+        Library looksAgain (tmp.getChildFile ("looks"));
+        looksAgain.load();
+        CHECK (looksAgain.songs.size() == 1 && looksAgain.songs[0].clips.size() == 4 && looksAgain.songs[0].clips[1].muted
+               && looksAgain.songs[0].clips[3].colour == 0xffe57373u && ! looksAgain.songs[0].clips[0].muted);
+
+        // Recorte de bordes: el inicio no pisa al tramo anterior; el final no pasa del audio original
+        std::vector<Clip> tc { { 0.0, 1.0, 0.0 }, { 1.0, 2.0, 1.5 } };
+        CHECK (arrangement::trimClip (tc, 1, true, 0.8, 2.0) && std::abs (tc[1].position - 1.0) < 1.0e-9 && std::abs (tc[1].srcStart - 0.5) < 1.0e-9);
+        CHECK (arrangement::trimClip (tc, 1, false, 2.0, 2.0) && std::abs (tc[1].srcEnd - 1.5) < 1.0e-9);
+        CHECK (arrangement::trimClip (tc, 1, false, 9.0, 2.0) && std::abs (tc[1].srcEnd - 2.0) < 1.0e-9);
+        CHECK (! arrangement::trimClip (tc, 1, false, 9.0, 2.0));
+
+        // Quitar un rango cerrando el hueco, e insertar un compás de 17/4
+        SongInfo ranged;
+        for (int i = 0; i < 16; ++i)
+            ranged.analysis.beats.push_back ({ i * 0.5, i % 4 + 1 });
+        SongMarker mk;
+        mk.name = "Coro";
+        mk.seconds = 4.0;
+        ranged.markers.push_back (mk);
+        arrangement::removeSongRange (ranged, 2.0, 4.0, true, 8.0);
+        CHECK (ranged.clips.size() == 2 && std::abs (ranged.clips[1].position - 2.0) < 1.0e-9 && std::abs (ranged.clips[1].srcStart - 4.0) < 1.0e-9);
+        CHECK (ranged.analysis.beats.size() == 12 && std::abs (ranged.markers[0].seconds - 2.0) < 1.0e-9);
+        CHECK (std::abs (arrangement::insertBars (ranged, 2.0, 1, 17, 4, 0.5, 8.0) - 8.5) < 1.0e-9);
+        runs = ranged.analysis.signatureRuns();
+        CHECK (runs.size() == 3 && runs[1].numerator == 17 && runs[1].firstBar == 2 && runs[2].numerator == 4);
+        CHECK (ranged.clips.size() == 2 && std::abs (ranged.clips[1].position - 10.5) < 1.0e-9 && std::abs (ranged.markers[0].seconds - 10.5) < 1.0e-9);
     }
 
     std::cout << "[AudioEngine] sampler de triggers: dispara muestras en las posiciones exactas\n";

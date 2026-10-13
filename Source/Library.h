@@ -36,8 +36,19 @@ struct Clip
 {
     double srcStart = 0.0, srcEnd = 0.0;   // segundos del audio original
     double position = 0.0;                 // dónde empieza en la línea de tiempo de la canción
+    bool muted = false;                    // silenciado con la herramienta Silenciar (no suena, se ve gris)
+    juce::uint32 colour = 0;               // color propio (herramienta Color); 0 = el de la pista
     double length() const { return srcEnd - srcStart; }
     double end() const    { return position + length(); }
+    // Otro pedazo del mismo tramo (conserva el silencio y el color): al partir, copiar o pegar
+    Clip part (double fromSrc, double toSrc, double at) const
+    {
+        Clip c = *this;
+        c.srcStart = fromSrc;
+        c.srcEnd = toSrc;
+        c.position = at;
+        return c;
+    }
 };
 
 // Arreglo propio de una pista (cortada o movida sola): sus tramos reemplazan a los de la canción en esa pista. Los
@@ -115,10 +126,13 @@ struct StemInfo
     TriggerSettings trigger;
 };
 
+constexpr int maxBeatsPerBar = 32;   // compases de hasta 32 tiempos (17/4, 7/8...)
+
 struct Beat
 {
     double seconds = 0.0;
     int beatInBar = 1;       // 1 = primer tiempo del compás
+    int unit = 4;            // figura de cada tiempo, el denominador del compás: 4 (x/4), 8 (x/8), 2 o 16
 };
 
 struct Chord
@@ -168,6 +182,22 @@ struct Analysis
     // (1..beatsInBar, con su acento) y desde el siguiente se vuelve a numerar con `meterAfter`
     // hasta `toExclusive`. Sirve para un compás de 1 o 2 tiempos en un enganche.
     void shortBar (int index, int beatsInBar, int meterAfter, int toExclusive);
+
+    // Pista de compás: tramos de compases seguidos del mismo tipo (mismos tiempos y figura). firstBeat es un primer
+    // tiempo de compás; los tiempos antes del primer 1 (anacrusa) no forman parte de ningún tramo. El último compás
+    // de la canción puede quedar incompleto sin abrir un tramo nuevo.
+    struct SignatureRun
+    {
+        int firstBeat = 0, endBeat = 0;   // [firstBeat, endBeat) en `beats`
+        int numerator = 4, unit = 4;
+        int firstBar = 1;                 // número del compás donde empieza (cuenta desde el primer 1)
+    };
+    std::vector<SignatureRun> signatureRuns() const;
+    // Tipo de compás numerator/unit desde el tiempo `from` (que pasa a ser un 1) hasta `toExclusive`
+    void setSignature (int from, int numerator, int unit, int toExclusive);
+    // Time warp: lleva el tiempo `index` a `seconds` y estira la rejilla entre los primeros tiempos de compás vecinos
+    // (que no se mueven; sin uno después, lo que sigue se corre igual). false si no cabe entre sus vecinos.
+    bool warpBeat (int index, double seconds);
 };
 
 // Un tramo de un mix tal como quedó en la canción armada con él (mix::pieces): de dónde a dónde suena en la

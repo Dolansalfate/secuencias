@@ -64,6 +64,13 @@ public:
     {
         timeline.dragForCapture (juce::jmax (0, lane), fromSeconds, toSeconds, shift ? juce::ModifierKeys::shiftModifier : 0);
     }
+    void clickForCapture (int lane, double seconds, bool shift)
+    {
+        timeline.clickForCapture (juce::jmax (0, lane), seconds, shift ? juce::ModifierKeys::shiftModifier : 0);
+    }
+    // --compas=N/D:compás y --insertarcompases=K:N/D:compás (pista de compás, sin diálogos)
+    void signatureForCapture (int bar, int numerator, int unit, int insertBars);
+    void tempoTrackForCapture (int band, double bpm, bool stretches)    { timeline.setTempoStretches (stretches); tempoTrackSet (band, bpm); }
     void separateCurrentSong();                               // separa la canción seleccionada y reemplaza sus pistas por los stems
     void separateDrumsOfCurrentSong();                        // parte la batería de la canción seleccionada en bombo, caja, toms, hi-hat, ride y crash
     void setDrumPartsForCapture (bool on)                     { drumPartsBtn.setToggleState (on, juce::dontSendNotification); }
@@ -396,10 +403,41 @@ private:
     const StemInfo* stemForLane (int lane) const;                   // la pista del carril (lo que suena), o nullptr
     static juce::StringArray stemFilesOf (const SongInfo&);         // archivos de los stems por índice (render del arreglo)
     void clipMenu (double playbackSeconds, int lane);
-    // Herramientas de edición (Selección, Cortar, Mover): botones, teclas V, C y D, y lo que hace la tijera
+    // Herramientas de edición, como la caja de herramientas de Cubase (botones y teclas; ver toolInfo)
     void setEditTool (ui::EditTool);
+    static void toolInfo (ui::EditTool, juce::String& name, juce::String& key, juce::String& hint);
     void cutWithTool (double playbackSeconds, int lane, bool allTracks);
     bool cutAllTracksAt (double songSeconds);   // cortar todas las pistas (con deshacer); false si no cortó nada
+    // Objeto: mover los tramos elegidos (ajustado según el modo de corte, por el que se tomó) y recortar un borde
+    void moveClipPicks (std::vector<TimelineView::ClipPick>, int primary, double grabSeconds, double deltaSeconds);
+    void trimClipEdge (TimelineView::ClipPick, bool startEdge, double edgeSeconds);
+    void deleteClipPicks();   // Supr con tramos elegidos: dejan silencio
+    // Unir, Borrar, Silenciar, Color y Dibujar sobre un carril (allTracks: el tramo de la canción)
+    void clipToolClicked (ui::EditTool, double playbackSeconds, int lane, bool allTracks);
+    void colourMenu (double songSeconds, int lane, bool allTracks);
+    // Rango: menú (clic derecho) y lo que hace (1 silencio, 2 quitar cerrando el hueco, 3 cortar en los bordes, 4 loop)
+    void rangeMenu (double playbackSeconds, int lane);
+    void editRange (int action);
+    void playToolDown (double playbackSeconds);
+    void playToolUp();
+    void beatWarped (int beat, double playbackSeconds);
+    // Pista de tempo y de compás
+    void tempoTrackSet (int band, double bpm);
+    void tempoTrackMoved (int band, double playbackSeconds);
+    void tempoTrackAdd (double playbackSeconds, double bpm);
+    void tempoTrackRemove (int band);
+    void tempoRegionsEdited (SongInfo&);   // guardar, rehacer la vista y el estirado
+    void signatureMenu (int beat, bool popup, double playbackSeconds);
+    void signatureDialog (int beat, bool adding);
+    void moveSignature (int fromBeat, int toBeat);
+    void removeSignature (int beat);
+    void insertBarsDialog (int downbeat);
+    void deleteBar (int downbeat);
+    bool ensureExplicitBeats (SongInfo&);   // rejilla fija -> tiempos, para poder cambiar compases o hacer warp
+    double beatSecondsAt (const SongInfo&, int beat) const;   // duración de un tiempo cerca de ese tiempo (s del arreglo)
+    double playToolReturn = -1.0;           // Reproducir: adónde vuelve el cabezal al soltar
+    bool playToolHeld = false;
+    double rangeLoopStart = 0.0, rangeLoopEnd = 0.0;   // loop puesto desde un rango (tiempo de reproducción)
     // Una edición de una sola pista (ids 21 a 29 del menú del carril) en el instante `songSeconds`
     void trackClipAction (int action, double songSeconds, const juce::String& stemFile);
     // Portapapeles de tramos: el tramo copiado con la grilla (tiempos y acordes) de su rango y el tempo de su sección
@@ -416,7 +454,6 @@ private:
     void copyClip (int index);
     void pasteClipboard (double songSeconds, bool insert);   // insert: abre espacio (audio y grilla); si no, superpone
     void duplicateClip (int index);                          // copia y pega insertando justo después del tramo
-    void clipDragged (double playbackSeconds, double deltaSeconds, int lane, bool trackOnly);
     int cutMode() const { return cutModeBox.getSelectedId(); }          // 1 libre, 2 a la rejilla, 3 a la transiente
     double nearestGridTime (double songSeconds) const;                   // tiempo detectado (o de la rejilla fija) más cercano
     double onsetNear (double songSeconds, int lane, double window) const; // transiente en la pista del carril (o en la mezcla); -1 si no hay
@@ -589,9 +626,8 @@ private:
     juce::Slider positionSlider;
 
     juce::TextButton addMarkerBtn, addNoteBtn;
-    ui::ToolButton selectToolBtn { ui::EditTool::select, tr ("Selección") },
-                   cutToolBtn { ui::EditTool::cut, "Cortar" },
-                   moveToolBtn { ui::EditTool::move, "Mover" };
+    juce::OwnedArray<ui::ToolButton> toolButtons;   // la caja de herramientas, una por ui::EditTool
+    juce::TooltipWindow tooltips { this, 600 };     // el nombre y la tecla de cada herramienta
     juce::ComboBox cutModeBox;                 // modo de corte y de encaje al mover tramos
     juce::OwnedArray<MarkerButton> markerButtons;
 
