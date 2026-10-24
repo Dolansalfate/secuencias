@@ -474,6 +474,21 @@ id (`source_tempomap_timemap`). `/graphify .` además lee los .md con subagentes
 `graphify update .`. No usar el paquete `anytechie-graphify` ni su extensión de VS Code: no son oficiales y mandan
 nombres del código a un servicio externo aunque digan trabajar en local.
 
+**Herramientas de Claude Code para este proyecto** (instaladas el 2026-10-24):
+- Plugins oficiales (a nivel de usuario): `clangd-lsp` (navegación y diagnósticos de C++; necesita `sudo apt install
+  clangd` y lee `compile_commands.json`, un enlace en la raíz, ignorado por git, a `build/debug/compile_commands.json`),
+  `claude-md-management` (auditar este archivo y `/revise-claude-md` al final de una sesión) y `hookify`.
+- Reglas de hookify en `.claude/hookify.*.local.md` (avisan al editar con Edit o Write, no al editar con scripts):
+  `warn-texto-sin-tr`, `warn-simbolos-unicode`, `warn-font-deprecado`, `warn-ruta-absoluta-con-barra`,
+  `warn-nombre-que-choca-con-macos`, `warn-hilo-de-audio` (recordatorio en `AudioEngine`) y `warn-copiar-claude-md`.
+  Ojo con su lector de YAML: quita las comillas del principio y del final de cada valor (por eso los patrones van
+  entre paréntesis) y siempre ignora mayúsculas (`font (` del helper no se distingue de `Font (` sin `juce::`).
+- Skills del proyecto en `.claude/skills/`: `publicar-version` (versión, documentación, release, commit, push y CI)
+  y `verificar-ui` (capturas con una canción de prueba desechable, `scripts/cancion_prueba.py crear|listar|borrar`,
+  y limpieza de la biblioteca y los ajustes reales).
+- En la carpeta padre (`/home/ubuntu/Documents/GitHub/daw/.claude/`, fuera de git) hay enlaces a las skills y a las
+  reglas, porque las sesiones suelen abrirse ahí.
+
 ## 4. Estructura
 
 ```
@@ -1417,8 +1432,11 @@ Pasos de `run()`:
 ## 6. Convenciones y trampas conocidas
 
 - **Texto con tildes, ñ o símbolos**: siempre con `tr("...")` (definido en `Library.h`, equivale a
-  `String::fromUTF8`). `juce::String("canción")` con un `const char*` no ASCII **dispara un
-  assert** en Debug. Los textos ASCII pueden ir directos.
+  `String::fromUTF8`). Un `const char*` no ASCII que se convierte a `juce::String` **dispara un assert** en Debug y
+  en Release se ve mal ("baterÃ­a"): `juce::String ("canción")`, `"ñ" + texto`, las listas `{ "ñ", ... }`
+  (`StringArray`, por ejemplo en `addComboBox`) y los parámetros `juce::String`. `texto + "ñ"` con `texto` ya
+  `juce::String` no falla (`operator+=` lee UTF-8), pero mejor con `tr()`. Los textos ASCII pueden ir directos. La
+  regla de hookify `warn-texto-sin-tr` lo avisa al editar.
 - **Nada de símbolos Unicode en botones** (▶ ■ ✓ ←…): muchas fuentes de Ubuntu no los tienen y
   se ven como cuadrados. Usa texto ("Play", "Stop", "<<") o dibújalos con `Path`.
 - Fuentes: `juce::Font (juce::FontOptions (h, style))` (el constructor `Font(float)` está

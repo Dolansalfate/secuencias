@@ -8906,7 +8906,7 @@ void MainComponent::importStems (const juce::Array<juce::File>& selection)
 
 void MainComponent::addSeparationOptions (juce::AlertWindow& w)
 {
-    w.addComboBox ("sepStems", { "4 pistas (voces, bajo, batería, otros)", "6 pistas: + guitarra y piano" }, "Pistas");
+    w.addComboBox ("sepStems", { tr ("4 pistas (voces, bajo, batería, otros)"), "6 pistas: + guitarra y piano" }, "Pistas");
     w.getComboBoxComponent ("sepStems")->setSelectedId (stemsBox.getSelectedId(), juce::dontSendNotification);
     w.addComboBox ("sepQuality", { "Normal", "Alta", tr ("Máxima (lenta)") }, "Calidad");
     w.getComboBoxComponent ("sepQuality")->setSelectedId (qualityBox.getSelectedId(), juce::dontSendNotification);
