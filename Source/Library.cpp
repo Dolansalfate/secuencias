@@ -18,7 +18,7 @@ static void readClipLook (Clip& clip, const juce::var& c)
 // posiciones infinitas o sin número. false si el tramo no tiene largo
 static bool readClip (Clip& clip, const juce::var& c)
 {
-    constexpr double maxSeconds = 3.0 * 3600.0;   // en muestras cabe en un int aun a 192 kHz
+    static constexpr double maxSeconds = 3.0 * 3600.0;   // en muestras cabe en un int aun a 192 kHz (static: MSVC)
     const auto seconds = [&c] (const char* key)
     {
         const double v = (double) c.getProperty (key, 0.0);
