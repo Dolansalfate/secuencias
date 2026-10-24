@@ -1,0 +1,3 @@
+# Configuración de graphify (grafo del código: graphify update .; sale en graphify-out/, ignorado por git)
+# Los .h del proyecto son C++ (JUCE): sin esto graphify los lee como C y pierde las clases
+language.h=cpp

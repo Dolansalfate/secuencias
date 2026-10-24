@@ -465,6 +465,15 @@ en cada noteOn emite 50 ms de nivel igual a la velocidad) y lo cargan con el hos
 (`VST3PluginFormat`); su ruta llega por la definición `SECUENCIAS_TEST_SYNTH`. En la CI de Ubuntu
 `ctest` corre bajo `xvfb-run` por si el host VST3 necesita pantalla.
 
+**Grafo del código** (graphify oficial, paquete `graphifyy` de Graphify-Labs, en `~/.local/share/graphifyy/venv` con
+`~/.local/bin/graphify`; skill `/graphify` de Claude Code en `~/.claude/skills/graphify`): `graphify update .` en la
+raíz del repositorio rehace `graphify-out/` (ignorado por git) en segundos, solo con el AST, sin IA ni red (se probó
+con `unshare -rn`). `.graphifyrc` declara los `.h` como C++. Consultas: `graphify explain <id>`, `graphify affected
+<id>` (quién usa algo, con archivo y línea), `graphify path "A" "B"`, `graphify god-nodes`; un nombre repetido pide el
+id (`source_tempomap_timemap`). `/graphify .` además lee los .md con subagentes (cuesta tokens): para el código basta
+`graphify update .`. No usar el paquete `anytechie-graphify` ni su extensión de VS Code: no son oficiales y mandan
+nombres del código a un servicio externo aunque digan trabajar en local.
+
 ## 4. Estructura
 
 ```
