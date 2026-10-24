@@ -38,12 +38,10 @@ public:
     void setReadOnly (bool);
     void setStretches (bool);                            // el tempo que se edita: el de reproducción o el de la grabación
     void setCompact (bool);
-    bool isCompact() const { return compact; }
     void setSelectedBand (int);
     int getSelectedBand() const { return selected; }
     void setShowsPlayhead (bool show)                    { showPlayhead = show; repaint(); }
     void setShowsEditorButton (bool show)                { editorBtn.setVisible (show); }
-    int getHeaderWidth() const                           { return header; }
     double bpmAtY (int y) const;                         // para el editor (el valor bajo el mouse)
 
     std::function<void (double seconds)> onSeek;

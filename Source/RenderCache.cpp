@@ -10,6 +10,18 @@ namespace rendercache
         {
             return root.getChildFile (juce::String::toHexString (key.hashCode64()));
         }
+
+        constexpr const char* tempSuffix = ".escribiendo";
+
+        // La entrada guardada con esta clave y frecuencia, o void
+        juce::var readMeta (const juce::File& dir, const juce::String& key, double sampleRate)
+        {
+            auto meta = juce::JSON::parse (dir.getChildFile ("meta.json").loadFileAsString());
+            if (! meta.isObject() || meta.getProperty ("key", "").toString() != key
+                || std::abs ((double) meta.getProperty ("sampleRate", 0.0) - sampleRate) > 0.5)
+                return {};
+            return meta;
+        }
     }
 
     juce::File defaultFolder()
@@ -30,9 +42,8 @@ namespace rendercache
                                       juce::AudioFormatManager& formats, const std::function<bool()>& shouldAbort)
     {
         const auto dir = entryFolder (root, key);
-        const auto meta = juce::JSON::parse (dir.getChildFile ("meta.json").loadFileAsString());
-        if (! meta.isObject() || meta.getProperty ("key", "").toString() != key
-            || std::abs ((double) meta.getProperty ("sampleRate", 0.0) - sampleRate) > 0.5)
+        const auto meta = readMeta (dir, key, sampleRate);
+        if (! meta.isObject())
             return nullptr;
         const auto length = (juce::int64) (double) meta.getProperty ("length", 0.0);
         auto* tracks = meta.getProperty ("tracks", juce::var()).getArray();
@@ -67,23 +78,27 @@ namespace rendercache
             t->waveform = WaveformCache::build (t->buffer);
             song->tracks.push_back (std::move (t));
         }
-        dir.setLastModificationTime (juce::Time::getCurrentTime());   // recién usada: la última en borrarse
+        // Recién usada: la última en borrarse (la fecha de un archivo: la de una carpeta no se cambia en Windows)
+        dir.getChildFile ("meta.json").setLastModificationTime (juce::Time::getCurrentTime());
         return song;
     }
 
-    bool store (const juce::File& root, const juce::String& key, const LoadedSong& song)
+    bool store (const juce::File& root, const juce::String& key, const LoadedSong& song, const std::function<bool()>& shouldAbort)
     {
         const auto dir = entryFolder (root, key);
-        dir.deleteRecursively();
-        if (! dir.createDirectory().wasOk())
+        if (readMeta (dir, key, song.sampleRate).isObject())
+            return true;   // ya está (la guardó la precarga o una carga anterior)
+        const auto temp = root.getNonexistentChildFile (dir.getFileName() + tempSuffix, "", false);
+        if (! temp.createDirectory().wasOk())
             return false;
         juce::Array<juce::var> tracks;
         for (size_t i = 0; i < song.tracks.size(); ++i)
         {
             const auto& t = *song.tracks[i];
-            if (! triggers::writeWav (t.buffer, song.sampleRate, dir.getChildFile ("pista-" + juce::String ((int) i) + ".wav"), 24))
+            if ((shouldAbort && shouldAbort())
+                || ! triggers::writeWav (t.buffer, song.sampleRate, temp.getChildFile ("pista-" + juce::String ((int) i) + ".wav"), 32))
             {
-                dir.deleteRecursively();
+                temp.deleteRecursively();
                 return false;
             }
             auto* to = new juce::DynamicObject();
@@ -97,7 +112,18 @@ namespace rendercache
         meta->setProperty ("sampleRate", song.sampleRate);
         meta->setProperty ("length", (double) song.length);
         meta->setProperty ("tracks", tracks);
-        return dir.getChildFile ("meta.json").replaceWithText (juce::JSON::toString (juce::var (meta)));
+        if (! temp.getChildFile ("meta.json").replaceWithText (juce::JSON::toString (juce::var (meta))))
+        {
+            temp.deleteRecursively();
+            return false;
+        }
+        dir.deleteRecursively();   // otra versión con el mismo hash, o una a medias de antes
+        if (! temp.moveFileTo (dir))
+        {
+            temp.deleteRecursively();
+            return false;
+        }
+        return true;
     }
 
     void prune (const juce::File& root, juce::int64 maxBytes)
@@ -110,9 +136,18 @@ namespace rendercache
         };
         std::vector<Entry> entries;
         juce::int64 total = 0;
+        const auto now = juce::Time::getCurrentTime();
         for (const auto& d : root.findChildFiles (juce::File::findDirectories, false))
         {
-            Entry e { d, d.getLastModificationTime(), 0 };
+            // Una a medias: se está escribiendo (se deja) o quedó de un cierre inesperado (más de un día: se borra)
+            if (d.getFileName().contains (tempSuffix))
+            {
+                if (now - d.getLastModificationTime() > juce::RelativeTime::days (1.0))
+                    d.deleteRecursively();
+                continue;
+            }
+            const auto meta = d.getChildFile ("meta.json");
+            Entry e { d, meta.existsAsFile() ? meta.getLastModificationTime() : d.getLastModificationTime(), 0 };
             for (const auto& f : d.findChildFiles (juce::File::findFiles, false))
                 e.bytes += f.getSize();
             total += e.bytes;

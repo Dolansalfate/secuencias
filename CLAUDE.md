@@ -45,7 +45,8 @@ modelo que usa Moises).
   antes las voces con Mel-Band Roformer; máxima suma 3 pasadas promediadas y más solapamiento.
   La pista "otros" siempre es el residuo exacto (mezcla menos las demás), así la suma de los
   stems reproduce la mezcla original. Si al terminar hay una canción sonando, la nueva solo se
-  agrega al final del setlist (no se cambia de canción). Cancelar no muestra error.
+  agrega al final del setlist (no se cambia de canción); si lo separado era la canción que suena, sigue sonando como
+  estaba y se carga con sus pistas nuevas al detenerla. Cancelar no muestra error.
   **Batería en partes**: la casilla del diálogo añade una etapa final con el modelo
   MDX23C DrumSep de audio-separator sobre `drums.wav`, que se reemplaza por bombo, caja, toms,
   hi-hat, ride y crash (`drums_kick.wav`… traducidos por `displayNameFor`); "otros" absorbe la
@@ -195,7 +196,8 @@ modelo que usa Moises).
   elegida) en un hilo aparte; "Añadir instrumento" carga uno de los conocidos; cada uno tiene su
   canal en el mezclador (lila: fader, mute, solo, salida y medidor; clic en el nombre abre la
   ventana del plugin) y su estado, mezcla y descripción se guardan en `instrumentos.xml` junto a
-  los ajustes y se restauran al abrir la app. En el menú del trigger de una pista, "Sonido" ofrece
+  los ajustes y se restauran al abrir la app (un plugin que cerró la app al cargarse no se vuelve a cargar solo: queda
+  con su aviso en el menú; mientras se buscan plugins no se añaden ni se quitan). En el menú del trigger de una pista, "Sonido" ofrece
   los instrumentos del rack: los golpes de esa pista salen como notas MIDI hacia el plugin (la nota
   de "Nota MIDI", velocidad 0,25 + 0,75 × fuerza del golpe, 50 ms de duración), adelantadas la
   latencia que el plugin declara, así el sonido cae exacto en el golpe. La pista original se
@@ -377,7 +379,7 @@ modelo que usa Moises).
   consolidado de la canción cargada para mandar a los demás músicos, con todo lo que suena (arreglo, tempo y
   tono, faders y mute, nivelado, fader maestro, triggers, pistas MIDI e instrumentos; el solo no cuenta). Se
   elige nombre, formato (WAV de 24 bits, o MP3 de 320 kbps si hay ffmpeg), click (sin click, mezclado o en un
-  archivo aparte), si van también las pistas por separado (una carpeta "<nombre> - pistas" con "01 Bajo.wav"...,
+  archivo aparte; si se pide, suena aunque esté apagado para tocar), si van también las pistas por separado (una carpeta "<nombre> - pistas" con "01 Bajo.wav"...,
   que suman la mezcla) y el nivel (como suena, sin saturar, o llevado al objetivo de LUFS con limitador). Se
   renderiza fuera de tiempo real con barra de progreso y Cancelar; mientras dura, la app no suena.
 - **Show** (modo reproducción; el selector "Editar | Show" arriba a la derecha une lo que antes eran
@@ -610,7 +612,9 @@ LEEME.md               Guía para el usuario final
   nuevo con el que reemplaza (`SamplerSet::previous`, un solo eslabón; lo viejo se suelta fuera del
   lock, nunca en el hilo de audio). La primera vez que el callback ve el conjunto nuevo,
   `adoptPlayback` (sin memoria dinámica) pasa a cada línea equivalente (misma pista, fila, nota,
-  archivo de origen e instrumento) hasta dónde miró la anterior y, con el mismo banco, sus voces; las voces que no pasan
+  archivo de origen e instrumento) hasta dónde miró la anterior, su rampa de ganancia y balance (`smoothedGain`,
+  `smoothedPan`, `activePair`: una fila muda no suena un trozo al editar) y, con el mismo banco, sus voces; las líneas
+  nuevas empiezan con `smoothedGain` 0; las voces que no pasan
   (sonido cambiado, fila quitada) se terminan de oír desde el anterior en pasadas de solo voces.
 - Anticipación con loop (`lookAhead`): el pre-roll del banco o la latencia del instrumento que pasa
   del final del loop sigue desde su inicio, así el golpe del inicio suena exacto en cada vuelta; los
@@ -622,9 +626,12 @@ LEEME.md               Guía para el usuario final
   `work` (canales del plugin × 2048), `midi` (`ensureSize`), `latency`, `holdSamples` y 64
   note-offs pendientes. Las líneas del sampler con `instrumentId` no tienen voces: en 2b) buscan
   su instrumento por id y meten `noteOn` en su `midi` en la muestra en que `position + latency`
-  coincide con el golpe (misma relocalización binaria tras un salto), y programan el `noteOff`;
-  en 2c) cada instrumento emite los note-offs vencidos, `processBlock` sobre una vista de `work`
-  de n muestras (salvo `isSuspended`), y su salida (canales 0 y 1) va con ganancia en rampa,
+  coincide con el golpe (misma relocalización binaria tras un salto), y programan el `noteOff`
+  (`sendInstrumentNote`: si la misma nota sigue retenida, su note-off sale antes del noteOn en la misma muestra y se
+  reutiliza ese hueco: un redoble no se corta); en 2c) cada instrumento emite los note-offs vencidos y `processBlock`
+  sobre `work` achicado a n muestras sin reasignar (`setSize (..., avoidReallocating)`: una vista nueva de 32 canales o
+  más pedía memoria en el hilo de audio; salvo `isSuspended`), y su salida (canales 0 y 1; un plugin mono,
+  `outputChannels` = 1, va a los dos lados) va con ganancia en rampa,
   envolvente global, par de salida y medidores, como las líneas del sampler. El solo cuenta
   también para ellos.
 - Grabación de la entrada (`processInput`, antes de la canción): `setRecorder (RecordSetup)`
@@ -633,7 +640,9 @@ LEEME.md               Guía para el usuario final
   termine el callback en curso, igual que `clearRecorder`: al volver, el `ThreadedWriter` ya no
   se usa y la UI lo destruye. El callback copia los canales al writer (`write` no bloquea; si la
   cola se llena cuenta `droppedSamples`), guarda en `recordStartPosition` la posición del
-  transporte del primer bloque grabado, mide `inputPeak` y suma la entrada al par de escucha
+  transporte del primer bloque grabado (con `RecordSetup::followTransport`, el de una pista, solo se graba mientras la
+  canción suena y sin salto pendiente: la toma empieza donde arranca, no antes del play ni en el final de la canción
+  antes de volver a 0), mide `inputPeak` y suma la entrada al par de escucha
   con rampa por bloque (`monitorSmooth`, que también la apaga al dejar de grabar).
   `audioDeviceAboutToStart` guarda `numInputs` y las latencias de entrada y salida.
   El fader maestro se aplica también a la escucha (y aunque no haya canción cargada).
@@ -644,11 +653,18 @@ LEEME.md               Guía para el usuario final
   `getMomentaryLufs` / `getShortTermLufs`, atómicos).
 - `setSong()` cambia el `shared_ptr` bajo `songLock` (SpinLock). El callback usa
   `ScopedTryLock` y, si no lo obtiene, entrega silencio en ese bloque. La canción anterior se
-  libera **fuera** del lock y en el hilo de UI.
+  libera **fuera** del lock y en el hilo de UI. `getSamplers` / `getMidiSamplers` / `getInstruments` copian el
+  `shared_ptr` bajo `songLock` (el bounce los lee desde su hilo). El callback lleva `ScopedNoDenormals`.
 - Transporte: `playing`, `position`, `pendingSeek` (-1 = ninguno), `loopRange` (inicio y fin
   empaquetados en un `uint64`, 32 bits cada uno, para leerlos de una sola vez; loop activo si
   `end > start`). Toda búsqueda pasa por `pendingSeek`: el callback funde a 0, salta y vuelve a
-  subir. `getPositionSeconds()` devuelve `pendingSeek` si hay uno pendiente, para que la UI no
+  subir. En la muestra del salto (`jumpIndex`, envolvente en 0) se callan las voces que venían sonando
+  (`Voice::cutAt`; las de "Escuchar" no), los instrumentos reciben all-notes-off y all-sound-off y se vacían sus
+  note-offs, y el nivelado (general y por pista) toma el del tramo nuevo sin rampa: una cola de platillo no reaparece
+  en el lugar nuevo. El loop se acota al largo de la canción; el crossfade y la vuelta solo valen con el cabezal
+  **dentro** de la región: si el loop queda detrás del cabezal (Stop o un marcador anterior con el loop de la
+  sección), sigue derecho hasta el salto pendiente, y si no hay salto pendiente y está sonando, el motor pide uno al
+  inicio del loop (con fundido, nunca un salto seco). `getPositionSeconds()` devuelve `pendingSeek` si hay uno pendiente, para que la UI no
   parpadee. `currentFade` publica el nivel del fundido global; `isSilent()` es true cuando llegó
   a 0 (la UI lo usa para cambiar de canción sin cortes).
 - `renderChunk` trabaja en trozos de hasta 2048 muestras. Primero calcula la posición y la
@@ -660,10 +676,13 @@ LEEME.md               Guía para el usuario final
   con ganancia 0 y objetivo 0 se saltan.
 - Ruteo: `outputPairChannels(pair)` apunta a los canales `2*pair`, `2*pair+1` **entre los canales
   activos** del dispositivo (JUCE los compacta). Si el par no existe o es negativo, cae a 1-2.
-  Con salida mono suma L+R×0,5.
+  Con salida mono suma L+R×0,5. Cambiar el par sonando no es instantáneo: `LoadedTrack::activePair` (solo hilo de
+  audio, -1 = aún ninguno) es el par por el que suena; cuando `outputPair` cambia, ese trozo baja a 0 por el viejo y el
+  siguiente sube con la rampa por el nuevo (pistas, líneas del sampler e instrumentos; el click no).
 - Fin de la canción: `playing = false` y la posición queda al final; `play()` vuelve a 0.
-- `audioDeviceAboutToStart` actualiza la frecuencia y la cantidad de salidas; si la frecuencia
-  cambió, pone `needsReload`, y la UI recarga la canción actual en el siguiente tick.
+- `audioDeviceAboutToStart` actualiza la frecuencia y la cantidad de salidas; si la canción cargada quedó a otra
+  frecuencia, pone `needsReload`, y la UI recarga la canción actual en el siguiente tick. Si cambió la del dispositivo
+  (haya canción o no) pone `rateChanged`, y el Timer vuelve a preparar los instrumentos (`rack->prepareAll`).
 - `audioDeviceError` (por ejemplo JACK se cerró) guarda el mensaje; la UI lo recoge con
   `takeDeviceError()` desde el Timer y lo muestra.
 
@@ -694,14 +713,19 @@ Secuencias/
   sacara de la lista, volvería a aparecer). En Linux se usa `gio trash`, y `File::moveToTrash`
   como respaldo. `saveSetlist()` no reescribe el archivo si no cambió.
 - `readSong()` acota todo lo numérico (`outputPair >= 0`, ganancias entre -60 y 12 dB, BPM entre
-  20 y 400): un `song.json` editado a mano no debe poder sacar al motor de rango.
+  20 y 400; los tramos, `readClip`, sin infinitos ni NaN y hasta 3 h, así sus muestras caben en un int aun a
+  192 kHz): un `song.json` editado a mano no debe poder sacar al motor de rango. Los nombres de archivo y de carpeta
+  guardados (`trackClips.stem`, las canciones de `shows.json`) se toman tal cual si son un nombre suelto
+  (`plainName`: sin separadores ni "." o ".."); `createLegalFileName` les quitaba "#", "," o ":" y se perdían. Si
+  falta el archivo de una pista, el nivelado por pista (que va por índice) se corre a las que quedaron.
 - Tempo y tono: `playBpm` (0 = original) y `transpose` (semitonos) por canción, y
   `tempoRegions`: `[{ "start", "bpm", "playBpm", "transpose"?, "curve"?, "gridCurve"? }]`, las secciones de tempo en
   segundos del audio original (`bpm` = tempo detectado o corregido, `playBpm` 0 = el de la
   canción, `transpose` solo si la sección tiene tono propio; `curve` y `gridCurve`, la transición hacia la sección
   siguiente del tempo de reproducción y de la grabación, `TempoRegion::Curve`: 0 salto, 1 lineal, 2 lenta al inicio,
   3 rápida al inicio, 4 en S, solo si no son salto). Se
-  ordenan al leer y siempre hay una que empieza en 0. Si una canción analizada no las tiene
+  ordenan al leer y siempre hay una que empieza en 0. `mergeEqualTempoRegions` quita la de antes de dos en el mismo
+  punto y, al unir dos iguales, la que queda se lleva la transición de la que se quita. Si una canción analizada no las tiene
   (guardada antes de esta versión), `readSong` las detecta de los tiempos guardados
   (`detectTempoRegions`). Sin secciones ni análisis, el tempo original es el `bpm` de la canción.
 - Nivelado: por canción `loudnessLufs`, `truePeakDb`, `songGainDb`, `levelingEnabled` y el
@@ -753,7 +777,8 @@ Secuencias/
   `keyOverride` (tonalidad elegida a mano, canónica como madmom: "Eb major"; vacío = la
   detectada).
 - `importStemFiles(files, name, moveFiles)`: con `moveFiles` los archivos se mueven en vez de
-  copiarse (solo para temporales propios, como el resultado de Demucs).
+  copiarse (solo para temporales propios, como el resultado de Demucs). `replaceStems (..., fromArrangement)`: si lo
+  separado fue la mezcla del arreglo (canción de varias pistas), quita `clips` y `trackClips` (ya vienen aplicados).
 - **Proyectos portables**: la carpeta de una canción (song.json + stems, rutas relativas) es el
   proyecto. `exportSong` / `exportAll` copian la carpeta (o todas más `setlist.json`) a otro
   lugar; `isProjectFolder` reconoce una carpeta con `song.json` y audio, e `importProject` la
@@ -784,8 +809,10 @@ Shows (modo reproducción): `<raíz>/shows.json` = `{ "active": 0, "shows": [{ "
 vacío; `showSongs` da los índices de las canciones que existen, en orden; `moveToTrash` quita la canción de
 todos los shows). Caché de render: `~/.cache/Secuencias/render` (XDG; `~/Library/Caches/Secuencias/render` en
 macOS, `%LOCALAPPDATA%\Secuencias\render` en Windows), una carpeta por clave (`hashCode64` en hex) con
-`pista-N.wav` (24 bits) y `meta.json` (`{ key, sampleRate, length, tracks: [{ name, stem, songTime }] }`); se
-puede borrar entera sin perder nada.
+`pista-N.wav` (coma flotante de 32 bits: lo que pasa de 0 dBFS antes del fader no se recorta) y `meta.json`
+(`{ key, sampleRate, length, tracks: [{ name, stem, songTime }] }`); se escribe en `<hash>.escribiendo` y se renombra
+al terminar (quien lee ve la entrada entera o ninguna; una a medias de más de un día la borra `prune`), y el orden de uso
+es la fecha de `meta.json` (la de una carpeta no se cambia en Windows); se puede borrar entera sin perder nada.
 
 ### 5.4 Separator (Demucs + Roformer)
 `SeparationOptions` (pistas 4/6, calidad 0-2, `roformerVocals`) se traduce con `planFor()` en
@@ -810,8 +837,11 @@ Pasos de `run()`:
 1. `convertToWav()`: la entrada a `input.wav` **44,1 kHz** (la frecuencia de los modelos, con
    `WindowedSincInterpolator`) y 24 bits en `/tmp/secuencias_separacion/trabajoN/`. Así ninguna
    herramienta remuestrea y todos los stems quedan alineados muestra a muestra con la mezcla.
-2. Cada etapa en `etapaN/`: `<python> -u -m demucs -n <modelo> --shifts S --overlap O --int24
-   -o etapaN <entrada>` o `audio-separator <entrada> --model_filename ... --output_dir etapaN`.
+2. Cada etapa en `etapaN/`: `<python> -u -m demucs -n <modelo> --shifts S --overlap O --float32 --clip-mode none
+   -o etapaN <entrada>` o `audio-separator <entrada> --model_filename ... --output_dir etapaN`. Coma flotante y
+   sin "rescale": si un stem pasaba de 0 dBFS, Demucs lo bajaba entero y "otros" se quedaba con una copia baja de ese
+   stem; `other.wav` también va en coma flotante. `convertToWav` adelanta la entrada del sinc su retardo
+   (`WindowedSincInterpolator::getBaseLatency`, 100 muestras): sin eso, lo remuestreado quedaba unos 2 ms tarde.
    La salida se lee **byte a byte** (`readProcessOutput` bloquea hasta llenar el buffer), por
    líneas, solo ASCII; `parsePercent` toma el `NN%|` de tqdm; cada reinicio de la barra es una
    pasada más (`modelsInBag x shifts`); las barras de descarga de modelos se ignoran porque traen
@@ -836,7 +866,12 @@ Pasos de `run()`:
   Roformer unos 7 min en total. En 22.04 con kernel 6.8 el driver que compila es
   `nvidia-driver-580` (545 falla); con Secure Boot hay que inscribir la clave MOK al reiniciar.
 - Cancelar: `cancel()` hace `kill()` del proceso (el puntero está protegido por `processLock`) y
-  el hilo termina en `State::cancelled`, que la UI trata sin diálogo de error.
+  el hilo termina en `State::cancelled`, que la UI trata sin diálogo de error. Un Cancelar que llega entre dos etapas
+  (sin proceso que matar) lo ve `runProcess` al registrar el siguiente, y la lectura mira `threadShouldExit` en cada
+  línea. DrumSep exige las seis partes (un proceso muerto por falta de memoria sale con código 0 en POSIX).
+- `start` / `startDrumParts` (hilo de mensajes) agregan al `PATH` del proceso la carpeta de `findFfmpeg` si no está:
+  audio-separator busca ffmpeg en el `PATH` que hereda, y una app abierta desde el Finder o el menú no tiene Homebrew
+  ni `~/.local/bin`.
 
 ### 5.4b Analyzer (madmom)
 - Python aparte: `~/analisis-env/bin/python` (ajuste `analysisPythonPath`), porque madmom exige
@@ -844,7 +879,9 @@ Pasos de `run()`:
   "cython<3"` (setuptools porque Python 3.12 ya no lo incluye) y luego `pip install --no-build-isolation git+https://github.com/CPJKU/madmom`
   (la versión de PyPI no compila con Python 3.10).
 - `run()`: `writeMix` suma las pistas en RAM (unidad, normalizado a 0,9) a `mezcla.wav` y, sin
-  las pistas de batería (`isDrumsTrack` por nombre o archivo), a `armonico.wav`; escribe el
+  las pistas de batería (`isDrumsTrack` por nombre o archivo), a `armonico.wav`, a 44,1 kHz y 16 bits (`writeMix (...,
+  outRate, bits)`, sinc alineado): es lo único que madmom lee sin ffmpeg (con otra frecuencia o 24 bits pasaba a ffmpeg
+  y, sin él, el análisis fallaba); escribe el
   script embebido `analizar.py` y lo ejecuta. El script imprime `progreso=NN` y deja
   `resultado.json`; `parseResult` traduce etiquetas (`A:min` → `Am`, `A minor` → `La menor`) y
   une acordes iguales consecutivos.
@@ -854,7 +891,7 @@ Pasos de `run()`:
 ### 5.4c Loudness (EBU R128)
 - `loudness::measure (buffer, fs, tramos)`: ponderación K (biquads derivados para cualquier
   frecuencia, como libebur128), potencia por bloques de 400 ms cada 100 ms, puerta absoluta de
-  -70 LUFS y relativa de -10 LU; los tramos usan solo los bloques enteramente dentro. Pico real
+  -70 LUFS y relativa de -10 LU (en la segunda pasada valen las dos, como pide BS.1770); los tramos usan solo los bloques enteramente dentro. Pico real
   con un sinc enventanado de 4 fases y 12 coeficientes. Verificado con la señal de referencia:
   seno de 997 Hz a -23 dBFS = -23 LUFS.
 - `LiveLoudness` (`prepare`, `process`, `momentary`, `shortTerm`; `Biquad` y `makeKWeighting` quedan a la vista):
@@ -922,15 +959,20 @@ Pasos de `run()`:
 - `arrangement::render (fuente, clips, sr, abort)`: por pista, un buffer del largo del
   arreglo; cada tramo copia sus muestras a su posición con fundidos lineales de 5 ms en los
   bordes (más sus fundidos propios, seno, y su ganancia; los silenciados se saltan) y se **suma** (los solapes son
-  un crossfade, los huecos silencio). Identidad (un
+  un crossfade, los huecos silencio). Dos tramos seguidos del mismo audio (un corte en su sitio, sin fundidos propios
+  en la unión y con la misma ganancia) se unen sin esos fundidos y muestra a muestra (el segundo empieza donde terminó
+  el primero): antes cada corte dejaba un bache de 10 ms. `LoadedTrack::copyControlsFrom` pasa a lo renderizado
+  (arreglo y estirado) nombre, pista, mezcla y balance (el balance se perdía en cada render en la v0.13.0). Identidad (un
   tramo con todo el audio en 0 o `clips` vacío) devuelve el mismo puntero.
 - Edición: `ensureClips`, `cutAt`, `moveClip` (uno o "este y los siguientes", nunca antes de
   0), `removeClip` (con `closeGap` los siguientes se adelantan e informa qué se quitó),
   `joinWithPrevious` (solo si continúan en la fuente y en la posición), `clipAt` (de dos
   solapados manda el último), `insertGap` (parte el tramo que atraviesa el punto y corre lo
-  que sigue) y `pasteClip` (copia de un rango de la fuente, superpuesta o insertando).
+  que sigue) y `pasteClip` (copia de un rango de la fuente, superpuesta o insertando). `minPiece` (1 ms) es la misma
+  tolerancia para no partir un tramo y para decidir qué tramo cae dentro de un rango.
   `shiftGrid (info, desde, delta)` mueve o recorta tiempos, acordes, marcadores, secciones de
-  tempo y `clickOffset` al cerrar un hueco; con delta > 0 abre uno y parte el acorde que lo
+  tempo y `clickOffset` al cerrar un hueco (de las secciones que empezaban en lo quitado, la última sigue rigiendo lo
+  que viene después, desde `desde`; las demás se quitan); con delta > 0 abre uno y parte el acorde que lo
   atraviesa. `copyGrid` / `pasteGrid` (`GridSlice`) llevan los tiempos y acordes de un rango
   con el tramo copiado. En MainComponent: `copyClip`, `pasteClipboard` (a la rejilla si el
   modo de corte es rejilla; con inserción añade secciones de tempo si el origen tenía otro
@@ -972,8 +1014,8 @@ Pasos de `run()`:
 ### 5.4f Triggers (golpes y sampler)
 - `triggers::detect (buffer, sr, umbralDb, sensibilidad, minMs)`: envolvente RMS en dB por
   bloques de 1 ms; golpe donde sube ≥ 6 dB en 3 ms y supera el umbral; el inicio es el bloque
-  anterior a superar en 6 dB el valle previo (como `findOnset`); tras un golpe hay que bajar
-  6 dB desde su pico (o pasar `minMs`) para admitir otro; velocidad = (pico − umbral) / (0 −
+  anterior a superar en 6 dB el valle previo (como `findOnset`); el siguiente puede empezar pasados `minMs` desde el
+  ataque anterior (una condición de "bajar 6 dB" que figuraba no tenía efecto y se quitó); velocidad = (pico − umbral) / (0 −
   umbral), elevada a 1/sensibilidad. `sliceHits` corta una grabación de golpes sueltos en
   muestras (para bancos); `loadBank` lee una carpeta (`trimHit`: cada golpe queda con
   exactamente `preRoll` = 2 ms antes de su ataque, con ceros si faltan, fundidos de 1 y 5 ms,
@@ -1013,7 +1055,9 @@ Pasos de `run()`:
   `lane`, ventana del editor, ganancia/mute/salida, `savedState`). `restore()` lee
   `instrumentos.xml` (`<INSTRUMENTO id gainDb muted outputPair pan estado=base64><PLUGIN/>`), aplica
   el "dead man's pedal" (`plugin-en-prueba.txt`: el plugin que tumbó la app en una búsqueda
-  queda vetado) y carga cada plugin con `createPluginInstanceAsync`; `makeLane` pone el estado,
+  queda vetado) y carga cada plugin con `createPluginInstanceAsync`; el id de cada uno queda anotado en
+  `plugin-cargando.txt` (`loadingPedal`) mientras se crea y recibe su estado: si la app se cierra en medio, al abrirla
+  ese instrumento no se carga (queda con su error en el menú; quitarlo lo borra del pedal) y la app vuelve a abrir; `makeLane` pone el estado,
   `prepareToPlay (sr, maxBlockSize)`, latencia, buffer y cola MIDI; `publish()` arma un
   `InstrumentSet` nuevo con las líneas cargadas (compartidas por `shared_ptr`: quitar una no toca a
   las demás) y llama a `onChanged`. `save()` (al cargar, quitar, cerrar el editor y al salir)
@@ -1021,7 +1065,9 @@ Pasos de `run()`:
   `createEditorIfNeeded` o `GenericAudioProcessorEditor` en una `DocumentWindow` que al cerrarse
   se destruye en el siguiente mensaje. `prepareAll (sr)` saca el conjunto del motor, vuelve a
   preparar y publica (lo llama el Timer con `needsReload`). `scan` (hilo `Scanner`) recorre
-  `getDefaultLocationsToSearch()` de cada formato más las carpetas extra; `describeFile` registra
+  `getDefaultLocationsToSearch()` de cada formato más las carpetas extra (mientras busca, el menú no deja añadir ni
+  quitar instrumentos: JUCE no protege su lista de módulos VST3 abiertos entre hilos; `cancelScan` solo pide que
+  termine el archivo en curso, sin esperar ni matar el hilo, y al terminar `scan` suelta el `Scanner`); `describeFile` registra
   los plugins de un archivo concreto (`--captura --instrumento=<ruta.vst3>` lo usa y asigna el
   instrumento al trigger de la batería). Callbacks tardíos se protegen con un `weak_ptr` (`alive`).
 - En `MainComponent`: `rack` se crea tras abrir el dispositivo y restaura en el primer mensaje;
@@ -1138,7 +1184,11 @@ Pasos de `run()`:
   pedidos, lleva el cabezal al inicio y la muestra). Los campos de la cabecera (`selFromEdit`,
   `selToEdit`, `updateSelectionFields`, `selectionFieldEdited`) usan `mix::barCount` y `mix::barRange`
   (compases first a last: del primer tiempo de first al de last + 1, o al final; 0 = desde el inicio);
-  `selectionFirstBar` mira 0,1 s después del inicio (el corte ajustado queda unos ms antes del 1).
+  `selectionFirstBar` mira 0,1 s después del inicio (el corte ajustado queda unos ms antes del 1). Los tiempos del
+  silencio siguen el compás del tramo (si entra en el 3, el último del silencio es el 2). Una pista que entra antes en el
+  primer tramo empieza en 0 con su fundido (antes, cortada). Deshacer del mix (`MixSnapshot`) incluye `levelLufs` y
+  vacía los niveles del panel. `noteMixStems` sube `mixVersion` siempre (otra canción con pistas cambia el render) y
+  `playMix` vuelve a renderizar si el mix cambió mientras se preparaba.
   `MixEditor::selectBars` hace lo mismo desde fuera (`--captura --mix=... --mixsel=5-8`). El selector
   `levelBox` (cabecera) edita `levelLufs`; `levelInfo` (panel) muestra el `MixLevel` del tramo elegido.
   Silencio: `MixSegment::silenceBars` (0 a 64) y `MixPlacement::silence` (`layout`: el tramo empieza
@@ -1242,7 +1292,7 @@ Pasos de `run()`:
   su fuente y el análisis de las fuentes usadas; no el nombre), `remapTime` (mismo tramo por id y
   fuente y mismo instante de su fuente; false si el tramo se quitó o ese pedazo quedó fuera; simétrica)
   y `applyRebuild` (cada sección de tempo nueva conserva el tempo y el tono de reproducción de la vieja
-  de su tramo, buscada con `remapTime` hacia atrás; un marcador propio en el lugar de uno del mix lo
+  de su tramo, buscada con `remapTime` hacia atrás desde su primer instante con audio, no desde el silencio de antes; un marcador propio en el lugar de uno del mix lo
   reemplaza). `--captura --mix=<nombre> [--mixfuentes=/a.wav,/b.wav]
   [--mixtramos] [--mixcancion=1|2] [--mixsel=5-8]` (rutas sin espacios).
 
@@ -1251,7 +1301,12 @@ Pasos de `run()`:
   (`startExport` hace `removeAudioCallback` y `exportFinished` lo vuelve a poner, repone la posición y el loop).
   Cada fuente (pista, línea de trigger o fila MIDI con banco y sin silenciar, instrumento) sale por un par de
   salida propio y el click por el último (`setClickRouting`); el solo se ignora, el mute se respeta y los
-  plugins pasan a `setNonRealtime`. Antes del `play()` se llama al callback dos veces en silencio
+  plugins pasan a `setNonRealtime`; un guardia (`Restore`) repone todo al salir, también si algo lanza una excepción
+  (falta de memoria al reservar el audio de cada fuente; antes el ruteo de exportar quedaba en el motor y se guardaba
+  en la canción). El click suena si se pidió en la exportación aunque esté apagado para tocar. Mientras se exporta,
+  lo que llega y tocaría el motor espera (`exporting`): separaciones y análisis que terminan (el Timer los aplica al
+  volver), canciones ligadas armadas (`mixSongBuilt`), el nivelado (`applyLeveling`) y los renders pedidos
+  (`renderTempo`); `startExport` avisa si hay un render o una grabación en curso. Antes del `play()` se llama al callback dos veces en silencio
   (`fadeSamples + 16`): sin eso, el fundido del salto a 0 atrasaba la mezcla 256 muestras. Luego bloques de 1024
   muestras hasta el largo de la canción; la mezcla es la suma de las fuentes (y del click si va mezclado). Al
   final devuelve salidas, solos, click y modo de los plugins como estaban.
@@ -1292,8 +1347,12 @@ Pasos de `run()`:
   reintentos en bucle.
 - Caché en disco (`RenderCache`): `loadParts` con clave lee primero `rendercache::load` si el mapa de tempo
   no es plano (solo lo estirado se guarda: lo demás se carga casi igual de rápido desde los archivos), y
-  tras estirar guarda con `store` y recorta con `prune` a 20 GB (borra las menos usadas: cargar una entrada
-  le actualiza la fecha).
+  tras estirar encola en `cachePool` (su propio hilo: la canción se entrega sin esperar a que se escriban cientos de
+  MB) `store` (que no reescribe una entrada que ya está) y `prune` a 20 GB (borra las menos usadas: cargar una entrada
+  le actualiza la fecha de su `meta.json`). `playbackKey` lleva también `gridCurve` y la versión de la app (una versión
+  nueva puede renderizar distinto). La precarga no carga la canción que `loadSongAt` está cargando; la duración de cada
+  fila de la lista se busca con la clave recordada un segundo (`displayKeys`), sin consultar los archivos en cada
+  repintado.
 - Fin de canción: el Timer ve que dejó de sonar al final (`wasPlayingLastTick`) y carga la siguiente del show
   sin darle play. `nextSong` recorre el show.
 - `--captura --reproduccion [--show=1,2,3]` (el show activo pasa a tener esas canciones del setlist; escribe
@@ -1370,7 +1429,8 @@ Pasos de `run()`:
 ### 5.5 UI (MainComponent)
 - **Foco de teclado**: ningún hijo acepta foco (`disableFocus()` recursivo, y también en los
   strips y marcadores que se crean después). Así todas las teclas llegan a
-  `MainComponent::keyPressed`. El Timer recupera el foco si no hay ventanas modales **y el foco
+  `MainComponent::keyPressed`. El Timer recupera el foco si no hay ventanas modales, la ventana activa es la
+  principal (no la guía de escenario, el editor de tempo ni la de un plugin) **y el foco
   no lo tiene un `TextEditor`** (los cuadros de valor de los faders y del BPM abren uno al hacer
   clic; sin esa excepción no se podría escribir en ellos). Si agregas un control nuevo, ponle
   `setWantsKeyboardFocus(false)`, salvo los TextEditor dentro de diálogos modales.
@@ -1381,13 +1441,26 @@ Pasos de `run()`:
   `setlist.selectRow(i)` → `selectedRowsChanged` → `loadSongAt`. El clic derecho también
   selecciona la fila, pero `selectedRowsChanged` lo ignora (`isPopupMenu`) y el menú, al
   cerrarse, devuelve la selección a la canción cargada (`restoreSetlistSelection`).
-- `loadSongAt` / `unloadSong`: actualizan la UI, hacen `engine.pause()` y con `afterFadeOut`
+- `loadSongAt` / `unloadSong`: guardan la mezcla, actualizan la UI, hacen `engine.pause()` y con `afterFadeOut`
   esperan a que `engine.isSilent()` (o 100 ms si el dispositivo no corre) antes de
-  `setSong(nullptr)` y de encolar la carga. Nunca se corta el audio de golpe. El job de carga
+  `setSong(nullptr)` y de encolar la carga. El trabajo de carga devuelve la copia de `SongInfo` con que renderizó
+  (`LoadParts::info`): `songLoaded` toma de ella `rendered*` y el `timeMap`, y si mientras tanto se tocó el tempo, el
+  arreglo o un trigger (`sameRenderInputs`) pide un render. Los controles de tempo y tono no se habilitan mientras
+  carga otra canción (`loadedFolder`). `songRendered` se descarta si empezó a cargarse otra canción (también dentro de
+  su fundido) y toma `renderedTriggers` de la copia que renderizó; con la herramienta Reproducir apretada la suelta
+  antes (los carriles nuevos no reciben su mouseUp), y `TimelineView::setSong (..., keepView)` conserva el zoom.
+  `buildSamplers` no escribe `replaced` (corre en el hilo de carga sobre lo que puede estar sonando): lo calcula
+  `refreshReplaced` al instalar, y también cuando solo cambia "Es trigger" / "Trigger y audio" (`renderTempo` sin nada
+  que renderizar). Un análisis se aplica a la canción que se analizó (`analysisFolder`), con `pushUndo` si es la
+  actual, y pide un render (sus secciones nuevas pueden cambiar el estirado). Una separación que termina con la canción
+  sonando no la corta: sigue lo que está en memoria (sin editar: `loadedFolder` se vacía) y se carga al detenerla
+  (`reloadWhenStopped`). Nunca se corta el audio de golpe. El job de carga
   captura `std::bad_alloc` (el `ThreadPool` de JUCE se traga las excepciones y la UI quedaría
   en "Cargando..." para siempre) y devuelve el error a `songLoaded`.
 - `saveCurrentMix()` copia el estado de las pistas cargadas a `SongInfo` (solo si `loadedFolder`
-  coincide con la canción seleccionada) y lo guarda. Se llama al cambiar de canción y al cerrar;
+  coincide con la canción seleccionada) y lo guarda. Deshacer (`restoreEdit`) no toca lo del mezclador ni el
+  nivelado (fader maestro, ganancia de la canción, click, `levelingEnabled`) y, si cambian los marcadores, vuelve a
+  medir; añadir, mover, renombrar o borrar un marcador hace `pushUndo`. Se llama al cambiar de canción y al cerrar;
   además `markSongDirty()` (faders, mute, salida, click) hace que el Timer guarde medio segundo
   después del último cambio. Los marcadores se guardan al instante.
 - La configuración del dispositivo de audio se guarda al cambiarla (`changeListenerCallback`),
@@ -1465,6 +1538,13 @@ Pasos de `run()`:
   `gio` sí funcionan con ese entorno. Para reproducir el comportamiento real del usuario, lanza
   la app desde una terminal normal o desde el menú.
 - Parámetros que cambian en vivo: siempre con rampa o fundido (ver `smoothedGain` y `fade`).
+- **Lo renderizado y lo que se compara con él** (`renderedClips`, `renderedTriggers`, `timeMap`...) sale de la copia de
+  `SongInfo` que llevó el trabajo, nunca de `currentInfo()` al volver: el usuario pudo editar mientras tanto. Y lo que
+  llega en un `callAsync` mira la generación (`loadGeneration`, `renderGeneration`, atómicos) y la carpeta de la
+  canción a la que pertenece.
+- **El motor durante una exportación es del hilo de exportar**: nada de `setSong`, `setSamplers`, `setGainCurve`...
+  desde la UI mientras `exporting` (el callback de exportar toma el try-lock y un bloque sin él sale en silencio en el
+  archivo). Lo que termine en ese tiempo se aplica al volver.
 - **Rutas y ejecutables por plataforma**: nunca compruebes rutas absolutas con `startsWith ("/")`
   (en Windows empiezan con `C:\`): usa `juce::File::isAbsolutePath`. Los venvs tienen
   `bin/python` en Unix y `Scripts\python.exe` en Windows (`venvPython`, `audioSeparatorExe`);
@@ -1516,7 +1596,8 @@ Pasos de `run()`:
   seguidos del mismo audio (no arma una "parte" con huecos como Cubase); no hay Comp ni Línea. En la pista de compás,
   la figura (x/4, x/8) es notación: el click suena en cada tiempo de la rejilla, y el tempo se cuenta en esos tiempos.
   Lo que se edite en la pista de tempo y de compás de una canción ligada a su mix se rehace al actualizarla desde el
-  mix (como los demás cambios de la grilla).
+  mix (como los demás cambios de la grilla). Con "Solo el click", mover o quitar un cambio de tempo no rehace la
+  rejilla de las secciones vecinas (solo escribir su tempo lo hace): rehacerla sola borraría tiempos detectados.
 - Si se arrastra a la ventana un solo archivo, siempre se separa (no pregunta).
 - Con JACK, JUCE conecta las salidas del cliente a los puertos físicos al abrir el dispositivo;
   la app no elige puertos por nombre (PipeWire puede reconectarlos).
@@ -1611,6 +1692,24 @@ verificar el DMG en un Mac real (el flujo de Actions se escribió desde Linux).
   `gio trash`, selector de archivos de JUCE en Linux, textos ASCII en los botones, ajustes en
   `~/.config/Secuencias`, `Library` acepta una carpeta raíz, tests con CTest, CMake Presets y
   configuración de VS Code.
+- **v0.13.1 (auditoría)**: revisión del código con clang-tidy, ASan/UBSan, el grafo y siete revisores. Motor: loop
+  detrás del cabezal y loop más allá del final sin saltos secos, salto que calla voces y notas (`cutAt`, all-sound-off)
+  y fija el nivelado, cambio de salida con fundido (`activePair`), relevo que hereda la rampa, `rateChanged`, toma de
+  una pista desde donde arranca (`followTransport`), sin memoria dinámica con plugins de 32+ canales, plugin mono a
+  los dos lados, note-off antes del noteOn repetido, `ScopedNoDenormals`, getters bajo lock. Datos: balance perdido en
+  cada render (`copyControlsFrom`), cortes sin bache, secciones al cerrar un hueco, `mergeEqualTempoRegions`, figura del
+  compás, nombres con "#" (`plainName`), tramos acotados, nivelado por pista con un archivo faltante, puerta absoluta,
+  pista MIDI con el balance y silencio del trigger. Render y caché: copia renderizada en `songLoaded`, `replaced` solo
+  en la UI, generación en `songRendered`, `renderGeneration` atómico, `gridCurve` y versión en la clave, caché en coma
+  flotante escrita en su hilo y de forma atómica. Exportar: guardia del ruteo, click pedido, motor aislado. Separador:
+  Demucs en coma flotante sin rescale, sinc alineado, ffmpeg en el `PATH`, cancelar entre etapas, DrumSep completo,
+  análisis a 44,1 kHz y 16 bits. Instrumentos: pedal de carga, sin añadir ni quitar mientras se busca, cancelar sin
+  congelar. Interfaz: foco, gestos y zoom en un render, rango sobre una pista MIDI, arrastres de la pista de tempo,
+  retención del medidor, guía de escenario (siguiente del show, sin repintar igual), ventana que cabe en la pantalla,
+  tope de la captura. Edición: análisis de otra canción, deshacer con mezcla y marcadores, dividir y pegar secciones con
+  su tono y transición, mover varios tramos, separar una canción de varias pistas, separación que termina sonando. Mix:
+  tempo de la sección con silencio antes, cuenta del silencio, entrada antes en el primer tramo, deshacer del nivelado,
+  escucha vieja. Se quitaron 12 funciones sin uso.
 - **v0.13.0 (revisión de la interfaz, transiciones de tempo y editor de tempo)**: las 13 recomendaciones de la revisión de
   UI/UX: acento solo para estado; sin duplicados (fila del click en su canal del mezclador, fila de tempo en el inspector,
   banda de tempo de la regla en la pista de tempo; regla de 80 px); opciones de separación en el diálogo; vista grande

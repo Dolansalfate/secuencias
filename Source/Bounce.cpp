@@ -54,14 +54,37 @@ namespace bounce
                     add (lane->control, lane->name);
         const int clickPair = (int) routed.size();
         const int outputs = 2 * (clickPair + 1);
+        // Todo vuelve a como estaba al salir, también si algo lanza una excepción (falta de memoria al reservar el audio
+        // de cada fuente): si no, el ruteo de exportar quedaba en el motor y se guardaba en la canción
+        struct Restore
+        {
+            AudioEngine& engine;
+            std::vector<Routed>& routed;
+            std::shared_ptr<InstrumentSet> instruments;
+            bool clickWasOn;
+            int clickWasPair;
+            ~Restore()
+            {
+                engine.pause();
+                for (auto& r : routed)
+                {
+                    r.control->outputPair = r.savedPair;
+                    r.control->solo = r.savedSolo;
+                }
+                engine.setClickRouting (clickWasOn, clickWasPair);
+                if (instruments != nullptr)
+                    for (auto& lane : instruments->lanes)
+                        if (lane != nullptr && lane->plugin != nullptr)
+                            lane->plugin->setNonRealtime (false);
+            }
+        } restore { engine, routed, instruments, engine.isClickOn(), engine.getClickOutputPair() };
         for (auto& r : routed)
         {
             r.control->outputPair = r.pair;
             r.control->solo = false;   // el solo es para escuchar en el momento: la mezcla lleva todo lo que no está muteado
         }
-        const bool clickWasOn = engine.isClickOn();
-        const int clickWasPair = engine.getClickOutputPair();
-        engine.setClickRouting (clickWasOn && (options.click || options.clickFile), clickPair);
+        // El click suena si se pidió en la exportación, aunque esté apagado para tocar (con su tempo, rejilla y volumen)
+        engine.setClickRouting (options.click || options.clickFile, clickPair);
         if (instruments != nullptr)
             for (auto& lane : instruments->lanes)
                 if (lane != nullptr && lane->plugin != nullptr)
@@ -127,20 +150,7 @@ namespace bounce
             if (progress)
                 progress ((float) done / (float) total);
         }
-        engine.pause();
-
-        // Todo como estaba
-        for (auto& r : routed)
-        {
-            r.control->outputPair = r.savedPair;
-            r.control->solo = r.savedSolo;
-        }
-        engine.setClickRouting (clickWasOn, clickWasPair);
-        if (instruments != nullptr)
-            for (auto& lane : instruments->lanes)
-                if (lane != nullptr && lane->plugin != nullptr)
-                    lane->plugin->setNonRealtime (false);
-        return result;
+        return result;   // (Restore repone el ruteo)
     }
 
     double normalize (Result& result, double sampleRate, double targetLufs)

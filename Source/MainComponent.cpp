@@ -611,6 +611,7 @@ MainComponent::MainComponent()
         auto* info = currentInfo();
         if (info == nullptr || ! juce::isPositiveAndBelow (i, (int) info->markers.size()))
             return;
+        pushUndo();   // Ctrl+Z vuelve a ponerlo donde estaba (y no se pierde al deshacer otra edición)
         info->markers[(size_t) i].seconds = timeMap.toOriginal (t);
         info->markers[(size_t) i].fromMix = false;   // movido a mano: es propio (una actualización desde el mix lo conserva)
         info->sortMarkers();
@@ -714,6 +715,7 @@ MainComponent::~MainComponent()
     exportPool.removeAllJobs (true, 20000);
     ++preloadGeneration;
     preloadPool.removeAllJobs (true, 20000);
+    cachePool.removeAllJobs (true, 20000);
     allSongsList.setModel (nullptr);
     if (pendingMixUpdate != nullptr && pendingMixUpdate->tempFolder != juce::File())
         pendingMixUpdate->tempFolder.deleteRecursively();   // la actualización se vuelve a armar la próxima vez
@@ -1123,7 +1125,6 @@ void MainComponent::paintListBoxItem (int row, juce::Graphics& g, int w, int h, 
         g.setColour (juce::Colours::grey);
         g.setFont (font (14.0f));
         g.drawText (juce::String (row + 1), 10, 0, 26, h, juce::Justification::centredLeft);
-        int right = w - 6;
         const auto folder = info.folder.getFullPathName();
         const bool ready = preloaded.count (folder) > 0 || (idx == currentIndex && currentSong != nullptr);
         const bool loading = preloadingFolder == folder;
@@ -1133,7 +1134,7 @@ void MainComponent::paintListBoxItem (int row, juce::Graphics& g, int w, int h, 
             g.fillEllipse (dot);
         else
             g.drawEllipse (dot, 1.2f);
-        right = w - 22;
+        int right = w - 22;
         if (const double secs = knownSeconds (info); secs > 0.0)
         {
             g.setColour (juce::Colours::lightgrey);
@@ -1398,6 +1399,8 @@ void MainComponent::afterFadeOut (std::function<void()> action, int waitedMs)
 
 void MainComponent::unloadSong()
 {
+    playToolHeld = false;   // la herramienta Reproducir no vuelve a un punto de la canción que se va
+    saveCurrentMix();   // faders o mute tocados hace menos de medio segundo (el guardado con retardo se cancela abajo)
     const int gen = ++loadGeneration;
     currentIndex = -1;
     songDirtySince = 0;
@@ -1440,6 +1443,8 @@ void MainComponent::loadSongAt (int index)
         return;
 
     saveCurrentMix();
+    playToolHeld = false;   // la herramienta Reproducir no vuelve a un punto de la canción que se va
+    reloadWhenStopped = juce::File();   // (una recarga pendiente queda hecha con esta carga)
     if (pendingMixUpdate != nullptr)
     {
         // Una actualización esperaba que se detuviera la canción: se aplica ahora (lo que suena se descarga igual)
@@ -1514,6 +1519,7 @@ void MainComponent::loadSongAt (int index)
                 auto abort = [this, gen] { return gen != loadGeneration.load(); };
                 auto onStretch = [safe] { juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->sectionLabel.setText (tr ("Renderizando tempo y tono..."), juce::dontSendNotification); }); };
                 parts = loadParts (info, sr, banksDir, abort, onStretch, cacheKey);
+                parts.info = info;
             }
             catch (const std::bad_alloc&)
             {
@@ -1527,7 +1533,7 @@ void MainComponent::loadSongAt (int index)
             juce::MessageManager::callAsync ([safe, parts, gen]
             {
                 if (auto* self = safe.getComponent())
-                    self->songLoaded (parts.song, parts.source, parts.arranged, parts.samplers, gen, parts.error);
+                    self->songLoaded (parts.song, parts.source, parts.arranged, parts.samplers, gen, parts.error, &parts.info);
             });
         });
     });
@@ -1577,13 +1583,16 @@ MainComponent::LoadParts MainComponent::loadParts (const SongInfo& info, double 
         if (onStretch)
             onStretch();
         parts.song = stretcher::render (parts.arranged, map, sr, abort);
-        // En el modo reproducción queda guardada en disco: la próxima vez se lee sin estirar
+        // En el modo reproducción queda guardada en disco (la próxima vez se lee sin estirar), en su propio hilo: la
+        // canción se entrega ya, sin esperar a que se escriba (una canción larga son cientos de MB)
         if (parts.song != nullptr && cacheKey.isNotEmpty() && ! (abort && abort()))
-        {
-            const auto root = rendercache::defaultFolder();
-            if (root.createDirectory().wasOk() && rendercache::store (root, cacheKey, *parts.song))
-                rendercache::prune (root, (juce::int64) 20 * 1024 * 1024 * 1024);
-        }
+            cachePool.addJob ([this, song = std::shared_ptr<const LoadedSong> (parts.song), cacheKey]
+            {
+                const auto root = rendercache::defaultFolder();
+                if (! abortJobs.load() && root.createDirectory().wasOk()
+                    && rendercache::store (root, cacheKey, *song, [this] { return abortJobs.load(); }))
+                    rendercache::prune (root, (juce::int64) 20 * 1024 * 1024 * 1024);
+            });
     }
     if (parts.song != nullptr)
         parts.samplers = buildSamplers (*parts.song, info, sr, banksDir, formatManager, bankCache);
@@ -1591,7 +1600,8 @@ MainComponent::LoadParts MainComponent::loadParts (const SongInfo& info, double 
 }
 
 void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_ptr<LoadedSong> source, std::shared_ptr<LoadedSong> arranged,
-                                std::shared_ptr<SamplerSet> samplerSet, int generation, const juce::String& error)
+                                std::shared_ptr<SamplerSet> samplerSet, int generation, const juce::String& error,
+                                const SongInfo* renderedFrom)
 {
     if (generation != loadGeneration.load())
         return;
@@ -1633,16 +1643,19 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
             estimatedSeconds[key] = e.seconds;
         }
     }
-    renderedClips = info != nullptr ? info->clips : std::vector<Clip>();
-    renderedTrackClips = info != nullptr ? info->trackClips : std::vector<TrackClips>();
-    renderedTriggers = info != nullptr ? triggersOf (*info) : std::vector<TriggerSettings>();
+    // Lo que suena se armó con `from` (la copia que llevó el trabajo de carga): si mientras tanto se tocó el tempo, el
+    // arreglo o un trigger, la comparación de renderTempo lo ve y se vuelve a renderizar
+    const SongInfo* from = renderedFrom != nullptr && info != nullptr && renderedFrom->folder == info->folder ? renderedFrom : info;
+    renderedClips = from != nullptr ? from->clips : std::vector<Clip>();
+    renderedTrackClips = from != nullptr ? from->trackClips : std::vector<TrackClips>();
+    renderedTriggers = from != nullptr ? triggersOf (*from) : std::vector<TriggerSettings>();
     undoStack.clear();
     redoStack.clear();
     loadedFolder = info != nullptr ? info->folder : juce::File();
-    renderedTranspose = info != nullptr ? info->transpose : 0;
+    renderedTranspose = from != nullptr ? from->transpose : 0;
     rendering = false;
     tempoDirtySince = 0;
-    rebuildTimeMap();
+    timeMap = (from != nullptr && arrangedSong != nullptr) ? TimeMap::build (*from, songLengthSeconds()) : TimeMap();
     engine.setSong (song);
     applyClick();
     const float masterDb = info != nullptr ? info->masterGainDb : 0.0f;
@@ -1669,6 +1682,8 @@ void MainComponent::songLoaded (std::shared_ptr<LoadedSong> song, std::shared_pt
         restoreSetlistSelection();
         updatePreload();   // cambió la actual: las prioridades de la precarga también
     }
+    if (from != info && info != nullptr && from != nullptr && ! sameRenderInputs (*from, *info, songLengthSeconds()))
+        requestRender();
 }
 
 void MainComponent::saveCurrentMix()
@@ -1792,14 +1807,6 @@ void MainComponent::syncTimelineMarkers()
 }
 
 //==============================================================================
-void MainComponent::rebuildTimeMap()
-{
-    auto* info = currentInfo();
-    timeMap = (info != nullptr && arrangedSong != nullptr)
-                  ? TimeMap::build (*info, songLengthSeconds())
-                  : TimeMap();
-}
-
 std::vector<SongMarker> MainComponent::mappedMarkers() const
 {
     std::vector<SongMarker> out;
@@ -1906,7 +1913,7 @@ double MainComponent::originalBpm() const
 void MainComponent::tempoControlsFromSong()
 {
     auto* info = currentInfo();
-    const bool has = info != nullptr && currentSong != nullptr;
+    const bool has = info != nullptr && currentSong != nullptr && loadedFolder == info->folder;   // no mientras carga otra
     for (auto* c : std::initializer_list<juce::Component*> { &tempoSlider, &tempoOrigBtn, &transposeSlider })
         c->setEnabled (has && ! rendering);
     if (! has)
@@ -1958,10 +1965,13 @@ static bool sameStretch (const TimeMap& a, const TimeMap& b)
     {
         const auto& x = a.segments()[i];
         const auto& y = b.segments()[i];
-        if (std::abs (x.origStart - y.origStart) > 1.0e-6 || std::abs (x.origEnd - y.origEnd) > 1.0e-6 || std::abs (x.ratio - y.ratio) > 1.0e-6
-            || x.transpose != y.transpose || x.ramps() != y.ramps() || std::abs (x.playLength - y.playLength) > 1.0e-6
-            || (x.ramps() && (x.curve != y.curve || std::abs (x.origBpmEnd - y.origBpmEnd) > 1.0e-6 || std::abs (x.playBpmEnd - y.playBpmEnd) > 1.0e-6)))
-            return false;   // con una transición, también su curva y sus tempos de llegada
+        // El final (largo del arreglo) con 1 ms de tolerancia: el mapa de la vista y el del render se arman con largos
+        // que difieren en una fracción de muestra, y un cambio real del arreglo ya lo ve sameClips
+        if (std::abs (x.origStart - y.origStart) > 1.0e-6 || std::abs (x.origEnd - y.origEnd) > 1.0e-3 || std::abs (x.ratio - y.ratio) > 1.0e-6
+            || x.transpose != y.transpose || x.ramps() != y.ramps() || std::abs (x.playLength - y.playLength) > 1.0e-3
+            || (x.ramps() && (x.curve != y.curve || x.gridCurve != y.gridCurve || std::abs (x.origBpmEnd - y.origBpmEnd) > 1.0e-6
+                              || std::abs (x.playBpmEnd - y.playBpmEnd) > 1.0e-6)))
+            return false;   // con una transición, también sus curvas y sus tempos de llegada
     }
     return true;
 }
@@ -1989,6 +1999,29 @@ static bool sameTrackClips (const std::vector<TrackClips>& a, const std::vector<
     return true;
 }
 
+static bool sameTriggers (const std::vector<TriggerSettings>& x, const std::vector<TriggerSettings>& y)
+{
+    if (x.size() != y.size())
+        return false;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const auto& a = x[i];
+        const auto& b = y[i];
+        if (a.enabled != b.enabled || a.sound != b.sound || a.note != b.note || std::abs (a.thresholdDb - b.thresholdDb) > 1.0e-9
+            || std::abs (a.sensitivity - b.sensitivity) > 1.0e-9 || std::abs (a.minMs - b.minMs) > 1.0e-9)
+            return false;
+    }
+    return true;
+}
+
+// Lo que decide el render (arreglo, tempo y tono, golpes de los triggers) es igual en las dos versiones de la canción
+bool MainComponent::sameRenderInputs (const SongInfo& a, const SongInfo& b, double arrangedSeconds)
+{
+    return sameClips (a.clips, b.clips) && sameTrackClips (a.trackClips, b.trackClips) && a.transpose == b.transpose
+           && sameStretch (TimeMap::build (a, arrangedSeconds), TimeMap::build (b, arrangedSeconds))
+           && sameTriggers (triggersOf (a), triggersOf (b));
+}
+
 void MainComponent::renderTempo()
 {
     tempoDirtySince = 0;
@@ -2003,16 +2036,12 @@ void MainComponent::renderTempo()
     const auto newMap = TimeMap::build (*info, arrangement::songLength (*info, sourceLength));
     const bool stretchChanged = clipsChanged || ! sameStretch (newMap, timeMap) || info->transpose != renderedTranspose;
     const auto trig = triggersOf (*info);
-    bool triggersChanged = trig.size() != renderedTriggers.size();
-    for (size_t i = 0; ! triggersChanged && i < trig.size(); ++i)
-    {
-        const auto& a = trig[i];
-        const auto& b = renderedTriggers[i];
-        triggersChanged = a.enabled != b.enabled || a.sound != b.sound || a.note != b.note || std::abs (a.thresholdDb - b.thresholdDb) > 1.0e-9
-                          || std::abs (a.sensitivity - b.sensitivity) > 1.0e-9 || std::abs (a.minMs - b.minMs) > 1.0e-9;
-    }
+    const bool triggersChanged = ! sameTriggers (trig, renderedTriggers);
     if (! stretchChanged && ! triggersChanged)
     {
+        // Nada que renderizar; lo que no pasa por el render (trigger que suena solo o con el audio) se aplica aquí
+        refreshReplaced();
+        syncTriggerMarks();
         tempoControlsFromSong();
         return;
     }
@@ -2051,20 +2080,21 @@ void MainComponent::renderTempo()
                 samplerSet = buildSamplers (*rendered, infoCopy, sr, banksDir, formatManager, bankCache);
         }
         catch (const std::exception&) {}
-        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, trackClips, samplerSet, rgen]
+        auto triggers = triggersOf (infoCopy);
+        juce::MessageManager::callAsync ([safe, rendered, arranged, newMap, transpose, clips, trackClips, triggers, samplerSet, rgen, gen]
         {
             if (auto* self = safe.getComponent())
-                self->songRendered (rendered, arranged, newMap, transpose, clips, trackClips, samplerSet, rgen);
+                self->songRendered (rendered, arranged, newMap, transpose, clips, trackClips, triggers, samplerSet, rgen, gen);
         });
     });
 }
 
 void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap map,
                                   int transpose, std::vector<Clip> clips, std::vector<TrackClips> trackClips,
-                                  std::shared_ptr<SamplerSet> samplerSet, int rgen)
+                                  std::vector<TriggerSettings> triggers, std::shared_ptr<SamplerSet> samplerSet, int rgen, int loadGen)
 {
-    if (rgen != renderGeneration)
-        return;
+    if (rgen != renderGeneration.load() || loadGen != loadGeneration.load())
+        return;   // otro render, u otra canción cargándose (su carga deja todo listo; un render abortado no es un error)
     rendering = false;
     if (rendered == nullptr || arranged == nullptr || sourceSong == nullptr)
     {
@@ -2072,15 +2102,17 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
         tempoControlsFromSong();
         return;
     }
-    // Conservar el punto de la canción donde íbamos y si estaba sonando
+    // Conservar el punto de la canción donde íbamos y si estaba sonando (con la herramienta Reproducir apretada, se suelta
+    // antes: los carriles nuevos no reciben el mouseUp)
+    if (playToolHeld)
+        playToolUp();
     const bool wasPlaying = engine.isPlaying();
     const double songPos = timeMap.toOriginal (engine.getPositionSeconds());
     timeMap = map;
     renderedTranspose = transpose;
     renderedClips = std::move (clips);
     renderedTrackClips = std::move (trackClips);
-    if (auto* info = currentInfo())
-        renderedTriggers = triggersOf (*info);
+    renderedTriggers = std::move (triggers);   // los que se usaron, no los de ahora (si cambiaron, el próximo render los toma)
     arrangedSong = arranged;
     const bool sameSong = currentSong == rendered;
     currentSong = rendered;
@@ -2093,11 +2125,13 @@ void MainComponent::songRendered (std::shared_ptr<LoadedSong> rendered, std::sha
         return;
     }
     engine.pause();
-    afterFadeOut ([this, wasPlaying, songPos, samplerSet]
+    afterFadeOut ([this, wasPlaying, songPos, samplerSet, loadGen]
     {
+        if (loadGen != loadGeneration.load())
+            return;   // mientras se apagaba empezó a cargarse otra canción
         engine.setSong (currentSong);
         mixer.setSong (currentSong);
-        timeline.setSong (currentSong, engine.getSampleRate());
+        timeline.setSong (currentSong, engine.getSampleRate(), true);   // la misma canción: el zoom se queda
         applySamplers (samplerSet);
         syncTimelineMarkers();
         timeline.setAnalysis (mappedAnalysis());
@@ -2220,6 +2254,7 @@ void MainComponent::addMarkerHere()
     SongMarker mk;
     mk.name = tr ("Sección ") + juce::String ((int) info->markers.size() + 1);
     mk.seconds = timeMap.toOriginal (engine.getPositionSeconds());
+    pushUndo();
     info->markers.push_back (mk);
     info->sortMarkers();
     library.saveSong (*info);
@@ -2429,6 +2464,7 @@ void MainComponent::markerMenu (int index)
                 auto* inf = currentInfo();
                 if (inf == nullptr || ! juce::isPositiveAndBelow (index, (int) inf->markers.size()) || name.trim().isEmpty())
                     return;
+                pushUndo();
                 inf->markers[(size_t) index].name = name.trim();
                 inf->markers[(size_t) index].fromMix = false;   // renombrado: es propio
                 library.saveSong (*inf);
@@ -2438,11 +2474,15 @@ void MainComponent::markerMenu (int index)
         }
         if (result == 2)
         {
+            pushUndo();
             info->markers[(size_t) index].seconds = timeMap.toOriginal (engine.getPositionSeconds());
             info->markers[(size_t) index].fromMix = false;   // movido a mano: es propio
         }
         else if (result == 3)
+        {
+            pushUndo();
             info->markers.erase (info->markers.begin() + index);
+        }
         else
             return;
 
@@ -2556,8 +2596,8 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
             tempoTrackCurve (index, result - 70);
             return;
         }
-        if (result != 1 && result != 6 && result != 20)
-            pushUndo();   // los diálogos (1, 6 y 20) lo hacen al aceptar
+        if (result != 1 && result != 6 && result != 20 && result != 4 && result != 5)
+            pushUndo();   // los diálogos (1, 6 y 20) lo hacen al aceptar; dividir y unir, si se puede
 
         auto applied = [this] (SongInfo& s)
         {
@@ -2655,21 +2695,22 @@ void MainComponent::tempoBandMenu (int index, double playbackSeconds)
                 at = inf->analysis.beats[(size_t) nearest].seconds;
             for (auto& x : inf->tempoRegions)
                 if (std::abs (x.start - at) < 0.5)
-                {
-                    undoStack.pop_back();
                     return;   // ya hay una frontera ahí
-                }
-            TempoRegion nueva { at, reg.origBpm, reg.playBpm };
-            inf->tempoRegions.push_back (nueva);
+            pushUndo();
+            // La segunda parte sigue como la sección (tempo, tono y la transición hacia la siguiente); la primera llega a
+            // ella sin transición (las dos tienen el mismo tempo)
+            TempoRegion nueva = reg;
+            nueva.start = at;
+            reg.curve = TempoRegion::jump;
+            reg.gridCurve = TempoRegion::jump;
+            inf->tempoRegions.push_back (nueva);   // (reg deja de valer aquí)
             inf->sortTempoRegions();
         }
         else if (result == 5)
         {
             if (index == 0)
-            {
-                undoStack.pop_back();
                 return;
-            }
+            pushUndo();
             inf->tempoRegions.erase (inf->tempoRegions.begin() + index);
         }
         else if (result == 7)
@@ -2956,6 +2997,17 @@ void MainComponent::restoreEdit (SongInfo restored)
     restored.stems = info->stems;   // la mezcla (faders, mute, salidas) no se deshace
     restored.name = info->name;
     restored.mixLink = info->mixLink;   // tampoco el enlace con su mix (desligarla no se deshace)
+    // Ni lo del mezclador y el nivelado, que no pasan por pushUndo (si no, volverían en la canción sin llegar al motor)
+    restored.masterGainDb = info->masterGainDb;
+    restored.songGainDb = info->songGainDb;
+    restored.clickEnabled = info->clickEnabled;
+    restored.clickGainDb = info->clickGainDb;
+    restored.clickOutputPair = info->clickOutputPair;
+    restored.levelingEnabled = info->levelingEnabled;
+    // Los tramos del nivelado son los marcadores: si cambian, se vuelve a medir
+    bool markersChanged = restored.markers.size() != info->markers.size();
+    for (size_t i = 0; ! markersChanged && i < restored.markers.size(); ++i)
+        markersChanged = std::abs (restored.markers[i].seconds - info->markers[i].seconds) > 1.0e-6;
     // Tampoco lo que no pasa por pushUndo en las pistas MIDI: la mezcla de las filas, sus nombres y sonidos, el nombre de la
     // pista y sus silencios. Se toma de la pista actual con el mismo origen (la n-ésima con ese archivo) y de su fila con la
     // misma nota; lo que no tiene pareja (una fila quitada que vuelve, una nota cambiada) queda como se guardó
@@ -2992,6 +3044,8 @@ void MainComponent::restoreEdit (SongInfo restored)
     }
     *info = restored;
     refreshFromInfo();
+    if (markersChanged)
+        remeasureIfLeveling();
 }
 
 void MainComponent::refreshFromInfo()
@@ -3059,10 +3113,11 @@ std::vector<TriggerSettings> MainComponent::triggersOf (const SongInfo& info)
 std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, const SongInfo& info, double sr,
                                                           const juce::File& banksFolder, juce::AudioFormatManager& formats, BankCache& cache)
 {
+    // No toca `replaced` de las pistas: `rendered` puede ser lo que está sonando (solo cambiaron los triggers) y esto
+    // corre en el hilo de carga; lo calcula refreshReplaced en la UI al instalar el conjunto
     auto set = std::make_shared<SamplerSet>();
     for (auto& t : rendered.tracks)
     {
-        t->replaced = false;
         if (! juce::isPositiveAndBelow (t->stemIndex, (int) info.stems.size()))
             continue;
         const auto& st = info.stems[(size_t) t->stemIndex];
@@ -3100,14 +3155,11 @@ std::shared_ptr<SamplerSet> MainComponent::buildSamplers (LoadedSong& rendered, 
         lane->control.name = lane->name;
         lane->control.stemIndex = -1;
         lane->control.gain = tg.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (tg.gainDb);
-        lane->control.smoothedGain = lane->control.gain.load();
+        lane->control.smoothedGain = 0.0f;   // entra con rampa, o sigue la de la línea a la que releva (adoptPlayback)
         lane->control.muted = tg.muted;
         lane->control.outputPair = tg.outputPair;
         lane->control.pan = tg.pan;
         lane->control.smoothedPan = tg.pan;
-        // La pista deja de sonar solo si su trigger tiene un sonido que dar (si no, se oiría nada sin aviso);
-        // con un instrumento se confirma en refreshReplaced (el rack vive en la UI)
-        t->replaced = ! tg.keepAudio && (bank != nullptr || isInstrument);
         set->lanes.push_back (std::move (lane));
     }
     return set;
@@ -3682,6 +3734,7 @@ void MainComponent::startRecording (int inputL, int inputR, bool toBank, int ban
     setup.monitor = monitorPair >= 0;
     setup.monitorPair = juce::jmax (0, monitorPair);
     setup.monitorGain = 1.0f;
+    setup.followTransport = ! toBank;
     if (! toBank && engine.getPositionSeconds() >= songLengthSeconds() - 0.05)
         engine.seekSeconds (0.0);   // al final: la toma arranca desde el principio
     engine.setRecorder (setup);
@@ -3778,7 +3831,9 @@ void MainComponent::recordingFinished (bool ok, const juce::String& message, con
         }
         auto* info = currentInfo();
         bool assigned = false;
-        if (info != nullptr && currentSong != nullptr && juce::isPositiveAndBelow (bankTrack, (int) currentSong->tracks.size()))
+        // La pista es de la canción en que se grabó: si ya se cambió de canción, el banco queda para elegirlo
+        if (info != nullptr && currentSong != nullptr && info->folder == songFolder && loadedFolder == songFolder
+            && juce::isPositiveAndBelow (bankTrack, (int) currentSong->tracks.size()))
         {
             const int stem = currentSong->tracks[(size_t) bankTrack]->stemIndex;
             if (juce::isPositiveAndBelow (stem, (int) info->stems.size()))
@@ -3825,6 +3880,9 @@ void MainComponent::instrumentsMenu()
     juce::PopupMenu m;
     const auto& slots = rack->getSlots();
     std::vector<int> ids;
+    // Mientras se buscan plugins no se carga ni se quita ninguno: la búsqueda abre las mismas bibliotecas en otro hilo
+    // (JUCE no protege su lista de módulos VST3 abiertos) y cruzarse puede cerrar la app
+    const bool scanning = rack->isScanning();
     m.addSectionHeader (tr ("Instrumentos cargados (") + InstrumentRack::formatsAvailable() + ")");
     if (slots.empty())
         m.addItem (99, tr ("(ninguno)"), false);
@@ -3834,7 +3892,7 @@ void MainComponent::instrumentsMenu()
         ids.push_back (s.id);
         juce::PopupMenu sub;
         sub.addItem (1000 + (int) i * 10 + 1, tr ("Abrir la ventana del instrumento"), s.lane != nullptr);
-        sub.addItem (1000 + (int) i * 10 + 2, tr ("Quitar del rack"));
+        sub.addItem (1000 + (int) i * 10 + 2, tr ("Quitar del rack"), ! scanning);
         juce::String label = s.description.name + " (" + s.description.pluginFormatName + ")";
         if (s.loading)
             label += tr ("  -  cargando...");
@@ -3849,7 +3907,7 @@ void MainComponent::instrumentsMenu()
         addMenu.addItem (2000 + k, knownList[k].name + " (" + knownList[k].pluginFormatName + ")");
     if (knownList.isEmpty())
         addMenu.addItem (98, tr ("(no hay instrumentos conocidos: busca primero)"), false);
-    m.addSubMenu (tr ("Añadir instrumento"), addMenu);
+    m.addSubMenu (scanning ? tr ("Añadir instrumento (al terminar la búsqueda)") : tr ("Añadir instrumento"), addMenu, ! scanning);
     if (rack->isScanning())
         m.addItem (4, tr ("Cancelar la búsqueda"));
     else
@@ -4097,7 +4155,7 @@ void MainComponent::applyMidiTracks()
             lane->control.name = lane->name;
             lane->control.stemIndex = -1;
             lane->control.gain = pad.gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (pad.gainDb);
-            lane->control.smoothedGain = lane->control.gain.load();
+            lane->control.smoothedGain = 0.0f;   // entra con rampa, o sigue la de la línea a la que releva (adoptPlayback)
             lane->control.muted = pad.muted;
             lane->control.outputPair = pad.outputPair;
             lane->control.pan = pad.pan;
@@ -4769,6 +4827,7 @@ MainComponent::MixSnapshot MainComponent::mixSnapshot() const
         return s;
     s.bpm = mixProject->bpm;
     s.keepTempos = mixProject->keepTempos;
+    s.levelLufs = mixProject->levelLufs;
     s.segments = mixProject->segments;
     for (auto& src : mixProject->sources)
         s.analyses.push_back (src.analysis);
@@ -5082,12 +5141,14 @@ void MainComponent::undoMixEdit()
     }
     mixProject->bpm = snap.bpm;
     mixProject->keepTempos = snap.keepTempos;
+    mixProject->levelLufs = snap.levelLufs;
     mixProject->segments = snap.segments;
     for (size_t i = 0; i < snap.analyses.size(); ++i)
         mixProject->sources[i].analysis = snap.analyses[i];
     mixLastSnapshot = snap;
     ++mixVersion;
     mixProject->save();
+    mixEditor->setSegmentLevels ({});   // lo que midió el último render ya no es de estos tramos
     mixEditor->refresh();
     mixEditor->setStatus (tr ("Se deshizo el último cambio del mix"));
 }
@@ -5652,6 +5713,11 @@ void MainComponent::playMix (double from)
         if (self == nullptr || ! ok || gen != self->mixGeneration.load() || self->mixProject == nullptr
             || request != self->mixPlayRequest)
             return;   // entretanto se pidió otra escucha o Stop
+        if (self->mixRenderedVersion != self->mixVersion)
+        {
+            self->playMix (from);   // el mix cambió mientras se renderizaba: se escucha la versión de ahora
+            return;
+        }
         SongInfo info;
         info.folder = self->mixProject->folder;
         StemInfo st;
@@ -5892,8 +5958,8 @@ void MainComponent::noteMixStems (const juce::File& mixFolder, const juce::Strin
         {
             mixProject->stemsKey = key;
             mixProject->save();
-            ++mixVersion;
         }
+        ++mixVersion;   // otra canción con pistas: los ajustes por pista de sus tramos ya suenan (el render cambia)
         if (mixEditor != nullptr)
             mixEditor->refresh();   // la canción ya aparece como separada
         return;
@@ -6005,6 +6071,13 @@ void MainComponent::buildMixSong (const MixSongBuild& build)
 
 void MainComponent::mixSongBuilt (const MixSongResult& r)
 {
+    if (exporting)
+    {
+        // Puede cargar o recargar canciones: espera a que el motor vuelva del render de la exportación
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::Timer::callAfterDelay (250, [safe, r] { if (safe != nullptr) safe->mixSongBuilt (r); });
+        return;
+    }
     mixSongBuilds = juce::jmax (0, mixSongBuilds - 1);
     mixSongBuildingFolders.erase (r.build.songFolder.getFullPathName());
     const bool update = r.build.songFolder != juce::File();
@@ -6866,6 +6939,10 @@ void MainComponent::moveClipPicks (std::vector<TimelineView::ClipPick> picks, in
     if (std::abs (d0) < 1.0e-4)
         return;
     pushUndo();
+    // Del lado hacia el que se mueven primero: así lo que un tramo lleva (golpes MIDI, pedazos de pistas con arreglo
+    // propio) no cae en el rango de otro tramo elegido que todavía no se movió, y nada se mueve dos veces
+    std::stable_sort (picks.begin(), picks.end(), [d0] (const TimelineView::ClipPick& a, const TimelineView::ClipPick& b)
+                      { return d0 > 0.0 ? a.start > b.start : a.start < b.start; });
     std::vector<TimelineView::ClipPick> moved;
     for (auto& pick : picks)
     {
@@ -8199,13 +8276,21 @@ void MainComponent::copyClip (int index)
         if (! isRecording)
             clipboard.trackParts.push_back ({ own.stem, arrangement::clipsInRange (own.clips, c.position, c.end()) });
     }
-    // Secciones de tempo del rango: la vigente al inicio y las que empiezan dentro, relativas al tramo
+    // Secciones de tempo del rango (con su tono y su transición): la vigente al inicio y las que empiezan dentro,
+    // relativas al tramo
     const int first = info->tempoRegionAt (c.position);
     if (first >= 0)
-        clipboard.regions.push_back ({ 0.0, info->tempoRegions[(size_t) first].origBpm, info->tempoRegions[(size_t) first].playBpm });
-    for (auto& r : info->tempoRegions)
+    {
+        auto r0 = info->tempoRegions[(size_t) first];
+        r0.start = 0.0;
+        clipboard.regions.push_back (r0);
+    }
+    for (auto r : info->tempoRegions)
         if (r.start > c.position + 1.0e-6 && r.start < c.end() - 1.0e-6)
-            clipboard.regions.push_back ({ r.start - c.position, r.origBpm, r.playBpm });
+        {
+            r.start -= c.position;
+            clipboard.regions.push_back (r);
+        }
     sepLabel.setText (juce::String::formatted ("Tramo copiado (%.1f s, ", c.length()) + juce::String ((int) clipboard.grid.beats.size()) + tr (" tiempos)"), juce::dontSendNotification);
 }
 
@@ -8256,21 +8341,28 @@ void MainComponent::pasteClipboard (double at, bool insert)
         return;
     }
     const double len = clipboard.clip.length();
-    // Tempo de la sección donde se pega, para restaurarlo después del tramo insertado
+    // La sección donde se pega (tempo, tono y transición), para que siga después del tramo insertado
     const int dstRegion = info->tempoRegionAt (at);
-    const double dstBpm = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].origBpm : 0.0;
-    const double dstPlay = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion].playBpm : 0.0;
+    const TempoRegion dst = dstRegion >= 0 ? info->tempoRegions[(size_t) dstRegion] : TempoRegion();
     arrangement::pasteClip (info->clips, clipboard.clip, at, true);
     pasteIntoOwnClips (*info, clipboard.trackParts, clipboard.clip, at, true);
     arrangement::shiftGrid (*info, at, len);                 // abre el hueco en tiempos, acordes, marcadores, secciones y golpes MIDI
     arrangement::pasteGrid (info->analysis, clipboard.grid, at);
     arrangement::pasteMidiHits (*info, clipboard.grid, at);
-    if (! clipboard.regions.empty() && dstBpm > 0.0)
+    if (! clipboard.regions.empty() && dstRegion >= 0)
     {
-        // El tramo trae sus secciones de tempo; después de él vuelve el tempo de destino. Las vecinas iguales se unen.
-        for (auto& r : clipboard.regions)
-            info->tempoRegions.push_back ({ at + r.start, r.origBpm, r.playBpm });
-        info->tempoRegions.push_back ({ at + len, dstBpm, dstPlay });
+        // El tramo trae sus secciones de tempo; después de él sigue la de destino (con su transición hacia la que venía);
+        // la parte de antes llega al tramo sin transición. Las vecinas iguales se unen.
+        info->tempoRegions[(size_t) dstRegion].curve = TempoRegion::jump;
+        info->tempoRegions[(size_t) dstRegion].gridCurve = TempoRegion::jump;
+        for (auto r : clipboard.regions)
+        {
+            r.start += at;
+            info->tempoRegions.push_back (r);
+        }
+        auto after = dst;
+        after.start = at + len;
+        info->tempoRegions.push_back (after);
         info->sortTempoRegions();
         info->mergeEqualTempoRegions();
     }
@@ -8468,6 +8560,15 @@ void MainComponent::timerCallback()
     if (exporting)
         exportProgress = exportFraction.load();   // la barra del diálogo de exportar
 
+    // Una canción separada mientras sonaba: se carga con sus pistas nuevas al detenerla
+    if (reloadWhenStopped != juce::File() && ! engine.isPlaying() && ! recording.active && ! exporting)
+    {
+        const auto folder = reloadWhenStopped;
+        reloadWhenStopped = juce::File();
+        if (auto* info = currentInfo(); info != nullptr && info->folder == folder)
+            loadSongAt (currentIndex);
+    }
+
     // Una actualización desde el mix que esperaba a que se detuviera la canción (nunca se corta lo que suena)
     if (pendingMixUpdate != nullptr && ! engine.isPlaying() && ! recording.active && engine.isSilent())
     {
@@ -8478,10 +8579,13 @@ void MainComponent::timerCallback()
 
     // Mantener el foco para los atajos de teclado / pedal, salvo mientras se escribe en un
     // editor de texto (los valores de los faders, el BPM...) o hay una ventana modal.
+    // Tampoco si la ventana activa es otra de la app (guía de escenario, editor de tempo, la de un plugin): se le
+    // robaría el teclado cada 33 ms
     const bool typing = dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr;
+    const auto* activeWindow = juce::TopLevelWindow::getActiveTopLevelWindow();
     if (isShowing() && ! typing && ! hasKeyboardFocus (false) && picker == nullptr
         && juce::ModalComponentManager::getInstance()->getNumModalComponents() == 0
-        && juce::Process::isForegroundProcess())
+        && juce::Process::isForegroundProcess() && (activeWindow == nullptr || activeWindow == getTopLevelComponent()))
         grabKeyboardFocus();
 
     // Teclas retenidas que ya no están pulsadas (por si se perdió la liberación)
@@ -8489,10 +8593,10 @@ void MainComponent::timerCallback()
         if (! juce::KeyPress::isKeyCurrentlyDown (heldKeys[i]))
             heldKeys.remove (i);
 
+    if (engine.rateChanged.exchange (false) && rack != nullptr)
+        rack->prepareAll (engine.getSampleRate());   // los plugins se preparan a la frecuencia nueva (haya canción o no)
     if (engine.needsReload.exchange (false))
     {
-        if (rack != nullptr)
-            rack->prepareAll (engine.getSampleRate());   // los plugins se preparan a la frecuencia nueva
         if (playbackMode)
         {
             // Lo precargado está a la frecuencia anterior: se vuelve a cargar todo
@@ -8548,8 +8652,8 @@ void MainComponent::timerCallback()
 
     if (songDirtySince != 0 && juce::Time::currentTimeMillis() - songDirtySince >= saveDelayMs)
         saveCurrentMix();
-    if (tempoDirtySince != 0 && juce::Time::currentTimeMillis() - tempoDirtySince >= 800 && ! rendering)
-        renderTempo();
+    if (tempoDirtySince != 0 && juce::Time::currentTimeMillis() - tempoDirtySince >= 800 && ! rendering && ! exporting)
+        renderTempo();   // (exportando, el motor es del render: espera)
 
     const double pos = engine.getPositionSeconds();
     const double len = engine.getLengthSeconds();
@@ -8589,7 +8693,11 @@ void MainComponent::timerCallback()
 
     // Estado del análisis musical (comparte la barra de estado con el separador cuando este está libre)
     const auto an = analyzer.getState();
-    if (an == Analyzer::State::done)
+    if (exporting)
+    {
+        // Igual que la separación: se aplica al terminar de exportar
+    }
+    else if (an == Analyzer::State::done)
     {
         const auto result = analyzer.getResult();
         analyzer.reset();
@@ -8639,6 +8747,10 @@ void MainComponent::timerCallback()
         const float p = analyzer.getProgress();
         sepProgress = p < 0.0f ? -1.0 : (double) p;
         sepLabel.setText (tr ("Análisis: ") + analyzer.getMessage(), juce::dontSendNotification);
+    }
+    else if (exporting)
+    {
+        // Una separación que terminó se aplica cuando el motor vuelva del render (puede cambiar la canción cargada)
     }
     else if (st == Separator::State::done && mixSongJob.active && mixSongJob.current.isNotEmpty())
     {
@@ -8697,7 +8809,7 @@ void MainComponent::timerCallback()
                 target = i;
         const bool drumsOnly = separationStemIndex >= 0;
         const bool ok = target >= 0 && (drumsOnly ? library.replaceStem (target, separationStemIndex, separator.getResultFolder())
-                                                  : library.replaceStems (target, separator.getResultFolder()));
+                                                  : library.replaceStems (target, separator.getResultFolder(), separationArranged));
         const auto name = target >= 0 ? library.songs[(size_t) target].name : juce::String();
         separator.reset();
         separationTarget = juce::File();
@@ -8706,10 +8818,19 @@ void MainComponent::timerCallback()
             sepLabel.setText (tr ("No se pudieron reemplazar las pistas"), juce::dontSendNotification);
         else
         {
-            sepLabel.setText (tr ("«") + name + (drumsOnly ? tr ("»: batería en partes, ") : tr ("» separada: "))
-                              + juce::String ((int) library.songs[(size_t) target].stems.size()) + tr (" pistas"), juce::dontSendNotification);
-            if (target == currentIndex)
-                loadSongAt (currentIndex);   // recarga con los stems nuevos (con fundido si estaba sonando)
+            juce::String text = tr ("«") + name + (drumsOnly ? tr ("»: batería en partes, ") : tr ("» separada: "))
+                                + juce::String ((int) library.songs[(size_t) target].stems.size()) + tr (" pistas");
+            if (target == currentIndex && (engine.isPlaying() || recording.active))
+            {
+                // Sonando: no se corta. Sigue lo que está en memoria (sin editar: sus pistas ya no son las de la canción)
+                // y se recarga al detenerla
+                reloadWhenStopped = library.songs[(size_t) target].folder;
+                loadedFolder = juce::File();
+                text += tr (" (se carga al detener la canción)");
+            }
+            else if (target == currentIndex)
+                loadSongAt (currentIndex);   // recarga con los stems nuevos
+            sepLabel.setText (text, juce::dontSendNotification);
         }
         refreshSetlist();
     }
@@ -9018,6 +9139,7 @@ void MainComponent::separateCurrentSong()
     juce::File input;
     if (info->stems.size() == 1)
         input = info->folder.getChildFile (info->stems[0].fileName);   // una sola pista: el archivo tal cual, sin remezclar
+    separationArranged = ! input.existsAsFile();
     if (! input.existsAsFile())
     {
         // Varias pistas: la mezcla del arreglo (línea de tiempo de la canción) a un WAV temporal
@@ -9544,8 +9666,9 @@ juce::String MainComponent::playbackKey (const SongInfo& info, double sr)
     o->setProperty ("trackClips", own);
     juce::Array<juce::var> regions;
     for (auto& r : info.tempoRegions)
-        regions.add (juce::Array<juce::var> { r.start, r.origBpm, r.playBpm, r.transpose, r.curve });
+        regions.add (juce::Array<juce::var> { r.start, r.origBpm, r.playBpm, r.transpose, r.curve, r.gridCurve });
     o->setProperty ("tempo", regions);
+    o->setProperty ("version", JUCE_APPLICATION_VERSION_STRING);   // una versión nueva puede renderizar distinto
     o->setProperty ("playBpm", info.playBpm);
     o->setProperty ("transpose", info.transpose);
     o->setProperty ("bpm", info.bpm);
@@ -9582,7 +9705,11 @@ double MainComponent::knownSeconds (const SongInfo& info) const
 {
     if (const auto it = preloaded.find (info.folder.getFullPathName()); it != preloaded.end())
         return it->second.seconds;
-    const auto key = playbackKey (info, engine.getSampleRate());
+    const auto now = juce::Time::getMillisecondCounter();
+    auto& memo = displayKeys[info.folder.getFullPathName()];
+    if (memo.second.isEmpty() || now - memo.first > 1000)
+        memo = { now, playbackKey (info, engine.getSampleRate()) };
+    const auto& key = memo.second;
     if (const auto it = estimatedSeconds.find (key); it != estimatedSeconds.end())
         return it->second;
     return -1.0;
@@ -9683,7 +9810,8 @@ void MainComponent::updatePreload()
             continue;
         used += bytes;
         wanted.insert (folder);
-        if (preloaded.count (folder) == 0 || preloaded[folder].key != key)
+        const bool loadingNow = rows[(size_t) r] == currentIndex && loadedFolder != info.folder;   // la está cargando loadSongAt
+        if ((preloaded.count (folder) == 0 || preloaded[folder].key != key) && ! loadingNow)
             if (failedPreloads.count (key) == 0)
                 toLoad.push_back (rows[(size_t) r]);
     }
@@ -9925,8 +10053,14 @@ void MainComponent::exportMixDialog()
 void MainComponent::startExport (const ExportRequest& req)
 {
     auto* info = currentInfo();
-    if (exporting || info == nullptr || currentSong == nullptr || loadedFolder != info->folder || rendering || recording.active)
+    if (exporting || info == nullptr || currentSong == nullptr || loadedFolder != info->folder)
         return;
+    if (rendering || recording.active)
+    {
+        sepLabel.setText (rendering ? tr ("Espera a que termine de renderizar la canción para exportar")
+                                    : tr ("Detén la grabación para exportar"), juce::dontSendNotification);
+        return;
+    }
     exporting = true;
     exportCancel = false;
     exportFraction = 0.0f;
@@ -10272,6 +10406,18 @@ void MainComponent::stemLevelEdited (int stemIndex, double db)
 
 void MainComponent::applyLeveling (const loudness::Result& r, const std::vector<StemLevel>& stems)
 {
+    if (exporting)
+    {
+        // La curva de nivelado va al motor: se aplica al terminar de exportar (si sigue la misma canción)
+        const int gen = loadGeneration.load();
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::Timer::callAfterDelay (250, [safe, r, stems, gen]
+        {
+            if (safe != nullptr && gen == safe->loadGeneration.load())
+                safe->applyLeveling (r, stems);
+        });
+        return;
+    }
     auto* info = currentInfo();
     if (info == nullptr || r.sections.size() != info->markers.size() + 1)
         return;
@@ -10410,14 +10556,22 @@ void MainComponent::startAnalysis()
         drums.push_back (Analyzer::isDrumsTrack (t->name, file));
     }
     sepLabel.setText (tr ("Análisis: preparando..."), juce::dontSendNotification);
+    analysisFolder = info->folder;
     analyzer.start (arrangedSong != nullptr ? arrangedSong : currentSong, engine.getSampleRate(), drums, py);   // el arreglo, sin estirar
 }
 
 void MainComponent::applyAnalysis (const Analysis& a)
 {
-    auto* info = currentInfo();
+    // El resultado es de la canción que se analizó, aunque mientras tanto se haya elegido otra
+    SongInfo* info = nullptr;
+    for (auto& s : library.songs)
+        if (s.folder == analysisFolder)
+            info = &s;
     if (info == nullptr)
         return;
+    const bool isCurrent = info == currentInfo() && loadedFolder == info->folder;
+    if (isCurrent)
+        pushUndo();   // Ctrl+Z vuelve a los tiempos y secciones de antes
     info->analysis = a;
     if (a.bpm > 0.0)
         info->bpm = juce::jlimit (20.0, 400.0, std::round (a.bpm * 10.0) / 10.0);
@@ -10426,9 +10580,14 @@ void MainComponent::applyAnalysis (const Analysis& a)
         info->clickOffset = a.beats[(size_t) firstDownbeat].seconds;   // el click y la regla arrancan en el primer compás
     info->tempoRegions = detectTempoRegions (a, info->bpm);           // secciones con tempo distinto (se pierden los ajustes por sección)
     library.saveSong (*info);
+    if (! isCurrent)
+    {
+        sepLabel.setText (tr ("Análisis listo: ") + info->name, juce::dontSendNotification);
+        return;
+    }
     clickControlsFromSong();
     applyClick();
-    rebuildTimeMap();
+    requestRender();   // las secciones nuevas pueden cambiar el estirado: el mapa de lo que suena llega con el render
     timeline.setAnalysis (mappedAnalysis());
     updateBeatGrid();
     rebuildMarkers();
@@ -10531,7 +10690,13 @@ void MainComponent::updateStage (double pos)
         st.length = engine.getLengthSeconds();
         st.playing = engine.isPlaying();
         activeNote (pos, st.note, st.nextNote, st.nextNoteIn);
-        const int next = currentIndex + 1;
+        // La que viene: en el Show, la siguiente del show (la que cargan el pedal y el final de la canción)
+        int next = currentIndex + 1;
+        if (playbackMode)
+        {
+            const int row = showRowOf (currentIndex);
+            next = row >= 0 && row + 1 < (int) showRows.size() ? showRows[(size_t) row + 1] : (row < 0 && ! showRows.empty() ? showRows[0] : -1);
+        }
         if (juce::isPositiveAndBelow (next, (int) library.songs.size()))
             st.nextSong = library.songs[(size_t) next].name;
     }

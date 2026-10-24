@@ -553,8 +553,9 @@ private:
                     if (k == 0) curve.startNewSubPath (x, y); else curve.lineTo (x, y);
                 }
                 shade = curve;
-                shade.lineTo (rising ? x0 : x1, top);
-                shade.lineTo (rising ? x0 : x0, top);
+                if (! rising)
+                    shade.lineTo (x1, top);   // (la de salida termina abajo: sube por su borde derecho)
+                shade.lineTo (x0, top);
                 shade.closeSubPath();
                 g.setColour (juce::Colours::black.withAlpha (0.35f));
                 g.fillPath (shade);
@@ -1779,7 +1780,7 @@ double TimelineView::minPixelsPerSecond() const
     return len > 0.0 ? (double) contentWidth() / len : 1.0;
 }
 
-void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr)
+void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr, bool keepView)
 {
     lanes.clear();   // antes de soltar la canción: las pistas referencian sus LoadedTrack
     song = std::move (s);
@@ -1797,10 +1798,20 @@ void TimelineView::setSong (std::shared_ptr<LoadedSong> s, double sr)
     midiNewRender = true;                     // las próximas pistas MIDI pueden traer todos los tiempos cambiados
     position = 0.0;
     loopStart = loopEnd = 0.0;
-    gesture = Gesture::none;   // lo elegido y el rango se conservan en un render nuevo (MainComponent los suelta al cambiar de canción)
+    // Un gesto a medias no sigue: el carril que tenía el clic ya no está y no llegará su mouseUp. La herramienta
+    // Reproducir se suelta (si no, seguiría sonando); lo elegido y el rango se conservan en un render nuevo
+    // (MainComponent los suelta al cambiar de canción)
+    const bool wasPlayTool = gesture == Gesture::play;
+    gesture = Gesture::none;
+    resizingLane = -1;
     tempoLane->setLength (lengthSeconds());
     resized();
-    zoomToFit();
+    if (keepView && song != nullptr)
+        setView (viewStart, pixelsPerSecond);   // acotada al largo nuevo
+    else
+        zoomToFit();
+    if (wasPlayTool && onPlayToolUp)
+        onPlayToolUp();
 }
 
 void TimelineView::setTempoTrackVisible (bool visible)
@@ -1893,15 +1904,15 @@ juce::Rectangle<int> TimelineView::laneArea (int firstLane, int lastLane) const
 
 int TimelineView::laneIndexAtY (int yInView) const
 {
-    for (int i = 0; i < lanes.size(); ++i)
-    {
-        const auto r = getLocalArea (lanes[i], lanes[i]->getLocalBounds());
-        if (yInView >= r.getY() && yInView < r.getBottom())
-            return i;
-    }
+    // El último carril de audio que empieza por encima: sobre una pista MIDI (que va bajo su carril de origen) es ese
+    // carril, no el último de todos
     if (lanes.isEmpty())
         return -1;
-    return yInView < getLocalArea (lanes[0], lanes[0]->getLocalBounds()).getY() ? 0 : lanes.size() - 1;
+    int found = 0;
+    for (int i = 0; i < lanes.size(); ++i)
+        if (yInView >= getLocalArea (lanes[i], lanes[i]->getLocalBounds()).getY())
+            found = i;
+    return found;
 }
 
 int TimelineView::beatNear (double t, int pixels) const
@@ -2367,6 +2378,8 @@ void TimelineView::setNotes (const std::vector<NoteView>& n)
 
 void TimelineView::setClips (const std::vector<ClipView>& c)
 {
+    if (c == clips)
+        return;   // (el fader del click, por ejemplo, vuelve a pasar los mismos: las ondas no se redibujan)
     clips = c;
     overlay->repaint();
     invalidateLanes();   // las ondas llevan el color de cada tramo y el gris de los silenciados
@@ -2374,6 +2387,8 @@ void TimelineView::setClips (const std::vector<ClipView>& c)
 
 void TimelineView::setLaneClips (const std::vector<LaneClips>& perLane)
 {
+    if (perLane == laneClips)
+        return;
     laneClips = perLane;
     overlay->repaint();
     invalidateLanes();
@@ -2382,11 +2397,6 @@ void TimelineView::setLaneClips (const std::vector<LaneClips>& perLane)
 bool TimelineView::anyOwnLane() const
 {
     return std::any_of (laneClips.begin(), laneClips.end(), [] (const LaneClips& l) { return l.own; });
-}
-
-void TimelineView::repaintOverlay()
-{
-    overlay->repaint();
 }
 
 void TimelineView::setLevelingEnabled (bool enabled)
@@ -2470,7 +2480,8 @@ void TimelineView::zoomToRange (double start, double end)
 void TimelineView::setView (double start, double pps)
 {
     const double len = lengthSeconds();
-    pps = juce::jlimit (minPixelsPerSecond(), 4000.0, pps);
+    const double minPps = minPixelsPerSecond();
+    pps = juce::jlimit (minPps, juce::jmax (minPps, 4000.0), pps);   // (una canción muy corta pide más de 4000 para caber)
     const double visible = contentWidth() / pps;
     start = juce::jlimit (0.0, juce::jmax (0.0, len - visible), start);
     if (std::abs (start - viewStart) < 1.0e-9 && std::abs (pps - pixelsPerSecond) < 1.0e-9)

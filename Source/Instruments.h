@@ -69,6 +69,7 @@ private:
     class Scanner;
     void publish();                               // entrega al motor un InstrumentSet con las líneas cargadas
     void startLoad (int id, std::function<void (int, const juce::String&)> done);
+    juce::File loadingPedal() const { return folder.getChildFile ("plugin-cargando.txt"); }
     std::shared_ptr<InstrumentLane> makeLane (Slot&, std::unique_ptr<juce::AudioPluginInstance>);
 
     AudioEngine& engine;

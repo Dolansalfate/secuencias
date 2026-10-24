@@ -51,7 +51,7 @@ namespace arrangement
             return false;
         auto& c = clips[(size_t) i];
         const double offset = t - c.position;
-        if (offset < 0.001 || offset > c.length() - 0.001)
+        if (offset < minPiece || offset > c.length() - minPiece)
             return false;   // ya hay un corte ahí (o casi)
         const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
         c.srcEnd = c.srcStart + offset;
@@ -164,7 +164,7 @@ namespace arrangement
         {
             auto& c = clips[(size_t) i];
             const double offset = t - c.position;
-            if (offset > 0.001 && offset < c.length() - 0.001)
+            if (offset > minPiece && offset < c.length() - minPiece)
             {
                 const Clip second = c.part (c.srcStart + offset, c.srcEnd, t);
                 c.srcEnd = c.srcStart + offset;
@@ -178,9 +178,10 @@ namespace arrangement
 
     namespace
     {
+        // Con la misma tolerancia con que splitAllAt deja de partir: un borde a menos de minPiece cuenta como el del rango
         bool inside (const Clip& c, double from, double to)
         {
-            return c.position >= from - 1.0e-6 && c.end() <= to + 1.0e-6;
+            return c.position >= from - minPiece - 1.0e-9 && c.end() <= to + minPiece + 1.0e-9;
         }
     }
 
@@ -475,10 +476,27 @@ namespace arrangement
             }
             mt.sortHits();
         }
-        for (int i = (int) info.tempoRegions.size(); --i >= 1;)
+        // Secciones de tempo que empezaban en lo quitado: la última sigue rigiendo el audio que viene después (ahora
+        // desde `from`), salvo que otra empiece justo donde termina lo quitado; las demás desaparecen
+        auto& regions = info.tempoRegions;
+        int keep = -1;
+        bool startsAtEnd = false;
+        for (int i = 0; i < (int) regions.size(); ++i)
         {
-            if (removed (info.tempoRegions[(size_t) i].start)) info.tempoRegions.erase (info.tempoRegions.begin() + i);
-            else info.tempoRegions[(size_t) i].start = mapT (info.tempoRegions[(size_t) i].start);
+            if (removed (regions[(size_t) i].start)) keep = i;
+            startsAtEnd = startsAtEnd || (delta < 0.0 && std::abs (regions[(size_t) i].start - removedEnd) < 1.0e-9);
+        }
+        if (startsAtEnd)
+            keep = -1;
+        for (int i = (int) regions.size(); --i >= 0;)
+        {
+            auto& r = regions[(size_t) i];
+            if (! removed (r.start))
+                r.start = mapT (r.start);
+            else if (i == keep)
+                r.start = from;
+            else
+                regions.erase (regions.begin() + i);
         }
         info.sortTempoRegions();
         info.clickOffset = removed (info.clickOffset) ? from : mapT (info.clickOffset);
@@ -761,14 +779,7 @@ namespace arrangement
             if (shouldAbort && shouldAbort())
                 return nullptr;
             auto t = std::make_unique<LoadedTrack>();
-            t->name = src->name;
-            t->stemIndex = src->stemIndex;
-            t->gain = src->gain.load();
-            t->smoothedGain = t->gain.load();
-            t->muted = src->muted.load();
-            t->solo = src->solo.load();
-            t->outputPair = src->outputPair.load();
-            t->songTime = src->songTime;
+            t->copyControlsFrom (*src);
             t->buffer.setSize (2, outLen);
             t->buffer.clear();
             const int channels = juce::jmin (2, src->buffer.getNumChannels());
@@ -783,16 +794,46 @@ namespace arrangement
                 out->tracks.push_back (std::move (t));
                 continue;
             }
-            for (auto& c : own != nullptr ? *own : clips)
+            const auto& list = own != nullptr ? *own : clips;
+            // Dos tramos seguidos del mismo audio (un corte en su sitio, sin fundidos ni ganancias distintas) se unen
+            // sin los fundidos de borde y muestra a muestra: si no, cada corte dejaba un bache de 10 ms
+            const auto continues = [sr] (const Clip& a, const Clip& b)
             {
+                const double tolerance = 0.5 / sr;
+                return ! a.muted && ! b.muted && std::abs (a.end() - b.position) < tolerance && std::abs (a.srcEnd - b.srcStart) < tolerance
+                       && a.fadeOut < 1.0e-6 && b.fadeIn < 1.0e-6 && std::abs (a.gainDb - b.gainDb) < 1.0e-4f;
+            };
+            std::vector<int> previousOf (list.size(), -1);
+            std::vector<bool> intoNext (list.size(), false);
+            for (size_t j = 0; j < list.size(); ++j)
+                for (size_t k = 0; k < list.size(); ++k)
+                    if (k != j && continues (list[k], list[j]))
+                    {
+                        previousOf[j] = (int) k;
+                        intoNext[k] = true;
+                        break;
+                    }
+            std::vector<std::pair<int, int>> placedEnd (list.size(), { -1, -1 });   // dónde terminó cada tramo (arreglo, fuente)
+            for (size_t j = 0; j < list.size(); ++j)
+            {
+                const auto& c = list[j];
                 if (c.muted)
                     continue;   // silenciado con la herramienta Silenciar
-                const int s0 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcStart * sr));
+                int s0 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcStart * sr));
                 const int s1 = juce::jlimit (0, src->buffer.getNumSamples(), (int) std::llround (c.srcEnd * sr));
-                const int p = (int) std::llround (c.position * sr);
+                int p = (int) std::llround (c.position * sr);
+                const int prev = previousOf[j];
+                const bool joinedLeft = prev >= 0 && (size_t) prev < j && placedEnd[(size_t) prev].first >= 0;
+                if (joinedLeft)
+                {
+                    p = placedEnd[(size_t) prev].first;   // sigue exacto donde terminó el anterior
+                    s0 = placedEnd[(size_t) prev].second;
+                }
                 const int n = juce::jmin (s1 - s0, outLen - p);
                 if (n <= 0 || p < 0)
                     continue;
+                placedEnd[j] = { p + n, s0 + n };
+                const bool joinedRight = intoNext[j] && n == s1 - s0;
                 const int fade = juce::jmin (fadeN, n / 2);
                 // Ganancia y fundidos del tramo (asas de la herramienta Objeto): curvas de seno, sin clics
                 const float clipGain = std::abs (c.gainDb) > 1.0e-4f ? juce::Decibels::decibelsToGain (c.gainDb, -100.0f) : 1.0f;
@@ -806,8 +847,8 @@ namespace arrangement
                     for (int i = 0; i < n; ++i)
                     {
                         float g = clipGain;
-                        if (i < fade)              g *= (float) (i + 1) / (float) (fade + 1);
-                        else if (i >= n - fade)    g *= (float) (n - i) / (float) (fade + 1);
+                        if (i < fade && ! joinedLeft)           g *= (float) (i + 1) / (float) (fade + 1);
+                        if (i >= n - fade && ! joinedRight)     g *= (float) (n - i) / (float) (fade + 1);
                         if (i < fadeInN)
                             g *= std::sin (juce::MathConstants<float>::halfPi * (float) i / (float) fadeInN);
                         if (i >= full - fadeOutN)

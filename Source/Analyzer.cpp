@@ -59,11 +59,6 @@ Analyzer::~Analyzer()
         workDir.deleteRecursively();
 }
 
-const char* Analyzer::pythonScript()
-{
-    return analyzerScript;
-}
-
 //==============================================================================
 bool Analyzer::isAvailable (const juce::String& pythonPath)
 {
@@ -141,7 +136,7 @@ Analysis Analyzer::parseResult (const juce::var& json, juce::String& error)
 }
 
 bool Analyzer::writeMix (const LoadedSong& s, const std::vector<bool>& include, double sr,
-                         const juce::File& out, juce::String& error)
+                         const juce::File& out, juce::String& error, double outRate, int bitsPerSample)
 {
     const int n = (int) s.length;
     if (n <= 0)
@@ -169,17 +164,37 @@ bool Analyzer::writeMix (const LoadedSong& s, const std::vector<bool>& include, 
     if (peak > 0.9f)
         mix.applyGain (0.9f / peak);
 
+    double rate = sr;
+    if (outRate > 0.0 && std::abs (outRate - sr) > 0.5)
+    {
+        // Sinc con la entrada adelantada su retardo (los tiempos detectados no se corren) y colchón al final
+        const int latency = (int) juce::WindowedSincInterpolator::getBaseLatency();
+        const double ratio = sr / outRate;
+        const int outLen = juce::jmax (1, (int) ((double) n / ratio));
+        juce::AudioBuffer<float> padded (2, n + latency + 64);
+        padded.clear();
+        juce::AudioBuffer<float> resampled (2, outLen);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            padded.copyFrom (ch, 0, mix, ch, 0, n);
+            juce::WindowedSincInterpolator interp;
+            interp.process (ratio, padded.getReadPointer (ch) + latency, resampled.getWritePointer (ch), outLen);
+        }
+        mix = std::move (resampled);
+        rate = outRate;
+    }
+
     juce::WavAudioFormat wav;
     out.deleteFile();
     std::unique_ptr<juce::OutputStream> stream (out.createOutputStream());
-    std::unique_ptr<juce::AudioFormatWriter> writer (stream != nullptr ? wav.createWriterFor (stream.get(), sr, 2, 24, {}, 0) : nullptr);
+    std::unique_ptr<juce::AudioFormatWriter> writer (stream != nullptr ? wav.createWriterFor (stream.get(), rate, 2, bitsPerSample, {}, 0) : nullptr);
     if (writer == nullptr)
     {
         error = tr ("No se pudo escribir la mezcla temporal.");
         return false;
     }
     stream.release();
-    writer->writeFromAudioSampleBuffer (mix, 0, n);
+    writer->writeFromAudioSampleBuffer (mix, 0, mix.getNumSamples());
     return true;
 }
 
@@ -250,7 +265,7 @@ void Analyzer::run()
     if (std::none_of (harmonic.begin(), harmonic.end(), [] (bool b) { return b; }))
         harmonic = all;   // solo hay batería: se analiza lo que haya
     const auto mixFile = workDir.getChildFile ("mezcla.wav"), harmonicFile = workDir.getChildFile ("armonico.wav");
-    if (! writeMix (*song, all, sampleRate, mixFile, error) || ! writeMix (*song, harmonic, sampleRate, harmonicFile, error))
+    if (! writeMix (*song, all, sampleRate, mixFile, error, 44100.0, 16) || ! writeMix (*song, harmonic, sampleRate, harmonicFile, error, 44100.0, 16))
     {
         setStatus (State::failed, error);
         return;

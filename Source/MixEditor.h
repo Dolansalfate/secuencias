@@ -40,7 +40,6 @@ public:
     void setSegmentLevels (std::vector<MixLevel>);
     void setBusy (bool rendering);          // mientras se renderiza: deshabilita Crear canción
 
-    int getSelectedSource() const  { return selectedSource; }
     int getSelectedSegment() const { return selectedSegment; }
     void selectSource (int);
     void selectSegment (int);

@@ -28,6 +28,33 @@ namespace
     {
         return Separator::findFfmpeg() != juce::File();
     }
+
+    // audio-separator busca ffmpeg en el PATH que hereda: si la app lo encontró en otra carpeta (Homebrew o
+    // ~/.local/bin, que una app abierta desde el Finder o el menú no tiene en el PATH), se agrega al de este proceso.
+    // Solo desde el hilo de mensajes (al arrancar una separación): cambiar el entorno con otros hilos leyéndolo no es seguro
+    void addFfmpegFolderToPath()
+    {
+        const auto ffmpeg = Separator::findFfmpeg();
+        if (ffmpeg == juce::File())
+            return;
+       #if JUCE_WINDOWS
+        const juce::String separator = ";";
+       #else
+        const juce::String separator = ":";
+       #endif
+        const juce::String path (std::getenv ("PATH") != nullptr ? std::getenv ("PATH") : "");
+        const auto dir = ffmpeg.getParentDirectory().getFullPathName();
+        juce::StringArray dirs;
+        dirs.addTokens (path, separator, "\"");
+        if (dirs.contains (dir))
+            return;
+        const auto updated = path.isEmpty() ? dir : dir + separator + path;
+       #if JUCE_WINDOWS
+        _putenv_s ("PATH", updated.toRawUTF8());
+       #else
+        setenv ("PATH", updated.toRawUTF8(), 1);
+       #endif
+    }
 }
 
 juce::File Separator::findFfmpeg()
@@ -161,6 +188,8 @@ bool Separator::start (const juce::File& input, const juce::String& pythonPath,
         options.roformerVocals = false;   // ambos requieren audio-separator y ffmpeg
         options.drumParts = false;
     }
+    if (options.roformerVocals || options.drumParts)
+        addFfmpegFolderToPath();
     songName = name;
     progress = -1.0f;
     setStatus (State::running, tr ("Iniciando..."));
@@ -178,6 +207,7 @@ bool Separator::startDrumParts (const juce::File& drumsFile, const juce::String&
     options = {};
     options.drumParts = true;
     drumsOnly = true;
+    addFfmpegFolderToPath();
     songName = name;
     progress = -1.0f;
     setStatus (State::running, tr ("Iniciando..."));
@@ -286,7 +316,10 @@ bool Separator::convertToWav (const juce::File& in, const juce::File& out, doubl
 
     const int channels = (int) juce::jmin (2u, reader->numChannels);
     const int srcLen = (int) reader->lengthInSamples;
-    juce::AudioBuffer<float> src (channels, srcLen + 64);   // colchón para el interpolador
+    // El sinc entrega cada muestra `latency` muestras de entrada tarde: se le da la entrada adelantada eso (con colchón
+    // al final), así los stems quedan alineados con las pistas que no se remuestrean (si no, unos 2 ms tarde a 48 kHz)
+    const int latency = (int) juce::WindowedSincInterpolator::getBaseLatency();
+    juce::AudioBuffer<float> src (channels, srcLen + 64 + latency);   // colchón para el interpolador
     src.clear();
     reader->read (&src, 0, srcLen, 0, true, channels > 1);
 
@@ -304,7 +337,7 @@ bool Separator::convertToWav (const juce::File& in, const juce::File& out, doubl
         for (int ch = 0; ch < channels; ++ch)
         {
             juce::WindowedSincInterpolator interp;   // calidad alta; corre fuera de línea
-            interp.process (ratio, src.getReadPointer (ch), outBuf.getWritePointer (ch), outLen);
+            interp.process (ratio, src.getReadPointer (ch) + latency, outBuf.getWritePointer (ch), outLen);
         }
     }
 
@@ -357,7 +390,7 @@ bool Separator::writeResidual (const juce::File& mix, const juce::Array<juce::Fi
     out.deleteFile();
     std::unique_ptr<juce::OutputStream> stream (out.createOutputStream());
     std::unique_ptr<juce::AudioFormatWriter> writer (stream != nullptr
-        ? wav.createWriterFor (stream.get(), mixReader->sampleRate, (unsigned) channels, 24, {}, 0) : nullptr);
+        ? wav.createWriterFor (stream.get(), mixReader->sampleRate, (unsigned) channels, 32, {}, 0) : nullptr);   // coma flotante: como los stems
     if (writer == nullptr)
     {
         error = tr ("No se pudo escribir la pista de otros.");
@@ -399,6 +432,8 @@ bool Separator::runProcess (const juce::StringArray& args, int stagePasses)
     {
         const juce::ScopedLock sl (processLock);
         process = &proc;
+        if (threadShouldExit())
+            proc.kill();   // Cancelar llegó entre dos etapas, cuando no había proceso que matar
     }
 
     passes = juce::jmax (1, stagePasses);
@@ -424,6 +459,8 @@ bool Separator::runProcess (const juce::StringArray& args, int stagePasses)
             if (! line.empty())
                 handleOutputLine (line);
             line.clear();
+            if (threadShouldExit())
+                break;   // (un proceso que escribe sin parar nunca deja la lectura vacía)
         }
         else if ((unsigned char) c >= 32 && (unsigned char) c < 127)   // solo ASCII
             line += c;
@@ -503,7 +540,9 @@ bool Separator::runStage (const SeparationStage& stage, const juce::File& input,
     juce::StringArray args { python, "-u", "-m", "demucs", "-n", stage.model,
                              "--shifts", juce::String (stage.shifts),
                              "--overlap", juce::String (stage.overlap, 2),
-                             "--int24",
+                             // Coma flotante y sin "rescale": si un stem pasaba de 0 dBFS, Demucs lo bajaba entero y "otros"
+                             // (la mezcla menos las demás) se quedaba con una copia baja de ese stem
+                             "--float32", "--clip-mode", "none",
                              "-o", outDir.getFullPathName(), input.getFullPathName() };
     if (! runProcess (args, stage.passes))
         return false;
@@ -545,14 +584,18 @@ bool Separator::splitDrums (const juce::File& drums, const juce::File& outDir, j
         chosen.add (dest);
         ++found;
     }
-    if (found == 0)
+    // Las seis partes o nada: un proceso que murió a medias (por falta de memoria, con código 0) deja algunas, y "otros"
+    // se quedaría con el resto de la batería
+    if (found < 6)
     {
         juce::StringArray lines (log);
         lines.trim();
         lines.removeEmptyStrings();
         while (lines.size() > 12)
             lines.remove (0);
-        setStatus (State::failed, tr ("DrumSep no dejó las partes de la batería.\n\n") + lines.joinIntoString ("\n"));
+        setStatus (State::failed, (found == 0 ? tr ("DrumSep no dejó las partes de la batería.\n\n")
+                                              : tr ("DrumSep terminó sin todas las partes de la batería.\n\n"))
+                                      + lines.joinIntoString ("\n"));
         return false;
     }
     return true;

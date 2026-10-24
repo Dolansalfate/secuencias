@@ -68,14 +68,12 @@ namespace triggers
         const int peakWindow = 20;   // ms tras el ataque para medir la fuerza
         const double gamma = 1.0 / juce::jlimit (0.2, 5.0, sensitivity);
 
+        // Tras un golpe, el siguiente puede empezar recién pasado minMs (una condición de "bajar 6 dB" que había no
+        // cambiaba nada: el tiempo mínimo se exigía igual; así se comportó siempre)
         int lastOnset = -1000000;
-        double lastPeak = -200.0;
-        bool armed = true;
         for (int i = rise; i < blocks; ++i)
         {
-            if (! armed && (env[(size_t) i] < lastPeak - 6.0 || i - lastOnset >= minBlocks))
-                armed = true;
-            if (! armed || i - lastOnset < minBlocks)
+            if (i - lastOnset < minBlocks)
                 continue;
             if (env[(size_t) i] - env[(size_t) i - rise] < minRiseDb || env[(size_t) i] < thresholdDb)
                 continue;
@@ -103,8 +101,6 @@ namespace triggers
             e.velocity = (float) std::pow (norm, gamma);
             out.push_back (e);
             lastOnset = i;
-            lastPeak = peakDb;
-            armed = false;
         }
         return out;
     }

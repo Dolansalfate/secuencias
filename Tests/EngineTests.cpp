@@ -768,7 +768,9 @@ int main()
         CHECK (si.analysis.beats.size() == 16 && std::abs (si.analysis.beats[6].seconds - 3.0) < 1.0e-9 && std::abs (si.analysis.beats[15].seconds - 7.5) < 1.0e-9);
         CHECK (si.analysis.chords.size() == 3 && std::abs (si.analysis.chords[1].end - 3.0) < 1.0e-9 && std::abs (si.analysis.chords[2].start - 3.0) < 1.0e-9 && std::abs (si.analysis.chords[2].end - 8.0) < 1.0e-9);
         CHECK (si.markers.size() == 2 && si.markers[1].name == "C" && std::abs (si.markers[1].seconds - 6.0) < 1.0e-9);
-        CHECK (si.tempoRegions.size() == 2 && std::abs (si.tempoRegions[1].start - 4.0) < 1.0e-9 && std::abs (si.tempoRegions[1].origBpm - 140.0) < 1.0e-9);
+        // La sección de 130 empezaba en lo quitado: sigue rigiendo lo que queda de ella (5..6 pasa a 3..4)
+        CHECK (si.tempoRegions.size() == 3 && std::abs (si.tempoRegions[1].start - 3.0) < 1.0e-9 && std::abs (si.tempoRegions[1].origBpm - 130.0) < 1.0e-9
+               && std::abs (si.tempoRegions[2].start - 4.0) < 1.0e-9 && std::abs (si.tempoRegions[2].origBpm - 140.0) < 1.0e-9);
         CHECK (std::abs (si.clickOffset - 3.0) < 1.0e-9);
         // Un acorde entero dentro del hueco desaparece; abrir un hueco desplaza sin borrar
         SongInfo s2;
@@ -933,6 +935,51 @@ int main()
             CHECK (r != nullptr && r->bitsPerSample == 24);
         }
         CHECK (! Separator::convertToWav (dir.getChildFile ("no_existe.mp3"), dir.getChildFile ("x.wav"), 44100.0, err));
+        // Remuestreada sin el retardo del sinc: un golpe en 0,5 s a 48 kHz cae en 0,5 s a 44,1 kHz (antes, unos 2 ms tarde)
+        {
+            juce::AudioBuffer<float> click (1, 48000);
+            click.clear();
+            click.setSample (0, 24000, 0.9f);
+            writeWav (dir.getChildFile ("golpe48.wav"), click, 48000.0);
+            CHECK (Separator::convertToWav (dir.getChildFile ("golpe48.wav"), dir.getChildFile ("golpe44.wav"), 44100.0, err));
+            std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (dir.getChildFile ("golpe44.wav")));
+            CHECK (r != nullptr);
+            if (r != nullptr)
+            {
+                juce::AudioBuffer<float> got (1, (int) r->lengthInSamples);
+                r->read (&got, 0, got.getNumSamples(), 0, true, false);
+                int at = 0;
+                for (int i = 0; i < got.getNumSamples(); ++i)
+                    if (std::abs (got.getSample (0, i)) > std::abs (got.getSample (0, at)))
+                        at = i;
+                CHECK (std::abs (at - 22050) <= 1);
+            }
+        }
+        // La mezcla del análisis: 44,1 kHz y 16 bits (madmom la lee sin ffmpeg), alineada
+        {
+            LoadedSong one;
+            one.sampleRate = 48000.0;
+            one.length = 48000;
+            auto t = std::make_unique<LoadedTrack>();
+            t->buffer.setSize (2, 48000);
+            t->buffer.clear();
+            t->buffer.setSample (0, 24000, 0.5f);
+            t->buffer.setSample (1, 24000, 0.5f);
+            one.tracks.push_back (std::move (t));
+            CHECK (Analyzer::writeMix (one, { true }, 48000.0, dir.getChildFile ("analisis.wav"), err, 44100.0, 16));
+            std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (dir.getChildFile ("analisis.wav")));
+            CHECK (r != nullptr && std::abs (r->sampleRate - 44100.0) < 0.5 && r->bitsPerSample == 16);
+            if (r != nullptr)
+            {
+                juce::AudioBuffer<float> got (2, (int) r->lengthInSamples);
+                r->read (&got, 0, got.getNumSamples(), 0, true, true);
+                int at = 0;
+                for (int i = 0; i < got.getNumSamples(); ++i)
+                    if (std::abs (got.getSample (0, i)) > std::abs (got.getSample (0, at)))
+                        at = i;
+                CHECK (std::abs (at - 22050) <= 1);
+            }
+        }
 
         // mix = a + b + c; con stems a y b, el residuo debe ser c
         const int n = 44100;
@@ -1366,6 +1413,12 @@ int main()
         CHECK (at == (int) sr && std::abs (best - 0.8f) < 1.0e-4f);
         if (at != (int) sr)
             std::cout << "  golpe exportado en " << at << " (" << best << ")\n";
+        // El click pedido en la exportación suena aunque esté apagado para tocar (y queda apagado)
+        bounceEngine.setClick (false, 120.0, 0.0, 0.0f, 0);
+        opts = bounce::Options();
+        opts.clickFile = true;
+        res = bounce::render (bounceEngine, *bounceSong, opts);
+        CHECK (res.click.getMagnitude (0, (int) (0.45 * sr), (int) (0.1 * sr)) > 0.1f && ! bounceEngine.isClickOn());
         // Sonoridad pedida: la mezcla llega al objetivo y las pistas reciben lo mismo; nada pasa de 0,999
         {
             bounce::Result loud;
@@ -1454,18 +1507,39 @@ int main()
                 for (int c = 0; c < 2; ++c)
                     for (int i = 0; i < 4800; ++i)
                         err = juce::jmax (err, std::abs (back->tracks[(size_t) k]->buffer.getSample (c, i) - rendered->tracks[(size_t) k]->buffer.getSample (c, i)));
-            CHECK (err < 1.0e-6f);   // 24 bits
+            CHECK (err < 1.0e-6f);
             const auto& v = *back->tracks[1];
             CHECK (v.name == "Voces" && v.muted.load() && v.outputPair.load() == 1
                    && std::abs (v.gain.load() - juce::Decibels::decibelsToGain (-6.0f)) < 1.0e-4f);
         }
         CHECK (rendercache::load (cacheRoot, "clave-2", mixInfo, 48000.0, formats) == nullptr);
         CHECK (rendercache::load (cacheRoot, "clave-1", mixInfo, 44100.0, formats) == nullptr);
-        // Al pasar del tope se borra la entrada menos usada
+        // Coma flotante: lo que pasa de 0 dBFS (antes del fader) vuelve entero, sin recortar
+        {
+            LoadedSong loud;
+            loud.sampleRate = 48000.0;
+            loud.length = 480;
+            auto t = std::make_unique<LoadedTrack>();
+            t->stemIndex = 0;
+            t->buffer.setSize (2, 480);
+            t->buffer.clear();
+            t->buffer.setSample (0, 100, 1.7f);
+            loud.tracks.push_back (std::move (t));
+            CHECK (rendercache::store (cacheRoot, "fuerte", loud));
+            auto got = rendercache::load (cacheRoot, "fuerte", mixInfo, 48000.0, formats);
+            CHECK (got != nullptr && std::abs (got->tracks[0]->buffer.getSample (0, 100) - 1.7f) < 1.0e-5f);
+            CHECK (rendercache::store (cacheRoot, "fuerte", loud));   // ya estaba: no se reescribe
+            bool leftovers = false;
+            for (auto& d : cacheRoot.findChildFiles (juce::File::findDirectories, false))
+                leftovers = leftovers || d.getFileName().contains (".escribiendo");
+            CHECK (! leftovers);
+            cacheRoot.getChildFile (juce::String::toHexString (juce::String ("fuerte").hashCode64())).deleteRecursively();
+        }
+        // Al pasar del tope se borra la entrada menos usada (por la fecha de su meta.json, que load renueva)
         CHECK (rendercache::store (cacheRoot, "clave-3", *rendered));
-        cacheRoot.getChildFile (juce::String::toHexString (juce::String ("clave-1").hashCode64()))
+        cacheRoot.getChildFile (juce::String::toHexString (juce::String ("clave-1").hashCode64())).getChildFile ("meta.json")
             .setLastModificationTime (juce::Time::getCurrentTime() - juce::RelativeTime::hours (1));
-        rendercache::prune (cacheRoot, 80000);   // cabe una entrada (unos 58 KB), no dos
+        rendercache::prune (cacheRoot, 100000);   // cabe una entrada (unos 77 KB), no dos
         CHECK (rendercache::load (cacheRoot, "clave-1", mixInfo, 48000.0, formats) == nullptr);
         CHECK (rendercache::load (cacheRoot, "clave-3", mixInfo, 48000.0, formats) != nullptr);
     }
@@ -1987,6 +2061,100 @@ int main()
         CHECK (p >= (ls - 1) / sr && p <= (le + 1) / sr);
         CHECK (engine.isPlaying());
         engine.clearLoop();
+    }
+
+    std::cout << "[AudioEngine] loop puesto detras del cabezal y loop que pasa del final: sin saltos bruscos\n";
+    {
+        song->tracks[1]->muted = true;
+        engine.clearLoop();
+        engine.seekSeconds (2.0);
+        engine.play();
+        render (engine, out, 20);
+        // Como Stop o un marcador anterior con el loop de la sección: primero el salto, después el loop (detrás del cabezal)
+        engine.seekSeconds (0.6);
+        engine.setLoop (0.5, 1.0);
+        CHECK (maxJump (engine, out, 20) < 0.06f);
+        double p = engine.getPositionSeconds();
+        CHECK (p >= 0.49 && p <= 1.001);
+        // Sin salto pedido: el cabezal va al inicio del loop con fundido
+        engine.clearLoop();
+        engine.seekSeconds (2.0);
+        render (engine, out, 20);
+        engine.setLoop (0.5, 1.0);
+        CHECK (maxJump (engine, out, 20) < 0.06f);
+        p = engine.getPositionSeconds();
+        CHECK (p >= 0.49 && p <= 1.001);
+        // Un loop que pasa del final de la canción termina en él: vuelve con crossfade y sigue sonando
+        engine.setLoop (2.5, 10.0);
+        engine.seekSeconds (2.6);
+        CHECK (maxJump (engine, out, 400) < 0.06f);
+        CHECK (engine.isPlaying());
+        p = engine.getPositionSeconds();
+        CHECK (p >= 2.49 && p <= 3.0);
+        engine.clearLoop();
+        engine.pause();
+        render (engine, out, 2);
+        song->tracks[1]->muted = false;
+    }
+
+    std::cout << "[AudioEngine] cambiar el par de salida sonando: baja por el viejo y entra por el nuevo con rampa\n";
+    {
+        song->tracks[1]->muted = true;
+        song->tracks[0]->outputPair = 0;
+        engine.seekSeconds (0.5);
+        engine.play();
+        render (engine, out, 20);
+        song->tracks[0]->outputPair = 1;
+        CHECK (maxJump (engine, out, 1) < 0.06f);   // canal 1: baja con rampa en un trozo
+        CHECK (out.peak (2) < 1.0e-6f);
+        render (engine, out, 1);
+        CHECK (std::abs (out.data[2][0]) < 0.01f && out.peak (0) < 1.0e-6f);   // canal 3: entra desde 0
+        float peaks[4] = {};
+        render (engine, out, 10, peaks);
+        CHECK (peaks[0] < 1.0e-6f && peaks[2] > 0.1f);
+        song->tracks[0]->outputPair = 0;
+        engine.pause();
+        render (engine, out, 4);
+        song->tracks[1]->muted = false;
+    }
+
+    std::cout << "[AudioEngine] grabar una pista con la cancion al final: la toma empieza donde arranca, no antes del play\n";
+    {
+        engine.seekSeconds (2.98);
+        engine.play();
+        for (int b = 0; b < 200 && engine.isPlaying(); ++b)
+            render (engine, out, 1);
+        CHECK (! engine.isPlaying());
+        const auto rawFile = tmp.getChildFile ("toma-pista.wav");
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::FileOutputStream> stream (rawFile.createOutputStream());
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (stream.get(), sr, 1, 24, {}, 0));
+        CHECK (w != nullptr);
+        stream.release();
+        juce::TimeSliceThread thread ("grabacion-pista-test");
+        thread.startThread();
+        auto writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (w.release(), thread, 1 << 16);
+        RecordSetup rs;
+        rs.writer = writer.get();
+        rs.monitor = false;
+        rs.followTransport = true;
+        std::vector<float> inData ((size_t) block, 0.2f);
+        const float* inPtrs[1] = { inData.data() };
+        juce::AudioIODeviceCallbackContext ctx;
+        engine.seekSeconds (0.0);   // como startRecording con la canción al final
+        engine.setRecorder (rs);
+        for (int b = 0; b < 2; ++b)
+            engine.audioDeviceIOCallbackWithContext (inPtrs, 1, out.ptrs.data(), (int) out.ptrs.size(), block, ctx);
+        CHECK (engine.getRecordStartPosition() < 0 && engine.getRecordedSamples() == 0);   // detenida: no se graba
+        engine.play();
+        for (int b = 0; b < 4; ++b)
+            engine.audioDeviceIOCallbackWithContext (inPtrs, 1, out.ptrs.data(), (int) out.ptrs.size(), block, ctx);
+        CHECK (engine.getRecordStartPosition() >= 0 && engine.getRecordStartPosition() <= block);
+        CHECK (engine.getRecordedSamples() >= 3 * block);
+        engine.clearRecorder();
+        writer.reset();
+        thread.stopThread (2000);
+        render (engine, out, 2);   // sigue sonando: los tests de abajo lo esperan
     }
 
     std::cout << "[AudioEngine] cache de forma de onda\n";
@@ -4676,6 +4844,109 @@ int main()
             song->tracks[0]->muted = false;
             song->tracks[1]->muted = false;
         }
+    }
+
+    std::cout << "[Auditoria] cortes sin bache, secciones de tempo, figura del compas, nombres con simbolos, valores acotados\n";
+    {
+        // Cortar en su sitio no deja bache: el render es el audio original muestra a muestra, y conserva el balance
+        const double rate = 48000.0;
+        auto srcSong = std::make_shared<LoadedSong>();
+        srcSong->sampleRate = rate;
+        srcSong->length = (juce::int64) (2.0 * rate);
+        auto t1 = std::make_unique<LoadedTrack>();
+        t1->buffer = sine (rate, 2.0, 2);
+        t1->pan = 0.7f;
+        srcSong->tracks.push_back (std::move (t1));
+        std::vector<Clip> clips;
+        CHECK (arrangement::cutAt (clips, 0.7310, 2.0) && arrangement::cutAt (clips, 1.2345, 2.0) && clips.size() == 3);
+        auto cut = arrangement::render (srcSong, clips, rate);
+        CHECK (cut != nullptr && cut != srcSong);
+        if (cut != nullptr)
+        {
+            float err = 0.0f;
+            for (int i = (int) (0.1 * rate); i < (int) (1.9 * rate); ++i)
+                err = std::max (err, std::abs (cut->tracks[0]->buffer.getSample (0, i) - srcSong->tracks[0]->buffer.getSample (0, i)));
+            CHECK (err < 1.0e-6f);
+            CHECK (std::abs (cut->tracks[0]->pan.load() - 0.7f) < 1.0e-6f);
+        }
+        clips[1].fadeIn = 0.05;   // con un fundido propio en el corte, sí hay fundido
+        cut = arrangement::render (srcSong, clips, rate);
+        CHECK (cut != nullptr && std::abs (cut->tracks[0]->buffer.getSample (0, (int) std::llround (0.7310 * rate))) < 0.05f);
+
+        // Unir secciones iguales conserva la transición de la que se quita; dos en el mismo punto: manda la última
+        SongInfo si;
+        TempoRegion a { 0.0, 120.0, 0.0 }, b { 4.0, 120.0, 0.0 }, c { 8.0, 90.0, 0.0 }, d { 8.0, 100.0, 0.0 };
+        b.curve = TempoRegion::linear;
+        si.tempoRegions = { a, b, c, d };
+        si.mergeEqualTempoRegions();
+        CHECK (si.tempoRegions.size() == 2 && si.tempoRegions[0].curve == TempoRegion::linear && std::abs (si.tempoRegions[1].origBpm - 100.0) < 1.0e-9);
+
+        // Tiempos al doble y rejilla fija conservan la figura (x/8)
+        Analysis an;
+        for (int i = 0; i < 8; ++i)
+        {
+            Beat bt;
+            bt.seconds = i * 0.5;
+            bt.beatInBar = i % 3 + 1;
+            bt.unit = 8;
+            an.beats.push_back (bt);
+        }
+        an.doubleBeats (0, 8, 6);
+        bool all8 = an.beats.size() == 15;
+        for (auto& bt : an.beats) all8 = all8 && bt.unit == 8;
+        CHECK (all8);
+        an.replaceBeatsWithGrid (1.0, 3.0, 100.0, 6);
+        all8 = true;
+        for (auto& bt : an.beats) all8 = all8 && bt.unit == 8;
+        CHECK (all8);
+
+        // Carpetas y archivos con "#" y "," en shows.json y trackClips; nivelado por pista con un archivo que falta;
+        // tramos con valores enormes acotados
+        auto root = tmp.getChildFile ("lib3");
+        auto folder3 = root.getChildFile (tr ("Canción #1, en vivo"));
+        folder3.createDirectory();
+        writeSine (folder3.getChildFile ("bajo #2.wav"), 44100.0, 0.5, 1);
+        writeSine (folder3.getChildFile ("voz.wav"), 44100.0, 0.5, 1);
+        folder3.getChildFile ("song.json").replaceWithText (R"({"name":"S",
+            "stems":[{"name":"Bajo","file":"bajo #2.wav"},{"name":"Falta","file":"no-esta.wav"},{"name":"Voz","file":"voz.wav"}],
+            "stemSongLufs":[-10,-20,-30],"headStemGainsDb":[1,2,3],
+            "clips":[{"start":0,"end":0.4,"at":1e300},{"start":0,"end":1e300,"at":0}],
+            "trackClips":[{"stem":"bajo #2.wav","clips":[{"start":0,"end":0.3,"at":0.1}]},{"stem":"../fuera.wav","clips":[]}]})");
+        root.getChildFile ("shows.json").replaceWithText (tr (R"({"active":0,"shows":[{"name":"A","songs":["Canción #1, en vivo","../x"]}]})"));
+        Library l3 (root);
+        l3.load();
+        CHECK (l3.songs.size() == 1);
+        if (l3.songs.size() == 1)
+        {
+            const auto& s3 = l3.songs[0];
+            CHECK (s3.stems.size() == 2 && s3.stems[1].fileName == "voz.wav");
+            CHECK (s3.stemSongLufs.size() == 2 && std::abs (s3.stemSongLufs[1] + 30.0) < 1.0e-9 && std::abs (s3.headStemGainsDb[1] - 3.0) < 1.0e-9);
+            CHECK (s3.trackClips.size() == 1 && s3.trackClips[0].stem == "bajo #2.wav");
+            bool bounded = s3.clips.size() == 2;
+            for (auto& cl : s3.clips) bounded = bounded && cl.position <= 3.0 * 3600.0 && cl.srcEnd <= 3.0 * 3600.0;
+            CHECK (bounded);
+        }
+        CHECK (l3.shows.size() == 1 && l3.shows[0].folders.size() == 1 && l3.shows[0].folders[0] == tr ("Canción #1, en vivo"));
+
+        // Puerta absoluta también en la segunda pasada: un tramo a -71 LUFS no cuenta aunque pase la relativa
+        juce::AudioBuffer<float> g (2, (int) (rate * 20.0));
+        for (int i = 0; i < g.getNumSamples(); ++i)
+        {
+            const double t = (double) i / rate;
+            const float amp = juce::Decibels::decibelsToGain (t < 10.0 ? -62.0f : -71.0f);
+            const float v = amp * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 997.0 * t);
+            g.setSample (0, i, v);
+            g.setSample (1, i, v);
+        }
+        const auto lr = loudness::measure (g, rate, std::vector<loudness::Section>());
+        CHECK (std::abs (lr.whole.lufs + 62.0) < 0.5);
+
+        // La pista MIDI creada desde un trigger hereda su balance y su silencio
+        StemInfo kick = stem ("Bombo", "kick.wav");
+        kick.trigger.pan = -0.4f;
+        kick.trigger.muted = true;
+        const auto mt = miditrack::fromDetection ({}, 48000.0, kick);
+        CHECK (mt.pads.size() == 1 && std::abs (mt.pads[0].pan + 0.4f) < 1.0e-6f && mt.pads[0].muted);
     }
 
     engine.setSong (nullptr);

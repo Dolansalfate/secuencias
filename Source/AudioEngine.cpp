@@ -230,6 +230,9 @@ namespace
                     continue;   // (tras quitar una fila o una pista los índices pasan a otra: sus voces no se cambian de canal)
                 lane.lastPos = old.lastPos;
                 lane.lastHit = old.lastHit;
+                lane.control.smoothedGain = old.control.smoothedGain;   // sigue la rampa (una fila muda no suena un trozo)
+                lane.control.smoothedPan = old.control.smoothedPan;
+                lane.control.activePair = old.control.activePair;
                 const auto it = std::lower_bound (lane.events.begin(), lane.events.end(), old.lastPos + 1,
                                                   [] (const TriggerEvent& e, juce::int64 v) { return e.sample < v; });
                 lane.nextEvent = (size_t) (it - lane.events.begin());
@@ -260,17 +263,23 @@ namespace
     // hueco libre; si no hay, se cierra antes la nota más antigua)
     void sendInstrumentNote (InstrumentLane& dest, int note, float velocity, int sample)
     {
-        dest.midi.addEvent (juce::MidiMessage::noteOn (1, note, velocity), sample);
+        // La misma nota aún retenida se cierra antes de volver a tocarla (un redoble no se corta con el off de la
+        // anterior); si no, un hueco libre o, sin huecos, la nota más antigua
         InstrumentLane::PendingOff* slot = nullptr;
         for (auto& o : dest.offs)
-            if (o.note < 0) { slot = &o; break; }
+            if (o.note == note) { slot = &o; break; }
+        if (slot == nullptr)
+            for (auto& o : dest.offs)
+                if (o.note < 0) { slot = &o; break; }
         if (slot == nullptr)
         {
             slot = &dest.offs[0];
             for (auto& o : dest.offs)
                 if (o.remaining < slot->remaining) slot = &o;
-            dest.midi.addEvent (juce::MidiMessage::noteOff (1, slot->note), sample);
         }
+        if (slot->note >= 0)
+            dest.midi.addEvent (juce::MidiMessage::noteOff (1, slot->note), sample);   // antes del noteOn de esta muestra
+        dest.midi.addEvent (juce::MidiMessage::noteOn (1, note, velocity), sample);
         slot->note = note;
         slot->remaining = sample + dest.holdSamples;
     }
@@ -439,6 +448,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     inputLatency = device->getInputLatencyInSamples();
     outputLatency = device->getOutputLatencyInSamples();
     masterLoudness.prepare (sr);   // antes de que corra el callback
+    if (lastDeviceRate > 0.0 && std::abs (lastDeviceRate - sr) > 1.0)
+        rateChanged = true;        // haya o no canción: los instrumentos están preparados a la anterior
+    lastDeviceRate = sr;
 
     const juce::SpinLock::ScopedLockType sl (songLock);
     if (song != nullptr && std::abs (song->sampleRate - sr) > 1.0)
@@ -495,6 +507,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* ins, int
         ~DepthGuard() { --depth; }
         std::atomic<int>& depth;
     } guard (callbackDepth);
+    const juce::ScopedNoDenormals noDenormals;   // filtros y rampas que se apagan no caen en números desnormalizados
 
     for (int ch = 0; ch < numOuts; ++ch)
         if (outputs[ch] != nullptr)
@@ -532,7 +545,10 @@ void AudioEngine::processInput (const float* const* ins, int numIns, float* cons
         const float* inR = ri >= 0 ? ins[ri] : nullptr;
         if (inL != nullptr)
         {
-            if (rec->writer != nullptr)
+            // Una pista empieza a grabarse cuando la canción ya suena desde donde arranca (no antes de play() ni
+            // durante un salto pendiente): la primera muestra de la toma cae en `position`
+            const bool rolling = ! rec->followTransport || (playing.load() && pendingSeek.load() < 0);
+            if (rec->writer != nullptr && rolling)
             {
                 if (recordStartPosition.load() < 0)
                     recordStartPosition = position.load();
@@ -653,12 +669,22 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
     const bool wantPlay = playing.load();
     auto pending = pendingSeek.load();
     const auto range = loopRange.load();
-    const auto ls = (juce::int64) (range >> 32), le = (juce::int64) (range & 0xffffffffu);
+    const auto ls = (juce::int64) (range >> 32);
+    const auto le = juce::jmin ((juce::int64) (range & 0xffffffffu), s.length);   // un loop que pasa del final termina en él
     const bool looping = le > ls;
     // Crossfade al cerrar el loop: el final de la región se funde con lo que precede a su inicio
     const auto xfLen = looping ? juce::jmin ((juce::int64) fadeSamples, (le - ls) / 2) : (juce::int64) 0;
     const float fadeStep = 1.0f / (float) fadeSamples;
     auto pos = position.load();
+    // Loop puesto detrás del cabezal sin un salto pedido: se va a su inicio con fundido (nunca de golpe)
+    if (looping && wantPlay && pending < 0 && pos >= le)
+    {
+        juce::int64 none = -1;
+        pending = pendingSeek.compare_exchange_strong (none, ls) ? ls : none;
+    }
+    // Salto en este trozo: muestra en la que se aplicó (la envolvente está en 0). Ahí se callan las voces y las notas
+    // que venían sonando, y el nivelado toma el del tramo nuevo sin rampa
+    int jumpIndex = -1;
     const GainCurve* curve = (gainCurve != nullptr && ! gainCurve->positions.empty()) ? gainCurve.get() : nullptr;
     const float levelCoeff = 1.0f / (0.05f * (float) sampleRate.load());   // rampa de ~50 ms
 
@@ -675,7 +701,10 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             levelTarget = curve->gains[idx];
             segment = (int) idx;
         }
-        levelSmooth += (levelTarget - levelSmooth) * levelCoeff;
+        if (jumpIndex >= 0 && i == jumpIndex + 1)
+            levelSmooth = levelTarget;
+        else
+            levelSmooth += (levelTarget - levelSmooth) * levelCoeff;
         levelGain[(size_t) i] = levelSmooth;
         levelSegment[(size_t) i] = segment;
 
@@ -687,6 +716,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             pos = juce::jlimit ((juce::int64) 0, s.length, pending);
             pendingSeek.compare_exchange_strong (pending, -1);
             pending = -1;
+            jumpIndex = i;
         }
 
         positions2[(size_t) i] = -1;
@@ -698,7 +728,10 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             positions[(size_t) i] = pos;
             float env = fade;
 
-            if (looping)
+            // Solo dentro de la región: si el cabezal quedó fuera (loop recién puesto detrás de él), sigue derecho
+            // hasta el salto pendiente, sin crossfade ni vuelta
+            const bool inLoop = looping && pos >= ls && pos < le;
+            if (inLoop)
             {
                 if (xfLen > 0 && pos >= le - xfLen)
                 {
@@ -718,7 +751,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
 
             envelope[(size_t) i] = env;
             ++pos;
-            if (looping && pos >= le)
+            if (inLoop && pos == le)
                 pos = ls;
         }
         else
@@ -751,10 +784,15 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
     for (auto& t : s.tracks)
     {
         const bool silent = t->muted.load() || t->replaced.load() || (anySolo && ! t->solo.load());
-        const float target = silent ? 0.0f : t->gain.load();
+        const int wantPair = t->outputPair.load();
+        if (t->activePair < 0)
+            t->activePair = wantPair;
+        const bool switching = wantPair != t->activePair;   // este trozo baja a 0 por el par viejo; el siguiente sube por el nuevo
+        const float target = silent || switching ? 0.0f : t->gain.load();
 
         int l, r;
-        outputPairChannels (t->outputPair.load(), numOuts, l, r);
+        outputPairChannels (t->activePair, numOuts, l, r);
+        t->activePair = wantPair;
         float* outL = outputs[l];
         float* outR = outputs[r];
         if (outL == nullptr || outR == nullptr)
@@ -785,13 +823,13 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
         for (int i = 0; i < n; ++i)
         {
             g += gStep;
+            float tt = 1.0f;
             if (trackCurve != nullptr)
-            {
-                const auto seg = (size_t) juce::jmin (levelSegment[(size_t) i], (int) trackCurve->size() - 1);
-                tl += ((*trackCurve)[seg] - tl) * levelCoeff;
-            }
+                tt = (*trackCurve)[(size_t) juce::jmin (levelSegment[(size_t) i], (int) trackCurve->size() - 1)];
+            if (jumpIndex >= 0 && i == jumpIndex + 1)
+                tl = tt;   // tras un salto, el nivel del tramo nuevo sin rampa
             else
-                tl += (1.0f - tl) * levelCoeff;
+                tl += (tt - tl) * levelCoeff;
             const auto p = positions[(size_t) i];
             if (p < 0)
                 continue;
@@ -882,8 +920,17 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 if (! sounding)
                     continue;
             }
+            // Un salto calla lo que venía sonando justo donde se aplicó (las voces que dispare después siguen)
+            if (jumpIndex >= 0)
+                for (auto& v : lane.voices)
+                    if (v.buffer != nullptr && ! v.audition)
+                        v.cutAt = jumpIndex;
             const bool silent = lane.silenced || c.muted.load() || (anySolo && ! c.solo.load());
-            const float target = silent ? 0.0f : c.gain.load();
+            const int wantPair = c.outputPair.load();
+            if (c.activePair < 0)
+                c.activePair = wantPair;
+            const bool switching = wantPair != c.activePair;
+            const float target = silent || switching ? 0.0f : c.gain.load();
             float g = c.smoothedGain;
             const float gStep = (target - g) / (float) n;
             // Línea que dispara un instrumento del rack: sus golpes salen como notas MIDI hacia ese plugin
@@ -954,6 +1001,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                     v.pos = 0;
                     v.gain = 0.5f + 0.5f * strength;
                     v.audition = true;
+                    v.cutAt = -1;
                 }
             }
 
@@ -993,6 +1041,7 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                     v.pos = (int) late - i;   // empieza en la muestra i de este bloque (más adentro si llega tarde)
                     v.gain = 0.5f + 0.5f * strength;
                     v.audition = false;
+                    v.cutAt = -1;
                 }
             }
             // Render de las voces activas (las de "Escuchar" aparte: no llevan la envolvente del transporte)
@@ -1014,7 +1063,8 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 const float* br = v.buffer->getReadPointer (juce::jmin (1, v.buffer->getNumChannels() - 1));
                 float* dl = v.audition ? auditionL.data() : laneL.data();
                 float* dr = v.audition ? auditionR.data() : laneR.data();
-                for (int i = 0; i < n; ++i)
+                const int end = v.cutAt >= 0 ? juce::jmin (v.cutAt, n) : n;
+                for (int i = 0; i < end; ++i)
                 {
                     const int k = v.pos + i;
                     if (k < 0) continue;
@@ -1023,12 +1073,16 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                     dr[i] += br[k] * v.gain;
                 }
                 v.pos += n;
-                if (v.pos >= len)
+                if (v.pos >= len || v.cutAt >= 0)
+                {
                     v.buffer = nullptr;
+                    v.cutAt = -1;
+                }
             }
             // Ganancia, envolvente, salida y medidores
             int l, r;
-            outputPairChannels (c.outputPair.load(), numOuts, l, r);
+            outputPairChannels (c.activePair, numOuts, l, r);
+            c.activePair = wantPair;
             float* outL = outputs[l];
             float* outR = outputs[r];
             float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;
@@ -1077,6 +1131,14 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
             auto& c = lane.control;
             if (lane.plugin == nullptr)
                 continue;
+            if (jumpIndex >= 0 && lane.auditionHold <= 0)
+            {
+                // Salto: lo que sonaba (colas de platillos) no reaparece en el lugar nuevo
+                for (auto& o : lane.offs)
+                    o.note = -1;
+                lane.midi.addEvent (juce::MidiMessage::allNotesOff (1), jumpIndex);
+                lane.midi.addEvent (juce::MidiMessage::allSoundOff (1), jumpIndex);
+            }
             if (lane.auditionNoteIn >= 0)
             {
                 if (lane.auditionNoteIn < n)
@@ -1099,21 +1161,28 @@ void AudioEngine::renderChunk (LoadedSong& s, float* const* outputs, int numOuts
                 else
                     o.remaining -= n;
             }
+            // El buffer de trabajo se achica a n sin reasignar (tiene capacidad para maxBlockSize): una vista nueva de
+            // 32 canales o más pediría memoria en cada trozo
             const int chans = lane.work.getNumChannels();
-            juce::AudioBuffer<float> view (lane.work.getArrayOfWritePointers(), chans, n);
-            view.clear();
+            lane.work.setSize (chans, n, false, false, true);
+            lane.work.clear();
             if (! lane.plugin->isSuspended())
-                lane.plugin->processBlock (view, lane.midi);
+                lane.plugin->processBlock (lane.work, lane.midi);
             lane.midi.clear();
 
             const bool silent = c.muted.load() || (anySolo && ! c.solo.load());
-            const float target = silent ? 0.0f : c.gain.load();
+            const int wantPair = c.outputPair.load();
+            if (c.activePair < 0)
+                c.activePair = wantPair;
+            const bool switching = wantPair != c.activePair;
+            const float target = silent || switching ? 0.0f : c.gain.load();
             float g = c.smoothedGain;
             const float gStep = (target - g) / (float) n;
-            const float* srcL = view.getReadPointer (0);
-            const float* srcR = view.getReadPointer (juce::jmin (1, chans - 1));
+            const float* srcL = lane.work.getReadPointer (0);
+            const float* srcR = lane.work.getReadPointer (lane.outputChannels > 1 ? juce::jmin (1, chans - 1) : 0);
             int l, r;
-            outputPairChannels (c.outputPair.load(), numOuts, l, r);
+            outputPairChannels (c.activePair, numOuts, l, r);
+            c.activePair = wantPair;
             float* outL = outputs[l];
             float* outR = outputs[r];
             float peakL = 0.0f, peakR = 0.0f, sumL = 0.0f, sumR = 0.0f;

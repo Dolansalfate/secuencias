@@ -14,6 +14,32 @@ static void readClipLook (Clip& clip, const juce::var& c)
     clip.gainDb = juce::jlimit (-60.0f, 24.0f, (float) (double) c.getProperty ("gain", 0.0));
 }
 
+// Un tramo de song.json (de la canción o de una pista), acotado: un archivo editado a mano o corrupto no debe dejar
+// posiciones infinitas o sin número. false si el tramo no tiene largo
+static bool readClip (Clip& clip, const juce::var& c)
+{
+    constexpr double maxSeconds = 3.0 * 3600.0;   // en muestras cabe en un int aun a 192 kHz
+    const auto seconds = [&c] (const char* key)
+    {
+        const double v = (double) c.getProperty (key, 0.0);
+        return std::isfinite (v) ? juce::jlimit (0.0, maxSeconds, v) : 0.0;
+    };
+    clip.srcStart = seconds ("start");
+    clip.srcEnd   = juce::jmax (clip.srcStart, seconds ("end"));
+    clip.position = seconds ("at");
+    readClipLook (clip, c);
+    return clip.srcEnd > clip.srcStart + 1.0e-6;
+}
+
+// Un nombre de archivo o de carpeta guardado en un json: tal cual si es un nombre suelto (sin separadores ni "." o
+// ".."), así uno con "#" o "," no se pierde (createLegalFileName se los quitaba); si no, vacío
+static juce::String plainName (const juce::String& name)
+{
+    if (name.isEmpty() || name == "." || name == ".." || name.containsAnyOf ("/\\"))
+        return {};
+    return name;
+}
+
 static void writeClipLook (juce::DynamicObject& o, const Clip& c)
 {
     if (c.muted)
@@ -70,11 +96,20 @@ void SongInfo::mergeEqualTempoRegions()
 {
     for (int i = (int) tempoRegions.size(); --i >= 1;)
     {
-        const auto& a = tempoRegions[(size_t) i - 1];
+        auto& a = tempoRegions[(size_t) i - 1];
         const auto& b = tempoRegions[(size_t) i];
+        if (b.start - a.start < 1.0e-6)
+        {
+            tempoRegions.erase (tempoRegions.begin() + i - 1);   // dos en el mismo punto: la de antes no dura nada
+            continue;
+        }
         if (std::abs (a.origBpm - b.origBpm) < 0.05 && std::abs (a.playBpm - b.playBpm) < 0.05 && a.transpose == b.transpose
             && a.curve == TempoRegion::jump && a.gridCurve == TempoRegion::jump)
+        {
+            a.curve = b.curve;   // la unión llega a la siguiente con la transición que tenía b
+            a.gridCurve = b.gridCurve;
             tempoRegions.erase (tempoRegions.begin() + i);
+        }
     }
 }
 
@@ -202,7 +237,11 @@ void Analysis::doubleBeats (int from, int toExclusive, int meterIn)
     {
         out.push_back (beats[(size_t) i]);
         if (i + 1 < to)
-            out.push_back ({ 0.5 * (beats[(size_t) i].seconds + beats[(size_t) i + 1].seconds), 1 });
+        {
+            auto mid = beats[(size_t) i];   // con su figura (x/8 sigue en x/8)
+            mid.seconds = 0.5 * (beats[(size_t) i].seconds + beats[(size_t) i + 1].seconds);
+            out.push_back (mid);
+        }
     }
     beats.erase (beats.begin() + from, beats.begin() + to);
     beats.insert (beats.begin() + from, out.begin(), out.end());
@@ -246,8 +285,15 @@ void Analysis::replaceBeatsWithGrid (double fromSeconds, double toSeconds, doubl
     const int to = firstBeatAtOrAfter (toSeconds);
     std::vector<Beat> grid;
     const double step = 60.0 / gridBpm;
+    // La figura del compás que tenía el tramo (o el anterior) se conserva
+    const int unit = from < (int) beats.size() ? beats[(size_t) from].unit : (from > 0 ? beats[(size_t) from - 1].unit : 4);
     for (double t = fromSeconds; t < toSeconds - 1.0e-6; t += step)
-        grid.push_back ({ t, 1 });
+    {
+        Beat b;
+        b.seconds = t;
+        b.unit = unit;
+        grid.push_back (b);
+    }
     beats.erase (beats.begin() + from, beats.begin() + to);
     beats.insert (beats.begin() + from, grid.begin(), grid.end());
     renumberBeats (from, meterIn, from + (int) grid.size());
@@ -586,36 +632,21 @@ SongInfo Library::readSong (const juce::File& folder) const
         const auto clips = json.getProperty ("clips", juce::var());
         if (auto* arr = clips.getArray())
             for (auto& c : *arr)
-            {
-                Clip clip;
-                clip.srcStart = juce::jmax (0.0, (double) c.getProperty ("start", 0.0));
-                clip.srcEnd   = juce::jmax (clip.srcStart, (double) c.getProperty ("end", 0.0));
-                clip.position = juce::jmax (0.0, (double) c.getProperty ("at", 0.0));
-                readClipLook (clip, c);
-                if (clip.srcEnd > clip.srcStart + 1.0e-6)
+                if (Clip clip; readClip (clip, c))
                     s.clips.push_back (clip);
-            }
         std::stable_sort (s.clips.begin(), s.clips.end(), [] (const Clip& a, const Clip& b) { return a.position < b.position; });
         // Pistas con su propio arreglo (las de antes no tienen: siguen los tramos de la canción)
         if (auto* arr = json.getProperty ("trackClips", juce::var()).getArray())
             for (auto& tc : *arr)
             {
                 TrackClips own;
-                own.stem = juce::File::createLegalFileName (tc.getProperty ("stem", "").toString());
+                own.stem = plainName (tc.getProperty ("stem", "").toString());
                 if (own.stem.isEmpty() || s.ownClips (own.stem) != nullptr)
                     continue;
                 if (auto* list = tc.getProperty ("clips", juce::var()).getArray())
                     for (auto& c : *list)
-                    {
-                        Clip clip;
-                        clip.srcStart = juce::jmax (0.0, (double) c.getProperty ("start", 0.0));
-                        clip.srcEnd   = juce::jmax (clip.srcStart, (double) c.getProperty ("end", 0.0));
-                        clip.position = juce::jmax (0.0, (double) c.getProperty ("at", 0.0));
-                        readClipLook (clip, c);
-                        if (std::isfinite (clip.srcStart) && std::isfinite (clip.srcEnd) && std::isfinite (clip.position)
-                            && clip.srcEnd > clip.srcStart + 1.0e-6)
+                        if (Clip clip; readClip (clip, c))
                             own.clips.push_back (clip);
-                    }
                 std::stable_sort (own.clips.begin(), own.clips.end(), [] (const Clip& a, const Clip& b) { return a.position < b.position; });
                 s.trackClips.push_back (own);   // vacío = la pista no suena (se borró todo su audio)
             }
@@ -624,9 +655,11 @@ SongInfo Library::readSong (const juce::File& folder) const
             s.tempoRegions = detectTempoRegions (s.analysis, s.bpm);
 
         const auto stems = json.getProperty ("stems", juce::var());
+        std::vector<int> keptStems;   // índice en el json de cada pista que quedó (las de archivos que ya no están se saltan)
         if (auto* arr = stems.getArray())
-            for (auto& st : *arr)
+            for (int index = 0; index < arr->size(); ++index)
             {
+                const auto& st = arr->getReference (index);
                 StemInfo si;
                 si.fileName   = st.getProperty ("file", "").toString();
                 si.name       = st.getProperty ("name", si.fileName).toString();
@@ -652,8 +685,33 @@ SongInfo Library::readSong (const juce::File& folder) const
                     t.pan         = juce::jlimit (-1.0f, 1.0f, (float) (double) tg.getProperty ("pan", 0.0));
                 }
                 if (si.fileName.isNotEmpty() && isAudioFile (folder.getChildFile (si.fileName)))
+                {
                     s.stems.push_back (si);
+                    keptStems.push_back (index);
+                }
             }
+        // El nivelado por pista va por índice: si faltó una pista, los valores de las que siguen se corren a su lugar
+        if (auto* arr = stems.getArray(); arr != nullptr && (int) keptStems.size() != arr->size())
+        {
+            const auto keep = [&keptStems] (std::vector<double>& v)
+            {
+                std::vector<double> out;
+                for (int k : keptStems)
+                    if (k < (int) v.size())
+                        out.push_back (v[(size_t) k]);
+                    else
+                        break;   // lo que falte lo completa fitStemArrays
+                v = std::move (out);
+            };
+            keep (s.headStemGainsDb);
+            keep (s.headStemLufs);
+            keep (s.stemSongLufs);
+            for (auto& m : s.markers)
+            {
+                keep (m.stemGainsDb);
+                keep (m.stemLufs);
+            }
+        }
     }
 
     // Archivos de audio nuevos que no estén en song.json
@@ -939,8 +997,8 @@ void Library::loadShows()
             if (auto* list = sv.getProperty ("songs", juce::var()).getArray())
                 for (auto& f : *list)
                 {
-                    const auto folder = juce::File::createLegalFileName (f.toString());
-                    if (folder.isNotEmpty() && folder != "." && folder != "..")
+                    const auto folder = plainName (f.toString());
+                    if (folder.isNotEmpty())
                         s.folders.addIfNotAlreadyThere (folder);
                 }
             shows.push_back (s);
@@ -1056,9 +1114,9 @@ int Library::importProject (const juce::File& folder)
     return (int) songs.size() - 1;
 }
 
-bool Library::replaceStems (int index, const juce::File& resultFolder)
+bool Library::replaceStems (int index, const juce::File& resultFolder, bool fromArrangement)
 {
-    return replaceStemFiles (index, -1, resultFolder);
+    return replaceStemFiles (index, -1, resultFolder, fromArrangement);
 }
 
 bool Library::replaceStem (int index, int stemIndex, const juce::File& resultFolder)
@@ -1066,7 +1124,7 @@ bool Library::replaceStem (int index, int stemIndex, const juce::File& resultFol
     return replaceStemFiles (index, stemIndex, resultFolder);
 }
 
-bool Library::replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder)
+bool Library::replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder, bool fromArrangement)
 {
     if (! juce::isPositiveAndBelow (index, (int) songs.size()) || audioFilesIn (resultFolder).isEmpty())
         return false;
@@ -1094,6 +1152,11 @@ bool Library::replaceStemFiles (int index, int onlyStem, const juce::File& resul
         newFiles.add (dest.getFileName());
     }
     auto song = readSong (folder);   // conserva nombre, marcadores, análisis, tempo, cortes; los stems nuevos entran traducidos
+    if (fromArrangement)
+    {
+        song.clips.clear();          // las pistas nuevas ya traen el arreglo (cortes, silencios, fundidos)
+        song.trackClips.clear();
+    }
     // Una pista con su propio arreglo que se separa en partes (la batería): cada parte se queda con ese arreglo. Los
     // arreglos de pistas que ya no están se quitan.
     if (const auto* own = song.ownClips (replacedFile); own != nullptr && replacedFile.isNotEmpty())

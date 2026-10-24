@@ -40,6 +40,24 @@ struct LoadedTrack
     float smoothedGain = 1.0f;                // solo hilo de audio
     float smoothedPan = 0.0f;                 // solo hilo de audio
     float levelSmooth = 1.0f;                 // ganancia de nivelado por pista suavizada (solo hilo de audio)
+    int activePair = -1;                      // par por el que suena (solo hilo de audio): al cambiar outputPair se
+                                              // apaga en un trozo por el viejo y entra con rampa por el nuevo
+
+    // Lo que una pista renderizada (arreglo, estirado) hereda de la que la originó: identidad y mezcla, no el audio.
+    // Un solo lugar para no olvidar un control (el balance se perdía en cada render en la v0.13.0).
+    void copyControlsFrom (const LoadedTrack& src)
+    {
+        name = src.name;
+        stemIndex = src.stemIndex;
+        songTime = src.songTime;
+        gain = src.gain.load();
+        smoothedGain = gain.load();
+        muted = src.muted.load();
+        solo = src.solo.load();
+        outputPair = src.outputPair.load();   // `replaced` no: lo calcula la UI (refreshReplaced) al instalar la canción
+        pan = src.pan.load();
+        smoothedPan = pan.load();
+    }
 };
 
 struct LoadedSong
@@ -82,6 +100,7 @@ struct SamplerLane
         int pos = 0;
         float gain = 0.0f;
         bool audition = false;                   // "Escuchar": suena aunque el transporte esté detenido (sin la envolvente)
+        int cutAt = -1;                          // un salto en este trozo: calla en esa muestra (la envolvente está en 0)
     };
     Voice voices[16];
 };
@@ -114,6 +133,7 @@ struct InstrumentLane
     juce::MidiBuffer midi;                       // eventos del trozo en curso
     int latency = 0;                             // plugin->getLatencySamples()
     int holdSamples = 2205;                      // duración de cada nota (50 ms) antes del noteOff
+    int outputChannels = 2;                      // salidas del plugin (1 = mono: va a los dos lados)
     // Solo hilo de audio: note-offs pendientes (muestras contadas desde el inicio del trozo actual)
     struct PendingOff
     {
@@ -146,6 +166,7 @@ struct RecordSetup
     bool monitor = true;
     float monitorGain = 1.0f;
     int monitorPair = 0;
+    bool followTransport = false;     // pista: se graba solo mientras la canción suena (la toma se alinea con su inicio)
 };
 
 // Ganancia por tramo (nivelado): gains[i] rige desde positions[i] hasta positions[i+1].
@@ -212,7 +233,6 @@ public:
 
     // Ganancia general (lineal) aplicada a todas las salidas con rampa
     void setMasterGain (float linear)  { masterGain = juce::jmax (0.0f, linear); }
-    float getMasterGain() const        { return masterGain.load(); }
     // Ganancia de la canción (nivelado entre canciones), lineal, también con rampa y sobre todas las salidas
     void setSongGain (float linear)    { songGain = juce::jmax (0.0f, linear); }
     // Ganancia por tramo (nivelado dentro de la canción), aplicada a las pistas y no al click
@@ -220,15 +240,15 @@ public:
     // nullptr = sin triggers; se cambia bajo songLock. Un conjunto que reemplaza a otro con la canción sonando toma
     // su estado en el hilo de audio (SamplerSet::previous): las voces que suenan siguen y ningún golpe se repite.
     void setSamplers (std::shared_ptr<SamplerSet>);
-    std::shared_ptr<SamplerSet> getSamplers() const          { return samplers; }
+    std::shared_ptr<SamplerSet> getSamplers() const          { const juce::SpinLock::ScopedLockType sl (songLock); return samplers; }
     // Las líneas de las pistas MIDI van en un conjunto aparte: se rehacen al instante al editar un golpe, sin
     // volver a detectar los triggers en vivo. Mismo trato que setSamplers (setSong también lo descarta).
     void setMidiSamplers (std::shared_ptr<SamplerSet>);
-    std::shared_ptr<SamplerSet> getMidiSamplers() const      { return midiSamplers; }
+    std::shared_ptr<SamplerSet> getMidiSamplers() const      { const juce::SpinLock::ScopedLockType sl (songLock); return midiSamplers; }
     // Instrumentos del rack: independientes de la canción (setSong no los toca); el conjunto anterior
     // se libera fuera del lock, en el hilo que llama (la UI), donde pueden morir los plugins quitados.
     void setInstruments (std::shared_ptr<InstrumentSet>);
-    std::shared_ptr<InstrumentSet> getInstruments() const    { return instruments; }
+    std::shared_ptr<InstrumentSet> getInstruments() const    { const juce::SpinLock::ScopedLockType sl (songLock); return instruments; }
     // "Escuchar": un golpe de una línea del sampler ahora mismo, aunque el transporte esté detenido. midiTrack < 0 = el
     // trigger en vivo del stem `stemIndex`; si no, la fila `midiPad` de esa pista MIDI. Con banco suena la muestra de
     // esa velocidad (1..127, la misma curva que un golpe de pista MIDI); con instrumento, la nota de la línea va al
@@ -247,7 +267,6 @@ public:
 
     double getSampleRate() const    { return sampleRate.load(); }
     int getNumOutputChannels() const { return numOutputs.load(); }
-    int getNumInputChannels() const  { return numInputs.load(); }
     int getInputLatency() const      { return inputLatency.load(); }    // muestras, según el dispositivo
     int getOutputLatency() const     { return outputLatency.load(); }
 
@@ -261,7 +280,8 @@ public:
     juce::int64 getDroppedSamples() const          { return droppedSamples.load(); }        // no cupieron en la cola
     float takeInputPeak()                          { return inputPeak.exchange (0.0f); }    // pico de la entrada armada
 
-    std::atomic<bool> needsReload { false };   // cambió la frecuencia del dispositivo
+    std::atomic<bool> needsReload { false };   // la canción cargada quedó a otra frecuencia que el dispositivo
+    std::atomic<bool> rateChanged { false };   // cambió la frecuencia del dispositivo (los plugins se vuelven a preparar)
 
     // Si el dispositivo reportó un error (por ejemplo JACK se cerró), lo devuelve una vez.
     bool takeDeviceError (juce::String& message);
@@ -304,6 +324,7 @@ private:
     std::atomic<float> songGain { 1.0f };
 
     std::atomic<double> sampleRate { 44100.0 };
+    double lastDeviceRate = 0.0;                // la del último audioDeviceAboutToStart (0 = aún ninguno)
     std::atomic<int> numOutputs { 2 };
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, pendingSeek { -1 }, songLength { 0 };

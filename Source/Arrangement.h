@@ -13,6 +13,7 @@
 namespace arrangement
 {
     constexpr double fadeSeconds = 0.005;   // fundido en los bordes de cada tramo
+    constexpr double minPiece = 0.001;      // un corte a menos de esto de un borde no parte el tramo
 
     void ensureClips (std::vector<Clip>&, double sourceLength);         // vacío -> un tramo con todo el audio
     bool isIdentity (const std::vector<Clip>&, double sourceLength);    // un solo tramo con todo el audio en 0

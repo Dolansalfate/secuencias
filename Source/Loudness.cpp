@@ -107,7 +107,11 @@ namespace
         sum = 0.0;
         count = 0;
         for (size_t i = from; i < to; ++i)
-            if (toLufs (blockPower[i]) > relative) { sum += blockPower[i]; ++count; }
+            if (const double l = toLufs (blockPower[i]); l > -70.0 && l > relative)   // las dos puertas (BS.1770)
+            {
+                sum += blockPower[i];
+                ++count;
+            }
         return count > 0 ? toLufs (sum / (double) count) : loudness::unknown;
     }
 

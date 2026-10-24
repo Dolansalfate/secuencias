@@ -268,7 +268,6 @@ namespace ui
         }
 
         void setIcon (TransportIcon i)   { if (i != icon) { icon = i; repaint(); } }
-        TransportIcon getIcon() const    { return icon; }
 
         void paintButton (juce::Graphics& g, bool over, bool down) override
         {

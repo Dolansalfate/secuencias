@@ -38,7 +38,8 @@ El mismo código sigue compilando en macOS.
 - **Exportar la mezcla** (Ctrl+E, o clic derecho en la canción > "Exportar la mezcla..."): un archivo
   con la canción tal como suena (cortes, tempo, tono, faders, mute, nivelado, triggers e instrumentos)
   para mandar a los demás músicos. Eliges nombre, formato (WAV, o MP3 de 320 kbps si tienes ffmpeg:
-  `sudo apt install ffmpeg`), el click (sin click, mezclado o en un archivo aparte), si quieres además
+  `sudo apt install ffmpeg`), el click (sin click, mezclado o en un archivo aparte; si lo pides, sale aunque lo
+  tengas apagado para tocar), si quieres además
   cada pista por separado (en una carpeta, sumando exactamente la mezcla) y el nivel (como suena, o
   llevado al objetivo de LUFS con limitador). Tarda unos segundos; mientras tanto la app no suena.
 - **Vista grande** (F11, o el botón "Vista grande" en el Show): esconde la vista de arreglo y lo
@@ -157,7 +158,9 @@ El mismo código sigue compilando en macOS.
   golpe. Con "Es trigger" la pista original se silencia; con "Trigger y audio" suenan las dos. Un
   mismo instrumento puede recibir varias pistas (bombo a la nota 36, caja a la 38...). Los
   instrumentos son globales: sirven para todas las canciones del setlist. Solo se cargan
-  instrumentos (no efectos) y se usa su salida estéreo principal.
+  instrumentos (no efectos) y se usa su salida estéreo principal. Si un plugin cierra la app al cargarse,
+  la próxima vez la app abre sin él y el menú "Instrumentos" lo muestra con un aviso: quítalo y vuelve a
+  añadirlo para probar de nuevo. Mientras se buscan plugins no se pueden añadir ni quitar.
 - **Notas de texto** ("+ Nota" o tecla N, o clic derecho en la fila de notas de la regla):
   un comentario anclado a un punto de la canción, por ejemplo "corte de batería, entra solo
   el bajo" en el compás 111, con los segundos que debe quedarse visible. En la guía de
@@ -274,7 +277,8 @@ El mismo código sigue compilando en macOS.
 - **Separar canción (IA)**: el mismo diálogo trae las opciones (pistas, calidad y batería entera o en
   partes; también en "Ajustes IA", que usan arrastrar un archivo y el armado de mix). Separa la canción seleccionada (sus pistas se reemplazan por los
   stems y se conservan marcadores, análisis, tempo y cortes; el audio anterior queda en la
-  subcarpeta "original") o un archivo que elijas, que se agrega al setlist. Con "Batería en
+  subcarpeta "original") o un archivo que elijas, que se agrega al setlist. Si termina mientras esa canción suena,
+  no se corta: sigue sonando como estaba y se carga con sus pistas nuevas cuando la detienes. Con "Batería en
   partes", la batería sale además dividida en bombo, caja, toms, hi-hat, ride y
   crash; y en una canción ya separada, el mismo botón ofrece "Solo la batería en partes".
   Bombo y caja salen bien; toms, hi-hat y platillos se mezclan más entre sí. Requiere la

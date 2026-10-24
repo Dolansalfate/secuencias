@@ -30,6 +30,12 @@ TempoTrackView::TempoTrackView (int headerWidth) : header (headerWidth)
 
 void TempoTrackView::setBands (const std::vector<TempoBandView>& b)
 {
+    // Un arrastre en curso sigue solo si las secciones son las mismas (si no, su índice apuntaría a otra o a ninguna)
+    bool sameLayout = b.size() == bands.size();
+    for (size_t i = 0; sameLayout && i < b.size(); ++i)
+        sameLayout = std::abs (b[i].start - bands[i].start) < 1.0e-6;
+    if (! sameLayout)
+        bpmDrag = edgeDrag = -1;
     bands = b;
     if (selected >= (int) bands.size())
         selected = -1;
@@ -38,6 +44,8 @@ void TempoTrackView::setBands (const std::vector<TempoBandView>& b)
 
 void TempoTrackView::setAnalysis (const Analysis& a)
 {
+    if (a.beats.size() != analysis.beats.size())
+        sigDrag = -1;   // los tiempos cambiaron: el cambio de compás arrastrado ya no es ese
     analysis.beats = a.beats;
     analysis.meter = a.meter;
     runs = analysis.signatureRuns();
@@ -613,7 +621,7 @@ void TempoTrackView::mouseDrag (const juce::MouseEvent& e)
         previewBpm = juce::jlimit (20.0, 400.0, e.mods.isShiftDown() ? std::round (raw * 10.0) / 10.0 : roundBpm (raw));
         repaint();
     }
-    else if (edgeDrag > 0)
+    else if (edgeDrag > 0 && edgeDrag < (int) bands.size())
     {
         const double lo2 = bands[(size_t) edgeDrag - 1].start + 0.25;
         const double hi2 = bands[(size_t) edgeDrag].end - 0.25;

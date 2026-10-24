@@ -154,6 +154,7 @@ public:
             captureFile = juce::File (path);
             captureLive = live;
             captureTicks = 0;
+            captureElapsed = 0;
             captureTimer.startTimer (250);
         }
     }
@@ -207,7 +208,8 @@ public:
         const bool ready = mc == nullptr || (! mc->isLoading() && captureAnalysisStarted && ! mc->isAnalyzing() && ! mc->isLeveling()
                                              && ! mc->isRendering() && ! mc->isSeparating() && ! mc->isLoadingInstruments()
                                              && ! mc->isMixBusy() && ! mc->isPreloadBusy() && ! mc->isExporting());
-        if ((ready && ++captureTicks >= 4) || captureTicks++ > 2400)   // tope: 10 min (los renders largos)
+        // Lista durante 4 ticks seguidos, o el tope de 10 min (renders largos) que no se reinicia
+        if ((ready && ++captureTicks >= 4) || ++captureElapsed > 2400)
         {
             captureTimer.stopTimer();
             if (mainWindow != nullptr)
@@ -247,7 +249,14 @@ public:
             setContentOwned (new MainComponent(), true);
             setResizable (true, true);
             setResizeLimits (1000, 640, 5000, 4000);
-            centreWithSize (getWidth(), getHeight());
+            // Que quepa en la pantalla (un portátil de 1366 x 768 no tiene 860 de alto libres)
+            int w = getWidth(), h = getHeight();
+            if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            {
+                w = juce::jlimit (1000, juce::jmax (1000, display->userArea.getWidth()), w);
+                h = juce::jlimit (640, juce::jmax (640, display->userArea.getHeight()), h);
+            }
+            centreWithSize (w, h);
             setVisible (true);
             if (auto* c = getContentComponent())
                 c->grabKeyboardFocus();
@@ -310,7 +319,7 @@ private:
     bool captureTempoStretches = true;
     juce::File captureExport;   // --exportar=<carpeta>: exportar la mezcla de la canción cargada
     int captureTranspose = 0, captureCutMode = 0, captureQuality = 0, captureStems = 0;
-    int captureTicks = 0;
+    int captureTicks = 0, captureElapsed = 0;
 };
 
 START_JUCE_APPLICATION (SecuenciasApp)

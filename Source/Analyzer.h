@@ -34,10 +34,11 @@ public:
     // "A minor" -> "La menor"
     static juce::String displayKey (const juce::String& madmomKey);
     static bool isDrumsTrack (const juce::String& name, const juce::String& fileName);
-    // Mezcla las pistas indicadas (unidad, normalizada a 0.9 de pico) y las escribe como WAV de 24 bits
+    // Mezcla las pistas indicadas (unidad, normalizada a 0.9 de pico) y las escribe como WAV (24 bits salvo otro pedido).
+    // outRate > 0: remuestreada a esa frecuencia (alineada: sin el retardo del sinc). El análisis la pide a 44,1 kHz y
+    // 16 bits, lo único que madmom lee sin ffmpeg
     static bool writeMix (const LoadedSong&, const std::vector<bool>& include, double sampleRate,
-                          const juce::File& out, juce::String& error);
-    static const char* pythonScript();   // contenido de analizar.py
+                          const juce::File& out, juce::String& error, double outRate = 0.0, int bitsPerSample = 24);
 
 private:
     void run() override;

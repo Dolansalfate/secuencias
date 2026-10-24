@@ -1,4 +1,5 @@
 #include "StageView.h"
+#include <cmath>
 #include "UiUtils.h"
 #include "Library.h"
 
@@ -14,8 +15,21 @@ StageView::StageView()
     setWantsKeyboardFocus (true);
 }
 
+// Lo mismo que ya se dibujó (detenida, por ejemplo): no se repinta a pantalla completa 30 veces por segundo
+static bool sameState (const StageState& a, const StageState& b)
+{
+    const auto near = [] (double x, double y) { return std::abs (x - y) < 1.0e-6; };
+    return a.song == b.song && a.section == b.section && a.nextSection == b.nextSection && a.chord == b.chord
+           && a.nextChord == b.nextChord && a.key == b.key && a.nextSong == b.nextSong && a.note == b.note && a.nextNote == b.nextNote
+           && near (a.nextNoteIn, b.nextNoteIn) && a.bar == b.bar && a.beat == b.beat && a.beatsInBar == b.beatsInBar
+           && near (a.bpm, b.bpm) && near (a.position, b.position) && near (a.length, b.length) && near (a.beatProgress, b.beatProgress)
+           && a.playing == b.playing && a.hasAnalysis == b.hasAnalysis && a.hasSong == b.hasSong;
+}
+
 void StageView::setState (const StageState& s)
 {
+    if (sameState (s, state))
+        return;
     state = s;
     repaint();
 }

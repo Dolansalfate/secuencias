@@ -41,7 +41,6 @@ public:
     // Solo la batería: parte un archivo de batería ya separado en bombo, caja, toms, hi-hat, ride y
     // crash (MDX23C DrumSep de audio-separator). El resultado queda en getResultFolder().
     bool startDrumParts (const juce::File& drumsFile, const juce::String& pythonPath, const juce::String& songName);
-    bool isDrumPartsOnly() const { return drumsOnly; }
     void cancel();
     void reset();      // vuelve a idle y borra temporales (espera a que el hilo termine si hace falta)
 
@@ -51,7 +50,6 @@ public:
     juce::File getResultFolder() const { return resultFolder; }
     juce::String getSongName() const   { return songName; }
     juce::String getPlanDescription() const { return describe (options); }   // válido tras start()
-    juce::File getWorkFolder() const   { return workDir; }                   // temporales (diagnóstico)
 
     // --- Utilidades sin estado (con tests) ---
     // Etapas que se ejecutan para unas opciones dadas.

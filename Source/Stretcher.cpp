@@ -137,13 +137,7 @@ namespace stretcher
             if (shouldAbort && shouldAbort())
                 return nullptr;
             auto t = std::make_unique<LoadedTrack>();
-            t->name = src->name;
-            t->stemIndex = src->stemIndex;
-            t->gain = src->gain.load();
-            t->smoothedGain = t->gain.load();
-            t->muted = src->muted.load();
-            t->solo = src->solo.load();
-            t->outputPair = src->outputPair.load();
+            t->copyControlsFrom (*src);
             t->buffer = renderBuffer (src->buffer, map, sr, shouldAbort);
             if (t->buffer.getNumSamples() == 0)
                 return nullptr;   // abortado

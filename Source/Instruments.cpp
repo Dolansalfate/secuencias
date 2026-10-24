@@ -29,6 +29,26 @@ namespace
     };
 }
 
+namespace
+{
+    // "Pedal" de la carga: los ids de los plugins que se están creando o recibiendo su estado. Si la app se cierra en
+    // medio, al abrirla quedan anotados y ese instrumento no se vuelve a cargar solo (si no, la app no abriría más)
+    juce::StringArray pedalIds (const juce::File& pedal)
+    {
+        auto ids = juce::StringArray::fromLines (pedal.loadFileAsString());
+        ids.removeEmptyStrings();
+        return ids;
+    }
+
+    void writePedal (const juce::File& pedal, const juce::StringArray& ids)
+    {
+        if (ids.isEmpty())
+            pedal.deleteFile();
+        else
+            pedal.replaceWithText (ids.joinIntoString ("\n"));
+    }
+}
+
 //==============================================================================
 class InstrumentRack::Scanner : public juce::Thread
 {
@@ -153,6 +173,7 @@ std::shared_ptr<InstrumentLane> InstrumentRack::makeLane (Slot& s, std::unique_p
     lane->holdSamples = juce::jmax (1, (int) (0.05 * sr));
     const int channels = juce::jmax (2, plugin->getTotalNumInputChannels(), plugin->getTotalNumOutputChannels());
     lane->work.setSize (channels, AudioEngine::maxBlockSize);
+    lane->outputChannels = juce::jmax (1, plugin->getTotalNumOutputChannels());
     lane->work.clear();
     lane->midi.ensureSize (16384);
     lane->plugin = std::move (plugin);
@@ -176,6 +197,11 @@ void InstrumentRack::startLoad (int id, std::function<void (int, const juce::Str
     if (s == nullptr)
         return;
     s->loading = true;
+    {
+        auto pedal = pedalIds (loadingPedal());
+        pedal.addIfNotAlreadyThere (juce::String (id));
+        writePedal (loadingPedal(), pedal);
+    }
     std::weak_ptr<int> weak (alive);
     formats.createPluginInstanceAsync (s->description, engine.getSampleRate(), AudioEngine::maxBlockSize,
                                        [this, id, done, weak] (std::unique_ptr<juce::AudioPluginInstance> instance, const juce::String& error)
@@ -192,6 +218,11 @@ void InstrumentRack::startLoad (int id, std::function<void (int, const juce::Str
         {
             sl->error.clear();
             sl->lane = makeLane (*sl, std::move (instance));
+        }
+        {
+            auto pedal = pedalIds (loadingPedal());   // cargó (o falló sin cerrar la app): se borra del pedal
+            pedal.removeString (juce::String (id));
+            writePedal (loadingPedal(), pedal);
         }
         publish();
         save();
@@ -211,6 +242,11 @@ void InstrumentRack::add (const juce::PluginDescription& description, std::funct
 
 void InstrumentRack::remove (int id)
 {
+    {
+        auto pedal = pedalIds (loadingPedal());
+        pedal.removeString (juce::String (id));
+        writePedal (loadingPedal(), pedal);
+    }
     for (size_t i = 0; i < slots.size(); ++i)
         if (slots[i].id == id)
         {
@@ -326,6 +362,7 @@ void InstrumentRack::restore()
     if (xml == nullptr || ! xml->hasTagName ("INSTRUMENTOS"))
         return;
     nextId = juce::jmax (1, xml->getIntAttribute ("siguienteId", 1));
+    const auto crashed = pedalIds (loadingPedal());
     for (auto* e : xml->getChildWithTagNameIterator ("INSTRUMENTO"))
     {
         auto* d = e->getChildByName ("PLUGIN");
@@ -344,7 +381,12 @@ void InstrumentRack::restore()
     }
     std::vector<int> ids;
     for (auto& s : slots)
-        ids.push_back (s.id);
+    {
+        if (crashed.contains (juce::String (s.id)))
+            s.error = tr ("no se cargó: la última vez cerró la app al cargarse (quítalo y vuelve a añadirlo para probar de nuevo)");
+        else
+            ids.push_back (s.id);
+    }
     for (int id : ids)
         startLoad (id, {});
 }
@@ -352,8 +394,20 @@ void InstrumentRack::restore()
 void InstrumentRack::scan (const juce::FileSearchPath& extraFolders, std::function<void (float, const juce::String&)> progress,
                            std::function<void (int)> done)
 {
+    if (isScanning())
+        return;
     scanner.reset();
-    scanner = std::make_unique<Scanner> (*this, extraFolders, std::move (progress), std::move (done));
+    // Al terminar (también si se canceló) el hilo ya salió de run(): se suelta sin esperar
+    std::weak_ptr<int> weak (alive);
+    auto finished = [this, weak, done = std::move (done)] (int found)
+    {
+        if (weak.expired())
+            return;
+        scanner.reset();
+        if (done)
+            done (found);
+    };
+    scanner = std::make_unique<Scanner> (*this, extraFolders, std::move (progress), std::move (finished));
     scanner->startThread();
 }
 
@@ -364,7 +418,10 @@ bool InstrumentRack::isScanning() const
 
 void InstrumentRack::cancelScan()
 {
-    scanner.reset();
+    // Sin esperar ni matar el hilo (eso congelaba la ventana hasta 10 s y vetaba el plugin que se estaba probando):
+    // termina el archivo en curso y avisa como al terminar
+    if (scanner != nullptr)
+        scanner->signalThreadShouldExit();
 }
 
 juce::Array<juce::PluginDescription> InstrumentRack::knownInstruments() const

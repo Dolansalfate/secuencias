@@ -760,8 +760,18 @@ namespace mix
                 const int meter = meterOf (src);
                 const int count = juce::jlimit (0, MixSegment::maxSilenceBars, seg.silenceBars) * meter;
                 const double beat = 60.0 / juce::jmax (1.0, p.playBpm);
+                // La cuenta sigue el compás del tramo: si entra en el 3 (una anacrusa), el último tiempo del silencio es el 2
+                int firstInBar = 1, unit = 4;
+                for (auto& b : an.beats)
+                    if (b.seconds >= p.srcStart - beatTolerance)
+                    {
+                        firstInBar = b.beatInBar;
+                        unit = b.unit;
+                        break;
+                    }
                 for (int k = 0; k < count; ++k)
-                    beats.push_back ({ Beat { p.outStart - p.silence + k * beat, k % meter + 1 }, i, 30.0 / juce::jmax (1.0, p.playBpm) });
+                    beats.push_back ({ Beat { p.outStart - p.silence + k * beat, (k + firstInBar - 1) % meter + 1, unit }, i,
+                                       30.0 / juce::jmax (1.0, p.playBpm) });
             }
             for (auto& b : an.beats)
                 if (b.seconds >= p.srcStart - beatTolerance && b.seconds < p.srcEnd - beatTolerance)
@@ -1292,7 +1302,7 @@ namespace mix
             const int release = juce::jmax (1, (int) std::lround (limiterRelease * sampleRate));
             const float ceiling = juce::Decibels::decibelsToGain ((float) limiterCeilingDb);
             double levelDb = juce::jlimit (-maxLevelDb, maxLevelDb, target - measured);
-            double after = measured + levelDb, reduction = 0.0;
+            double after = 0.0, reduction = 0.0;   // (cada salida del bucle lo fija)
             for (int pass = 0;; ++pass)
             {
                 // El limitador siempre es el de la ganancia final (cada corrección vuelve a pasar por aquí)
@@ -1328,7 +1338,7 @@ namespace mix
         {
             const auto& p = sp.place;
             const double fadeOutStart = p.outEnd - sp.fadeOut;
-            const double leadStart = p.outStart - w.lead;
+            const double leadStart = juce::jmax (0.0, p.outStart - w.lead);   // (en el primer tramo, el mix empieza en 0: entra ahí con su fundido)
             const double tailFadeStart = p.outEnd + w.tail - w.tailFade;
             const float* inL = aligned.getReadPointer (0);
             const float* inR = aligned.getReadPointer (1);
@@ -1701,13 +1711,30 @@ namespace mix
         // Cada sección nueva conserva el tempo y el tono de reproducción que tenía la vieja de su tramo (se busca con el
         // mismo instante de la fuente, llevado hacia atrás)
         auto regions = generated.tempoRegions;
-        for (auto& r : regions)
-            if (double old = 0.0; remapTime (to, from, r.start + 0.01, old))
+        for (size_t i = 0; i < regions.size(); ++i)
+        {
+            auto& r = regions[i];
+            // Se busca con el primer instante con audio de la sección: la de un tramo con compases de silencio antes
+            // empieza en el silencio, y ahí no hay fuente con qué encontrar la sección vieja
+            double probe = r.start + 0.01;
+            const bool covered = std::any_of (to.begin(), to.end(), [probe] (const MixPiece& p) { return probe >= p.outStart && probe < p.outEnd; });
+            if (! covered)
+            {
+                const double end = i + 1 < regions.size() ? regions[i + 1].start : std::numeric_limits<double>::max();
+                double first = -1.0;
+                for (auto& p : to)
+                    if (p.outStart >= r.start - 1.0e-6 && p.outStart < end && (first < 0.0 || p.outStart < first))
+                        first = p.outStart;
+                if (first >= 0.0)
+                    probe = first + 0.01;
+            }
+            if (double old = 0.0; remapTime (to, from, probe, old))
                 if (const int k = song.tempoRegionAt (old); k >= 0)
                 {
                     r.playBpm = song.tempoRegions[(size_t) k].playBpm;
                     r.transpose = song.tempoRegions[(size_t) k].transpose;
                 }
+        }
         song.analysis = generated.analysis;
         song.tempoRegions = regions;
         song.bpm = generated.bpm;

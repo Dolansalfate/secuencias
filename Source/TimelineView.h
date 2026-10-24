@@ -18,7 +18,8 @@ public:
     TimelineView();
     ~TimelineView() override;
 
-    void setSong (std::shared_ptr<LoadedSong>, double sampleRate);   // nullptr = sin canción
+    // nullptr = sin canción; keepView: la misma canción renderizada de nuevo (el zoom y el desplazamiento se quedan)
+    void setSong (std::shared_ptr<LoadedSong>, double sampleRate, bool keepView = false);
     void setLoadingText (const juce::String&);                          // texto cuando no hay canción
     void setMarkers (const std::vector<SongMarker>&, double bpm, double clickOffset);
     // Secciones de tempo en tiempo de reproducción, para la pista de tempo
@@ -39,6 +40,12 @@ public:
         juce::uint32 colour = 0;       // color propio (herramienta Color); 0 = el de la pista
         double fadeIn = 0.0, fadeOut = 0.0;   // fundidos (segundos de reproducción)
         float gainDb = 0.0f;           // ganancia del tramo
+        bool operator== (const ClipView& o) const
+        {
+            const auto same = [] (double a, double b) { return std::abs (a - b) < 1.0e-9; };
+            return same (start, o.start) && same (end, o.end) && muted == o.muted && colour == o.colour && same (fadeIn, o.fadeIn)
+                   && same (fadeOut, o.fadeOut) && same (gainDb, o.gainDb);
+        }
     };
     void setClips (const std::vector<ClipView>&);
     // Pistas con su propio arreglo (cortadas o movidas solas), en el orden de los carriles, con sus tramos en tiempo de
@@ -48,6 +55,7 @@ public:
     {
         bool own = false;
         std::vector<ClipView> clips;
+        bool operator== (const LaneClips& o) const { return own == o.own && clips == o.clips; }
     };
     void setLaneClips (const std::vector<LaneClips>&);
     void setAnalysis (const Analysis&);   // tiempos y acordes detectados (vacío = rejilla fija por BPM)
@@ -97,7 +105,6 @@ public:
     // Modo reproducción: sin edición (sin menús, sin mover marcadores ni tramos, sin tocar las pistas MIDI); clic en
     // la regla o en un carril sigue saltando, y un clic en un marcador va a él
     void setReadOnly (bool);
-    bool isReadOnly() const { return readOnly; }
     // Herramienta de los carriles, como la caja de herramientas de Cubase (ui::EditTool). En todas, Shift alcanza a
     // todas las pistas (el tramo de la canción) en vez de solo la del carril, y el clic derecho abre el menú del tramo.
     // - Objeto: clic elige el tramo (Ctrl suma o quita), arrastrar mueve los elegidos, arrastrar un borde lo recorta,
@@ -136,7 +143,6 @@ public:
     // Pista de compás y pista de tempo (las pistas globales de Cubase), sobre los carriles: desplegada (el gráfico) o
     // plegada en una fila (los compases y el tempo de cada sección en texto)
     void setTempoTrackVisible (bool expanded);
-    bool isTempoTrackVisible() const { return tempoTrackVisible; }
     void setTempoStretches (bool);   // arrastrar el tempo estira el audio (true) o solo mueve el click (false)
     bool tempoStretchesAudio() const { return tempoStretches; }
 
@@ -222,7 +228,6 @@ private:
     void updateScrollBar();
     void scrollBarMoved (juce::ScrollBar*, double newRangeStart) override;
     void seekAt (int contentX, bool scrubbing);
-    void repaintOverlay();
 
     std::shared_ptr<LoadedSong> song;
     double sampleRate = 44100.0;

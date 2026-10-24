@@ -29,6 +29,8 @@ void LevelMeter::tick()
     {
         const float peak = juce::jmax (c.newPeak, c.peak * 0.80f);      // caída rápida
         const float rms = c.rms * 0.7f + c.newRms * 0.3f;               // integración ~100 ms
+        const float holdBefore = c.hold;
+        const bool clippedBefore = c.clipped;
         if (c.newPeak >= c.hold)
         {
             c.hold = c.newPeak;
@@ -38,7 +40,9 @@ void LevelMeter::tick()
             c.hold *= 0.9f;
         if (c.newPeak >= 1.0f)
             c.clipped = true;
-        changed = changed || std::abs (peak - c.peak) > 1.0e-4f || std::abs (rms - c.rms) > 1.0e-4f;
+        // También la retención (que sigue cayendo en silencio) y el clip: si no, su línea quedaba congelada
+        changed = changed || std::abs (peak - c.peak) > 1.0e-4f || std::abs (rms - c.rms) > 1.0e-4f
+                  || std::abs (c.hold - holdBefore) > 1.0e-4f || c.clipped != clippedBefore;
         c.peak = peak;
         c.rms = rms;
         c.newPeak = 0.0f;

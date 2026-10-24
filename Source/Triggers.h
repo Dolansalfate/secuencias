@@ -35,8 +35,8 @@ struct SampleBankData
 namespace triggers
 {
     // Golpes de un buffer: envolvente en bloques de 1 ms; un golpe empieza donde el nivel sube al
-    // menos 6 dB en 3 ms y supera `thresholdDb`; después hay que bajar 6 dB desde el pico (o dejar
-    // pasar `minMs`) para admitir otro. Velocidad = posición del pico entre el umbral y 0 dBFS,
+    // menos 6 dB en 3 ms y supera `thresholdDb`; el siguiente puede empezar pasados `minMs` desde
+    // el ataque anterior. Velocidad = posición del pico entre el umbral y 0 dBFS,
     // elevada a 1/sensitivity (sensibilidad > 1 realza los golpes suaves).
     std::vector<TriggerEvent> detect (const juce::AudioBuffer<float>&, double sampleRate,
                                       double thresholdDb, double sensitivity, double minMs);

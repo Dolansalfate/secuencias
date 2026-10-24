@@ -152,14 +152,16 @@ namespace miditrack
         mt.sourceFile = stem.fileName;
         mt.muteSource = ! stem.trigger.keepAudio;
 
-        // Una fila con el sonido del trigger; hereda también su canal (volumen y salida), así la pista MIDI
-        // suena igual que el trigger que reemplaza
+        // Una fila con el sonido del trigger; hereda también su canal (volumen, silencio, salida y balance), así la
+        // pista MIDI suena igual que el trigger que reemplaza
         MidiPad pad;
         pad.name = base;
         pad.note = clampNote (stem.trigger.note);
         pad.sound = stem.trigger.sound;
         pad.gainDb = stem.trigger.gainDb;
         pad.outputPair = juce::jmax (0, stem.trigger.outputPair);
+        pad.muted = stem.trigger.muted;
+        pad.pan = stem.trigger.pan;
         mt.pads.push_back (pad);
 
         if (sampleRate > 0.0)

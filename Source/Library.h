@@ -321,7 +321,9 @@ public:
     // Separación de una canción del setlist: sus archivos de audio pasan a la subcarpeta "original"
     // y los stems de `resultFolder` (temporales propios) se mueven a la carpeta de la canción; el
     // resto (marcadores, análisis, tempo, cortes) se conserva. El nivelado por pista se reinicia.
-    bool replaceStems (int index, const juce::File& resultFolder);
+    // fromArrangement: lo separado fue la mezcla del arreglo (ya en la línea de tiempo de la canción): los tramos se
+    // quitan, si no se aplicarían dos veces
+    bool replaceStems (int index, const juce::File& resultFolder, bool fromArrangement = false);
     // Igual, pero solo una pista (por ejemplo la batería, que pasa a ser sus partes)
     bool replaceStem (int index, int stemIndex, const juce::File& resultFolder);
     int importProject (const juce::File& folder);
@@ -375,6 +377,6 @@ public:
 
 private:
     SongInfo readSong (const juce::File& folder) const;
-    bool replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder);
+    bool replaceStemFiles (int index, int onlyStem, const juce::File& resultFolder, bool fromArrangement = false);
     juce::File root;
 };

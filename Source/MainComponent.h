@@ -135,8 +135,10 @@ private:
     // Canciones
     SongInfo* currentInfo();
     void loadSongAt (int index);
+    // renderedFrom: la versión de SongInfo con que se renderizó (si cambió mientras cargaba, se vuelve a renderizar)
     void songLoaded (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> source, std::shared_ptr<LoadedSong> arranged,
-                     std::shared_ptr<SamplerSet> samplers, int generation, const juce::String& error);
+                     std::shared_ptr<SamplerSet> samplers, int generation, const juce::String& error,
+                     const SongInfo* renderedFrom = nullptr);
     void saveCurrentMix();
     void markSongDirty();
     void unloadSong();
@@ -156,6 +158,7 @@ private:
         std::shared_ptr<SamplerSet> samplers;
         juce::String error;
         double sourceSeconds = 0.0, arrangedSeconds = 0.0;
+        SongInfo info;                                  // con qué se armó (arreglo, tempo, triggers)
     };
     LoadParts loadParts (const SongInfo&, double sampleRate, const juce::File& banksDir, const std::function<bool()>& abort,
                          const std::function<void()>& onStretch, const juce::String& cacheKey);
@@ -197,6 +200,9 @@ private:
     juce::String preloadingFolder;              // la que se está precargando (una a la vez)
     std::set<juce::String> failedPreloads;      // claves que no se pudieron cargar (no se reintentan solas)
     std::map<juce::String, double> estimatedSeconds;   // largo estimado por clave (antes de precargarla)
+    // Clave de cada canción para mostrar su duración (se pinta en cada fila): se recuerda un segundo, así un repintado
+    // no consulta los archivos de todas las pistas
+    mutable std::map<juce::String, std::pair<juce::uint32, juce::String>> displayKeys;
     bool durationsPending = false;
     std::atomic<int> preloadGeneration { 0 };
     bool currentFromPreload = false;            // lo que suena salió de la precarga (sin la fuente ni el arreglo aparte)
@@ -247,7 +253,6 @@ private:
     juce::String analysisPythonPath() const;
 
     // Tempo y tono (fase 3): el motor reproduce una versión renderizada de la canción original
-    void rebuildTimeMap();                         // mapa de la versión que está sonando
     std::vector<SongMarker> mappedMarkers() const;     // marcadores en tiempo de reproducción
     Analysis mappedAnalysis() const;               // tiempos y acordes en tiempo de reproducción
     std::vector<TimelineView::TempoBand> mappedTempoBands() const;   // secciones de tempo en tiempo de reproducción
@@ -258,7 +263,8 @@ private:
     void requestRender();                          // con retardo, desde el Timer
     void renderTempo();
     void songRendered (std::shared_ptr<LoadedSong> rendered, std::shared_ptr<LoadedSong> arranged, TimeMap, int transpose,
-                       std::vector<Clip> clips, std::vector<TrackClips> trackClips, std::shared_ptr<SamplerSet> samplers, int generation);
+                       std::vector<Clip> clips, std::vector<TrackClips> trackClips, std::vector<TriggerSettings> triggers,
+                       std::shared_ptr<SamplerSet> samplers, int generation, int loadGen);
 
     // Triggers (punto 1): golpes de las pistas que disparan bancos de muestras
     struct BankCache
@@ -269,6 +275,7 @@ private:
     static std::shared_ptr<SamplerSet> buildSamplers (LoadedSong& rendered, const SongInfo&, double sampleRate,
                                                       const juce::File& banksFolder, juce::AudioFormatManager&, BankCache&);
     static std::vector<TriggerSettings> triggersOf (const SongInfo&);
+    static bool sameRenderInputs (const SongInfo&, const SongInfo&, double arrangedSeconds);
     static juce::String triggerLabelFor (const TriggerSettings&, bool hasSound, const juce::String& instrumentName, int& mode);   // casilla del mezclador
     void refreshReplaced();   // LoadedTrack::replaced según el modo del trigger y si su sonido (banco o instrumento) existe
     void applySamplers (std::shared_ptr<SamplerSet>);   // al motor, al mezclador y a las marcas de la regla
@@ -396,6 +403,7 @@ private:
     {
         double bpm = 0.0;
         bool keepTempos = false;
+        double levelLufs = 0.0;           // el nivelado del mix también se deshace
         std::vector<MixSegment> segments;
         std::vector<Analysis> analyses;   // una por fuente (el editor puede editar los tiempos)
     };
@@ -552,6 +560,7 @@ private:
     Library library;
     Separator separator;
     Analyzer analyzer;
+    juce::File analysisFolder;                 // la canción que se está analizando (el resultado es de ella)
 
     std::shared_ptr<LoadedSong> currentSong;   // lo que suena (renderizado si hay tempo o tono)
     std::shared_ptr<LoadedSong> sourceSong;    // los archivos originales, para volver a renderizar
@@ -617,7 +626,7 @@ private:
     TimeMap timeMap;                     // original <-> reproducción de lo que suena
     bool renumberToEnd = false;          // el menú del tiempo renumera hasta el final de la canción (no solo de la sección)
     int renderedTranspose = 0;
-    int renderGeneration = 0;
+    std::atomic<int> renderGeneration { 0 };   // la lee el trabajo de render (abort) en el hilo de carga
     bool rendering = false;
     juce::int64 tempoDirtySince = 0;
     juce::File loadedFolder;             // carpeta de la canción que está en currentSong
@@ -684,6 +693,8 @@ private:
     juce::TextButton stageBtn;
     juce::File separationTarget;               // carpeta de la canción cuyas pistas reemplazará la separación en curso (vacío = canción nueva)
     int separationStemIndex = -1;              // >= 0: solo esa pista (la batería) se reemplaza por el resultado
+    bool separationArranged = false;           // se separó la mezcla del arreglo (no el archivo original)
+    juce::File reloadWhenStopped;              // canción con pistas nuevas que sonaba al terminar de separar: se recarga al detenerla
     ClipClipboard clipboard;
 
     std::atomic<bool> abortJobs { false };
@@ -693,6 +704,7 @@ private:
     juce::ThreadPool mixSongPool { 1 };  // pistas de canciones ligadas a un mix (no demoran la carga de otras canciones)
     juce::ThreadPool exportPool { 1 };   // exportar la mezcla (el motor sale del dispositivo mientras tanto)
     juce::ThreadPool preloadPool { 1 };  // modo reproducción: precarga de las canciones del show y sus duraciones
+    juce::ThreadPool cachePool { 1 };    // caché en disco: escribir lo estirado sin demorar la canción que se pidió
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
